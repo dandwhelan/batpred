@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Car charging planning - Predbat Documentation</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Car charging planning";
+        var mkdocs_page_input_path = "car-charge-planning.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Predbat Documentation
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../what-does-predbat-do/">What does Predbat do?</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Installing & configuring Predbat</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../installation-summary/">Install summary</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../install/">Install details</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../energy-rates/">Energy rates</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../apps-yaml/">apps.yaml settings</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">Car charging planning</a>
+    <ul class="current">
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../configuration-guide/">Configuration guide</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../customisation/">Customisation</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../video-guides/">Video Guides</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../faq/">FAQ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../devices/">Support 3rd party devices/integrations</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Viewing Predbat data</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../output-data/">Output data</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../predbat-plan-card/">Predbat Plan card</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../creating-charts/">Creating the charts</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Predbat development</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../other-inverters/">Other Inverters</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../todo-list/">To-do list</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../developing/">Developing on Predbat</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Predbat Documentation</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Installing & configuring Predbat</li>
+      <li class="breadcrumb-item active">Car charging planning</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="car-charging-planning">Car charging planning</h1>
+<p>There are two ways to plan car charging slots:</p>
+<ul>
+<li>
+<p>If you have Intelligent Octopus import tariff and the Octopus Energy integration - in which case Predbat will use the slots allocated by Octopus Energy in battery prediction.
+The <a href="https://bottlecapdave.github.io/HomeAssistant-OctopusEnergy/entities/intelligent/">Octopus Energy integration supports Octopus Intelligent</a>,
+and through that Predbat gets most of the information it needs.</p>
+<ul>
+<li><strong>octopus_intelligent_slot</strong> in <code>apps.yaml</code> is pre-configured with a regular expression to point to the Intelligent Slot sensor in the Octopus Energy integration.
+You should not need to change this, but its worth checking the <a href="../output-data/#predbat-logfile">Predbat logfile</a> to confirm that it has found your Octopus account details</li>
+<li>Set <strong>switch.predbat_octopus_intelligent_charging</strong> to True</li>
+<li>Information about the car's battery size will be automatically extracted from the Octopus Energy integration</li>
+<li>You should set the cars current soc sensor, <strong>car_charging_soc</strong> in <code>apps.yaml</code> to point to a sensor that specifies the car's current % charge level to have accurate results.
+This should normally be a sensor provided by your car charger. If you don't have this available for your charger then Predbat will assume the charge level is 0%.</li>
+<li>If you set <strong>car_charging_limit</strong> in <code>apps.yaml</code> then Predbat can also know if the car's limit is set lower than in Intelligent Octopus.
+If you don't set this Predbat will default to 100%.</li>
+<li>You can use <strong>car_charging_now</strong> as a workaround to indicate your car is charging but the Intelligent API hasn't reported it.</li>
+<li>Let the Octopus app control when your car charges</li>
+</ul>
+</li>
+<li>
+<p>Predbat-led charging - Here Predbat plans the charging based on the upcoming low rate slots</p>
+<ul>
+<li>Ensure <strong>car_charging_limit</strong>, <strong>car_charging_soc</strong> and <strong>car_charging_planned</strong> are set correctly in <code>apps.yaml</code></li>
+<li>Set <strong>select.predbat_car_charging_plan_time</strong> in Home Assistant to the time you want the car ready by</li>
+<li>Enable <strong>switch.predbat_car_charging_plan_smart</strong> if you want to use the cheapest slots only.
+If you leave this disabled then all low rate slots will be used. This may mean you need to use expert mode and change your low rate
+threshold to configure which slots should be considered if you have a tariff with more than 2 import rates (e.g. flux)</li>
+<li>Use an automation based on <strong>binary_sensor.predbat_car_charging_slot</strong> to control when your car charges</li>
+<li><em>WARNING: Do not set <strong>car_charging_now</strong> or you will create a circular dependency.</em></li>
+</ul>
+</li>
+</ul>
+<p>NOTE: Multiple cars can be planned with Predbat.</p>
+<p>See <a href="../apps-yaml/#car-charging-filtering">Car charging filtering</a> and <a href="../apps-yaml/#planned-car-charging">Planned car charging</a>
+in the <a href="../apps-yaml/">apps.yaml settings</a> section of the documentation.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../apps-yaml/" class="btn btn-neutral float-left" title="apps.yaml settings"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../configuration-guide/" class="btn btn-neutral float-right" title="Configuration guide">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../apps-yaml/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../configuration-guide/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
