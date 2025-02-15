@@ -15,7 +15,7 @@ to edit the `apps.yaml` file - see [editing configuration files within Home Assi
 
 This section of the documentation describes what the different configuration items in `apps.yaml` do.
 
-When you edit `apps.yaml`, the change will automatically be detected and Predbat will be reloaded with the updated file.
+When you edit `apps.yaml`, the change is automatically detected, and Predbat is reloaded with the updated file.
 You don't need to restart the Predbat or AppDaemon add-on for your edits to take effect.
 
 ## Warning! apps.yaml file format
@@ -24,13 +24,13 @@ When editing the `apps.yaml` file you must ensure that the file remains correctl
 and it's very easy to end up with an incorrectly formatted file that will cause problems for Predbat.
 
 The [YAML Basics from This Smart Home](https://www.youtube.com/watch?v=nETF43QJebA) is a good introduction video to how YAML should be correctly structured but as a brief introduction,
-YAML files consist of an entity name, colon then the entity value, for example:
+YAML files consist of an entity name, colon, and then the entity value, for example:
 
 ```yaml
 timezone: Europe/London
 ```
 
-Or the entity can be set to a list of values with each value being on a new line, two spaces, a dash, and then the value.  For example:
+The entity can also be set to a list of values, with each value being on a new line, two spaces, a dash, and then the value.  For example:
 
 ```yaml
 car_charging_now_response:
@@ -125,11 +125,11 @@ ha_key: 'xxxxxxxxxxx'
 ![image](https://github.com/springfall2008/batpred/assets/48591903/da5916ce-4630-49b4-a265-81e8e010ff86)
 
 *TIP:* You can replace *homeassistant.local* with the IP address of your Home Assistant server if you have it set to a fixed IP address.
-This will remove the need for a DNS lookup of the IP address every time Predbat talks to Home Assistant and may improve reliability as a result.
+This will remove the need for a DNS lookup of the IP address every time Predbat talks to Home Assistant and may improve reliability.
 
 ### threads
 
-If defined sets the number of threads to use during plan calculation, the default is 'auto' which will use the same number of threads as you have CPUs in your system.
+If defined sets the number of threads to use during plan calculation, the default is 'auto,' which will use the same number of threads as your system's CPUs.
 
 Valid values are:
 
@@ -141,9 +141,13 @@ Valid values are:
 threads: auto
 ```
 
-## Web interface
+## Web interface Port Change
 
 Docker users can change the web port by setting **web_port** to a new port number, the default of 5052 must always be used for the Predbat add-on.
+
+```yaml
+web_port: 'port number'
+```
 
 ### notify_devices
 
@@ -156,7 +160,7 @@ notify_devices:
 
 ### days_previous
 
-Predbat needs to know what your likely future house load will be to set and manage the battery level to support it.
+Predbat needs to know your likely future house load will be to set and manage the battery level to support it.
 days_previous defines a list (which has to be entered as one entry per line) of the previous days of historical house load that are to be used to predict your future daily load.<BR>
 It's recommended that you set days_previous so Predbat calculates an average house load using sufficient days' history so that 'unusual' load activity
 (e.g. saving sessions, "big washing day", etc) get averaged out.
@@ -256,7 +260,7 @@ GivTCP version 3 is required for multiple AIOs or a 3-phase inverter.
 ## Historical data
 
 Predbat can either get historical data (house load, import, export and PV generation) directly from GivTCP or it can obtain it from the GivEnergy cloud.
-Unless you have a specific reason to not use the GivTCP data (e.g. you've lost your GivTCP data), its recommended to use GivTCP.
+It's recommended that you use GivTCP unless you have a specific reason not to (e.g., you've lost your GivTCP data).
 
 ### Data from Home Assistant
 
@@ -279,7 +283,7 @@ If you don't have any PV panels, comment or delete this line out of apps.yaml.
 
 See the [Workarounds](#workarounds) section below for configuration settings for scaling these if required.
 
-If you have multiple inverters then you may find that the load_today figures are incorrect as the inverters share the house load between them.
+If you have multiple inverters, then you may find that the load_today figures are incorrect, as the inverters share the house load between them.
 In this circumstance, one solution is to create a Home Assistant template helper to calculate house load from {pv generation}+{battery discharge}-{battery charge}+{import}-{export}.
 
 e.g.
@@ -402,7 +406,7 @@ or
 
 or
 
-- **soc_percent** Entity name of the battery SOC in percent of the maximum battery size, should be the inverter one not an individual battery
+- **soc_percent** Entity name of the battery SOC in percent of the maximum battery size, should be the inverter one, not an individual battery
 
 #### Inverter info  
 
@@ -436,12 +440,12 @@ For GivEnergy inverters Predbat can control the inverter directly via REST inste
 When configured in apps.yaml, control communication from Predbat to GivTCP is via REST which bypasses some issues with MQTT.
 
 - **givtcp_rest** - One entry per Inverter, sets the GivTCP REST API URL ([http://homeassistant.local:6345](http://homeassistant.local:6345)
-is the normal address and port for the first inverter, and the same address but ending :6346 if you have a second inverter - if you don't have a second inverter
+is the normal address and port for the first inverter, and the same address but ending:6346 if you have a second inverter - if you don't have a second inverter
 (or if you have multiple AIO's that are controlled through the gateway), delete the second line.<BR>
 If you are using Docker then change 'homeassistant.local' to the Docker IP address.
 
 *TIP:* You can replace *homeassistant.local* with the IP address of your Home Assistant server if you have it set to a fixed IP address.
-This may improve reliability of the REST connection as it doesn't need to lookup the HA server IP address each time.
+This may improve the reliability of the REST connection as it doesn't need to look up the HA server IP address each time.
 
 To check your REST is working open up the readData API point in a Web browser e.g: [http://homeassistant.local:6345/readData](http://homeassistant.local:6345/readData)
 
@@ -461,7 +465,7 @@ Some inverters have the Service API enabled, this allows the configuration to ca
 - **discharge_freeze_service** - If your inverter supports export freeze set to a service that starts this mode
 - **discharge_stop_service** - Should be set to a service that is called when export/export freeze stops
 
-Services that are not configuration will not be called.
+Services that are not configured will not be called.
 
 Example service is below:
 
@@ -681,10 +685,10 @@ and **input_number.predbat_car_charging_rate** will be subtracted from the histo
 
 These features allow Predbat to know when you plan to charge your car.
 
-If you have an Intelligent Octopus tariff then planning of charging is done via the Octopus app and Predbat obtains this information through the Octopus Energy integration in Home Assistant.
+If you have an Intelligent Octopus tariff, then planning of charging is done via the Octopus app, and Predbat obtains this information through the Octopus Energy integration in Home Assistant.
 
-- **switch.predbat_octopus_intelligent_charging** - When this Home Assistant switch is enabled, Predbat will plan charging around the Intelligent Octopus slots, taking
-it into account for battery load and generating the slot information
+- **switch.predbat_octopus_intelligent_charging** - When this Home Assistant switch is enabled, Predbat will plan to charge around the Intelligent Octopus slots, taking
+it into account battery load and generating the slot information
 
 The following `apps.yaml` configuration items are pre-defined with regular expressions to point to appropriate sensors in the Octopus Energy integration.
 You should not normally need to change these if you have the Octopus Intelligent tariff:
@@ -812,11 +816,11 @@ clock_skew: minutes
 ```
 
 Skews the local (computer) time that Predbat uses (from the computer that Predbat is running on).<BR>
-Set to 1 means add a minute to the Predbat computer time, set to -1 means take a minute off the Predbat computer time.
+Set to 1 means adding a minute to the Predbat computer time, and set to -1 means removing a minute from it.
 This clock adjustment will be used by Predbat when real-time actions happen e.g. triggering a charge or discharge.
 
 If your inverter's time is different to the time on the computer running Home Assistant, you may need to skew the time settings made on the inverter when you trigger charging or discharging.
-Again 1 means the inverter is 1 minute fast and -1 means the inverter is 1 minute slow.
+Again, 1 means the inverter is 1 minute fast, and -1 means the inverter is 1 minute slow.
 
 Separate start and end options are applied to the start and end time windows, mostly as you want to start battery activity late (not early) and finish early (not late).
 
@@ -890,7 +894,7 @@ AIO firmware versions refuse to be set to 100.  Comment the line out or set it t
 If the add-on that is providing the inverter control stops functioning it can prevent Predbat from functioning correctly.
 In this case, you can tell Predbat how to restart the add-on using a service.
 
-Right now only communication loss with GE inverters is detectable but in the future other systems will be supported.
+Right now, only communication loss with GE inverters is detectable, but in the future, other systems will be supported.
 
 When enabled if communication is lost then the service configured will be triggered and can cause a restart which may restart the connection.
 This may be useful with GivTCP if you have time sync errors or lose the REST service every now and again.
@@ -942,7 +946,7 @@ explains how the curve works and shows how Predbat automatically creates it.
 Setting this option to **auto** will cause the computed curve to be stored and used automatically. This is not recommended if you use low power charging mode as your
 history will eventually not contain any full power charging data to compute the curve, so in this case it's best to manually configure the charge curve in apps.yaml.
 
-NB: For Predbat to calculate your charging curve it needs to have access to historical Home Assistant data for battery_charge_rate, battery_power and soc_kw.
+NB: For Predbat to calculate your charging curve, it needs access to historical Home Assistant data for battery_charge_rate, battery_power, and soc_kw.
 These must be configured in apps.yaml to point to Home Assistant entities that have appropriate history data for your inverter/battery.
 
 If you have a GivEnergy inverter and are using the recommended default [REST mode to control your inverter](#inverter-control-configurations)
@@ -1009,7 +1013,7 @@ Your battery's maximum charge and discharge rate can be impacted by cold weather
 - Set **battery_temperature_charge_curve** to define the maximum charge rate in C which is a percentage of your battery capacity.
 - Set **battery_temperature_discharge_curve** to define the maximum discharge rate in C which is a percentage of your battery capacity.
 
-An example for GivEnergy Gen2 battery is below.
+An example of a GivEnergy Gen2 battery is below.
 
 *Note* You must adjust the curve for your system.
 gaps in the curve above 20 will use 20 degrees, and gaps below 0 will use 0 degrees. Do not leave gaps in the curve between 20 and 0.
@@ -1082,9 +1086,9 @@ You can use the trigger in an automation, for example, you could turn on an imme
 
 The triggers count export energy until the next active charge slot only.
 
-For each trigger give a name, the minutes of export needed, and the energy required in that time.
+Give each trigger a name, the minutes of export needed, and the energy required during that time.
 
-Multiple triggers can be enabled by Predbat at once so in total you could use too much energy if multiple triggered automations all run.
+Multiple triggers can be enabled by Predbat at once, so in total, you could use too much energy if multiple triggered automations all run.
 
 Each trigger specified in `apps.yaml` will create a Home Assistant entity called 'binary_sensor.predbat_export_trigger_*name*'
 which will be turned on when the predicted trigger conditions are valid.
@@ -1113,10 +1117,10 @@ It should also be recognised that this prediction could be wrong; there could be
 
 If you wish to trigger activities based on Predbat charging or discharging the battery rather than spare solar energy you can instead use the following binary sensors in Home Assistant:
 
-- **binary_sensor.predbat_charging** - Will be True when the home battery is inside a charge slot (either being charged or being held at a level).
+- **binary_sensor.predbat_charging**— This will be True when the home battery is inside a charge slot (either being charged or held at a level).
 Note that this does include charge freeze slots where the discharge rate is set to zero without charging the battery.
 
-- **binary_sensor.predbat_exporting** - Will be True when the home battery is inside a force discharge slot. This does not include
+- **binary_sensor.predbat_exporting** - This will be True when the home battery is inside a force discharge slot. This does not include
 discharge freeze slots where the charge rate is set to zero to export excess solar only.
 
 ## Understanding how days_previous works
@@ -1176,11 +1180,11 @@ So to highlight this with some edge cases, today is still Monday 3:15pm, days_pr
 so only 15 minutes of load will be predicted for tomorrow 3pm.
 - For tomorrow's (Tuesday) 3:30pm slot, Predbat looks backwards 1 day but the 3:30pm slot today hasn't yet occurred so Predbat will take the historical load from the prior day
 and has to use Sunday's 3:30pm load for tomorrow's prediction.
-- Ditto the predicted load for tomorrow's (Tuesday) 4:00pm slot comes from Sunday 4pm.
+- Ditto, the predicted load for tomorrow's (Tuesday) 4:00pm slot comes from Sunday's 4pm.
 
 As today rolls forward and Predbat keeps on updating the forward plan every 5 minutes the prediction will be updated with the correct previous_day history as and when it exists.
 
-It's recommended therefore that days_previous isn't set to 1, or if it is, that you understand the way this has to work and the consequences.
+It's recommended, therefore, that days_previous isn't set to 1, or if it is, that you understand the way this has to work and the consequences.
 If you want to set days_previous to take an average of the house load over all the days of the last week it's suggested that it be set as:
 
 ```yaml
