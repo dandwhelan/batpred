@@ -57,7 +57,7 @@ CONFIG_ITEMS = [
         "type": "update",
         "title": "Predbat",
         "installed_version": THIS_VERSION,
-        "release_url": f"https://github.com/springfall2008/batpred/releases/tag/{THIS_VERSION}",
+        "release_url": f"https://github.com/dandwhelan/batpred/releases/tag/{THIS_VERSION}",
         "entity_picture": "https://user-images.githubusercontent.com/48591903/249456079-e98a0720-d2cf-4b71-94ab-97fe09b3cee1.png",
         "restore": False,
         "default": False,

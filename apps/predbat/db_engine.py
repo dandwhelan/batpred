@@ -47,10 +47,11 @@ class DatabaseEngine:
         # Create index for fast history queries (critical for performance)
         self.db_cursor.execute("CREATE INDEX IF NOT EXISTS idx_states_entity_datetime ON states(entity_index, datetime)")
         # Delete old data from states table
+        cutoff_time = (self.base.now_utc_real - timedelta(days=self.db_days)).strftime(TIME_FORMAT_DB)
         self.db_cursor.execute(
             "DELETE FROM states WHERE datetime < ? AND keep != ?",
             (
-                self.base.now_utc_real - timedelta(days=self.db_days),
+                cutoff_time,
                 "D",
             ),
         )

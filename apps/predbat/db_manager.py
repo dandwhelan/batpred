@@ -57,7 +57,11 @@ class DatabaseManager(ComponentBase):
 
         while not self.api_stop:
             if not self.db_queue:
-                await self.async_event.wait()
+                # Use a short timeout to periodically check the queue even if event signaling fails
+                try:
+                    await asyncio.wait_for(self.async_event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass  # Timeout is expected, just continue to check the queue
                 self.async_event.clear()
                 continue
             else:
@@ -80,10 +84,10 @@ class DatabaseManager(ComponentBase):
                     self.queue_results[queue_id] = state
                     self.return_event.set()  # Notify that the result is ready
 
-                # Commit if the queue is empty and at least 5 seconds have passed since last commit
+                # Commit if the queue is empty and at least 30 seconds have passed since last commit
                 if not self.db_queue:
                     now = datetime.now(timezone.utc)
-                    if self.last_commit_time is None or (now - self.last_commit_time).total_seconds() >= 5.0:
+                    if self.last_commit_time is None or (now - self.last_commit_time).total_seconds() >= 30.0:
                         if hasattr(self.db_engine, "_commit_db"):
                             self.db_engine._commit_db()
                             self.last_commit_time = now
@@ -102,6 +106,10 @@ class DatabaseManager(ComponentBase):
         """
         Send a command to the database manager thread via IPC
         """
+        if not self.api_started:
+            self.log("Warn: IPC command '{}' sent before database manager started".format(command))
+            return None
+
         queue_id = self.queue_id
         self.queue_id += 1
         self.db_queue.append((queue_id, command, info))
@@ -110,17 +118,19 @@ class DatabaseManager(ComponentBase):
 
         if expect_response:
             count = 0.0
-            while (queue_id not in self.queue_results) and count < 15.0:
+            timeout_seconds = 30.0  # Increased from 15s to 30s for large queries
+            while (queue_id not in self.queue_results) and count < timeout_seconds:
                 self.return_event.wait(0.1)
                 if queue_id not in self.queue_results:
                     time.sleep(0.1)  # Wait a bit before checking again
-                count += 0.1
+                count += 0.2  # Account for both the wait and sleep
             if queue_id in self.queue_results:
                 result = self.queue_results[queue_id]
                 del self.queue_results[queue_id]
                 return result
             else:
-                self.log("Error: No response received for command '{}' after waiting".format(command))
+                self.log("Error: No response received for command '{}' after waiting (queue_len={}, api_started={})".format(
+                    command, len(self.db_queue), self.api_started))
                 return None
         return None
 

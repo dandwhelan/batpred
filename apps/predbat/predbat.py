@@ -27,7 +27,7 @@ import pytz
 import requests
 import asyncio
 
-THIS_VERSION = "v8.31.7"
+THIS_VERSION = "v8.31.61"
 
 # fmt: off
 PREDBAT_FILES = ["predbat.py", "hass.py", "config.py", "prediction.py", "gecloud.py", "utils.py", "inverter.py", "ha.py", "download.py", "web.py", "web_helper.py", "predheat.py", "futurerate.py", "octopus.py", "solcast.py", "execute.py", "plan.py", "fetch.py", "output.py", "userinterface.py", "energydataservice.py", "alertfeed.py", "compare.py", "db_manager.py", "db_engine.py", "plugin_system.py", "ohme.py", "components.py", "fox.py", "carbon.py", "web_mcp.py", "component_base.py", "axle.py", "unit_test.py"]
@@ -122,7 +122,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
         """
         global PREDBAT_UPDATE_OPTIONS
         auto_update = self.get_arg("auto_update")
-        url = "https://api.github.com/repos/springfall2008/batpred/releases"
+        url = "https://api.github.com/repos/dandwhelan/batpred/releases"
         data = self.download_predbat_releases_url(url)
         self.releases = {}
         if data and isinstance(data, list):
@@ -201,7 +201,10 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
             self.expose_config("version", new_version, force=True)
 
         else:
-            self.log("Warn: Unable to download Predbat version information from GitHub, return code: {}".format(data))
+            if data == []:
+                self.log("Info: No releases found on GitHub (fork may not have releases yet)")
+            else:
+                self.log("Warn: Unable to download Predbat version information from GitHub, return code: {}".format(data))
             self.expose_config("version", False, force=True)
 
         return self.releases

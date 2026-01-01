@@ -23,7 +23,7 @@ def get_github_directory_listing(tag):
     Returns:
         list: List of file metadata dicts from GitHub API, or None on failure
     """
-    url = "https://api.github.com/repos/springfall2008/batpred/contents/apps/predbat?ref={}".format(tag)
+    url = "https://api.github.com/repos/dandwhelan/batpred/contents/apps/predbat?ref={}".format(tag)
     print("Fetching directory listing from {}".format(url))
     try:
         r = requests.get(url, headers={})
@@ -79,7 +79,7 @@ def download_predbat_file_from_github(tag, filename, new_filename):
     Returns:
         str: The contents of the file
     """
-    url = "https://raw.githubusercontent.com/springfall2008/batpred/" + tag + "/apps/predbat/{}".format(filename)
+    url = "https://raw.githubusercontent.com/dandwhelan/batpred/" + tag + "/apps/predbat/{}".format(filename)
     print("Downloading {}".format(url))
     r = requests.get(url, headers={})
     if r.ok:
