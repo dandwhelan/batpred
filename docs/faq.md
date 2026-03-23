@@ -207,6 +207,7 @@ You may see warning messages in the Home Assistant Core log about the size of a 
 This is just a warning from the Home Assistant recorder, but note that Predbat entity attributes are stored in the recorder database and can take up a significant amount of space.
 The history of most of Predbat's entities isn't needed so to limit the size of the recorder database the following filters can be added to `configuration.yaml`,
 but pay attention to the [order in which inclusion and exclusion rules are applied](https://www.home-assistant.io/integrations/recorder/#configure-filter) if you have existing filters:
+
 ```yaml
 recorder:
   exclude:
@@ -249,6 +250,7 @@ recorder:
 
 When the serialized attributes payload for a Predbat entity state exceeds 16384 bytes, the recorder will not store any attributes for that state (only the state value itself is stored). States whose serialized attributes payload is below this limit are stored normally.
 You can suppress these warnings by adding the following to your `configuration.yaml` file:
+
 ```yaml
 # Filter out 'message too large' warnings from Predbat entities
 logger:
