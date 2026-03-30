@@ -38,16 +38,16 @@ import asyncio
 
 THIS_VERSION = "v8.35.2"
 
-from download import predbat_update_move, predbat_update_download, check_install
+from download import predbat_update_move, predbat_update_download, check_install, resolve_predbat_repository, DEFAULT_PREDBAT_REPOSITORY
 from const import MINUTE_WATT
 
 # Only do the self-install/self-update logic if we are NOT compiled.
 if not IS_COMPILED:
     # Sanity check the install and re-download if corrupted
-    passed, modified = check_install(THIS_VERSION)
+    passed, modified = check_install(THIS_VERSION, repository=DEFAULT_PREDBAT_REPOSITORY)
     if not passed:
         print("Warn: Predbat files are not installed correctly, trying to download them")
-        files = predbat_update_download(THIS_VERSION)
+        files = predbat_update_download(THIS_VERSION, repository=DEFAULT_PREDBAT_REPOSITORY)
         if files:
             predbat_update_move(THIS_VERSION, files)
         sys.exit(1)
@@ -93,6 +93,18 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
     Runs the main prediction/optimisation loop every 5 minutes via update_pred().
     """
 
+    def get_predbat_repository(self):
+        """Return the GitHub repository used for main-branch self-update operations.
+
+        This override is applied to ``download_predbat_version('main')`` only.
+        Release discovery and tagged-version updates remain pinned to
+        ``DEFAULT_PREDBAT_REPOSITORY``.
+        """
+        repository = self.get_arg("predbat_repository", default="", indirect=False)
+        if isinstance(repository, str):
+            repository = repository.strip()
+        return resolve_predbat_repository(repository=repository)
+
     def download_predbat_releases_url(self, url):
         """
         Download release data from GitHub, but use the cache for 2 hours
@@ -132,7 +144,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
         """
         global PREDBAT_UPDATE_OPTIONS
         auto_update = self.get_arg("auto_update")
-        url = "https://api.github.com/repos/springfall2008/batpred/releases"
+        repository = DEFAULT_PREDBAT_REPOSITORY
+        url = "https://api.github.com/repos/{}/releases".format(repository)
         data = self.download_predbat_releases_url(url)
         self.releases = {}
         if data and isinstance(data, list):
@@ -161,7 +174,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
                     self.releases["latest_beta_body"] = release.get("body", "Unknown")
                     found_latest_beta = True
 
-            self.log("Predbat {} version {} currently running, latest version is {}, latest beta is {}".format(__file__, self.releases["this"], self.releases["latest"], self.releases["latest_beta"]))
+            self.log("Predbat {} repository {} version {} currently running, latest version is {}, latest beta is {}".format(__file__, repository, self.releases["this"], self.releases["latest"], self.releases["latest_beta"]))
             PREDBAT_UPDATE_OPTIONS = ["main"]
             this_tag = THIS_VERSION
             new_version = False
@@ -1126,10 +1139,16 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
             self.log("Warn: Predbat update requested for the same version as we are running ({}), no update required".format(version))
             return
 
-        self.log("Update Predbat to version {}".format(version))
+        selected_tag = version.split(" ")[0] if version else ""
+        if selected_tag == "main":
+            repository = self.get_predbat_repository()
+        else:
+            repository = DEFAULT_PREDBAT_REPOSITORY
+
+        self.log("Update Predbat to version {} from repository {}".format(version, repository))
         self.expose_config("version", True, force=True, in_progress=True)
 
-        files = predbat_update_download(version)
+        files = predbat_update_download(version, repository=repository)
         if files:
             # Notify before killing threads so the WebSocket is still healthy
             if self.get_arg("set_system_notify"):
