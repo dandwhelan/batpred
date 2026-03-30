@@ -48,9 +48,11 @@ def test_find_charge_window(my_predbat):
     high_rate = 20.0
     thresh_lo = 10.0   # threshold for charge (find_high=False)
     thresh_hi = 15.0   # threshold for export (find_high=True)
-    scan_end = my_predbat.forecast_minutes + my_predbat.minutes_now + 12 * 60
 
-    # Preserve settings we may temporarily change
+    # Preserve ALL settings we may temporarily change, and set known baselines
+    # so the test is independent of whatever previous tests may have modified.
+    old_forecast_minutes = my_predbat.forecast_minutes
+    old_minutes_now = my_predbat.minutes_now
     old_combine_charge = my_predbat.combine_charge_slots
     old_combine_export = my_predbat.combine_export_slots
     old_combine_thresh = my_predbat.combine_rate_threshold
@@ -59,9 +61,13 @@ def test_find_charge_window(my_predbat):
     old_export_slot_split = my_predbat.export_slot_split
     old_plan_interval = my_predbat.plan_interval_minutes
 
-    # Tests use combine_*=True by default (inherited from test infra) unless overridden per test
+    # Fix known-good baseline values
+    my_predbat.forecast_minutes = 24 * 60
+    my_predbat.minutes_now = 12 * 60
     my_predbat.combine_charge_slots = True
     my_predbat.combine_export_slots = True
+
+    scan_end = my_predbat.forecast_minutes + my_predbat.minutes_now + 12 * 60
 
     # -----------------------------------------------------------------------
     # Test: no rates → no window found
@@ -300,6 +306,8 @@ def test_find_charge_window(my_predbat):
         failed = 1
 
     # Restore all settings
+    my_predbat.forecast_minutes = old_forecast_minutes
+    my_predbat.minutes_now = old_minutes_now
     my_predbat.combine_charge_slots = old_combine_charge
     my_predbat.combine_export_slots = old_combine_export
     my_predbat.combine_rate_threshold = old_combine_thresh
