@@ -220,7 +220,7 @@ def test_adjust_charge_window(
     return failed
 
 
-def test_adjust_reserve(test_name, ha, inv, dummy_rest, prev_reserve, reserve, expect_reserve=None, reserve_min=4, reserve_max=100):
+def test_adjust_reserve(test_name, ha, inv, dummy_rest, prev_reserve, reserve, expect_reserve=None, reserve_min=4, reserve_max=100, reserve_percent=None):
     """
     Test
        inv.adjust_reserve(self, reserve):
@@ -229,7 +229,12 @@ def test_adjust_reserve(test_name, ha, inv, dummy_rest, prev_reserve, reserve, e
     if expect_reserve is None:
         expect_reserve = reserve
 
-    inv.reserve_percent = reserve_min
+    # reserve_percent simulates the current planning floor (may differ from reserve_min for
+    # inverters where inv_has_reserve_soc is False, e.g. SolisCloud where the sensor can be "stuck" high)
+    if reserve_percent is None:
+        reserve_percent = reserve_min
+    inv.reserve_percent = reserve_percent
+    inv.reserve_min = reserve_min
     inv.reserve_max = reserve_max
 
     print("Test: {}".format(test_name))
@@ -1653,6 +1658,10 @@ def run_inverter_tests(my_predbat_dummy):
     failed |= test_adjust_reserve("adjust_reserve3", ha, inv, dummy_rest, 20, 100, reserve_max=100)
     failed |= test_adjust_reserve("adjust_reserve4", ha, inv, dummy_rest, 20, 100, 98, reserve_min=4, reserve_max=98)
     failed |= test_adjust_reserve("adjust_reserve5", ha, inv, dummy_rest, 50, 0, 0, reserve_min=0, reserve_max=100)
+    # Test SolisCloud "sticky reserve" bug fix: reserve_percent is elevated (80%) but reserve_min is low (4%).
+    # adjust_reserve(0) must clamp to reserve_min (4%), not to reserve_percent (80%).
+    failed |= test_adjust_reserve("adjust_reserve6_sticky_reserve", ha, inv, dummy_rest, 80, 0, 4, reserve_min=4, reserve_max=100, reserve_percent=80)
+    failed |= test_adjust_reserve("adjust_reserve7_sticky_reserve_custom_min", ha, inv, dummy_rest, 80, 0, 11, reserve_min=11, reserve_max=100, reserve_percent=80)
     if failed:
         return failed
 
