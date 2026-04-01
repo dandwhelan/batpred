@@ -35,7 +35,14 @@ def resolve_predbat_repository(repository=None):
         repository = repository.strip()
         if repository:
             return repository
-    return os.environ.get("PREDBAT_REPOSITORY", DEFAULT_PREDBAT_REPOSITORY).strip()
+
+    env_repository = os.environ.get("PREDBAT_REPOSITORY")
+    if env_repository is not None:
+        env_repository = env_repository.strip()
+        if env_repository:
+            return env_repository
+
+    return DEFAULT_PREDBAT_REPOSITORY
 
 
 def get_github_directory_listing(tag, repository=None):

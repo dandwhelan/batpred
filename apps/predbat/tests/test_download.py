@@ -49,6 +49,7 @@ def test_download(my_predbat):
     sub_tests = [
         ("resolve_repo_default", _test_resolve_predbat_repository_default, "Repository resolver falls back to upstream default"),
         ("resolve_repo_env", _test_resolve_predbat_repository_env_override, "Repository resolver honours PREDBAT_REPOSITORY env var"),
+        ("resolve_repo_env_empty", _test_resolve_predbat_repository_env_empty_falls_back_default, "Repository resolver ignores empty/whitespace PREDBAT_REPOSITORY"),
         ("resolve_repo_explicit", _test_resolve_predbat_repository_explicit_overrides_env, "Repository resolver explicit arg overrides env var"),
         ("github_listing_success", _test_get_github_directory_listing_success, "GitHub directory listing success"),
         ("github_listing_failure", _test_get_github_directory_listing_failure, "GitHub API failure (404)"),
@@ -138,6 +139,15 @@ def _test_resolve_predbat_repository_env_override(my_predbat):
     with patch.dict("download.os.environ", {"PREDBAT_REPOSITORY": env_repo}, clear=True):
         repository = resolve_predbat_repository()
         assert repository == env_repo
+    return 0
+
+
+def _test_resolve_predbat_repository_env_empty_falls_back_default(my_predbat):
+    """Test empty/whitespace PREDBAT_REPOSITORY values fall back to upstream default."""
+    for env_value in ["", "   ", "\t\n"]:
+        with patch.dict("download.os.environ", {"PREDBAT_REPOSITORY": env_value}, clear=True):
+            repository = resolve_predbat_repository()
+            assert repository == DEFAULT_PREDBAT_REPOSITORY
     return 0
 
 
