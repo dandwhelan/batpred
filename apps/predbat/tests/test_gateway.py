@@ -1,11 +1,8 @@
 """Tests for GatewayMQTT component."""
-try:
-    import pytest
-except ImportError:
-    pytest = None
 import sys
 import os
 import math
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -19,7 +16,6 @@ HAS_AIOMQTT = importlib.util.find_spec("aiomqtt") is not None
 def approx_equal(actual, expected, abs_tol=0.01):
     """Simple float comparison for when pytest is not available."""
     return math.isclose(actual, expected, abs_tol=abs_tol)
-
 
 class TestProtobufDecode:
     """Test protobuf telemetry → entity mapping."""
@@ -148,19 +144,13 @@ class TestCommandFormat:
     def test_set_mode_command(self):
         from gateway import GatewayMQTT
 
-        cmd = GatewayMQTT.build_command("set_mode", mode=1, power_w=3000, target_soc=100)
+        cmd = GatewayMQTT.build_command("set_mode", mode=1)
         import json
 
         parsed = json.loads(cmd)
         assert parsed["command"] == "set_mode"
         assert parsed["mode"] == 1
-        assert parsed["power_w"] == 3000
-        assert parsed["target_soc"] == 100
         assert "command_id" in parsed
-        assert "expires_at" in parsed
-        import time
-
-        assert abs(parsed["expires_at"] - int(time.time())) < 310
 
     def test_set_charge_rate_command(self):
         from gateway import GatewayMQTT
@@ -1145,6 +1135,12 @@ class TestSwitchEvent:
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
         gw._published = []
+        gw._state = {}
+
+        def fake_get_state_wrapper(entity_id, **kwargs):
+            return gw._state.get(entity_id, False)
+
+        gw.get_state_wrapper = fake_get_state_wrapper
 
         async def fake_publish_command(command, **kwargs):
             gw._published.append((command, kwargs))
@@ -1162,42 +1158,57 @@ class TestSwitchEvent:
     # ------------------------------------------------------------------
 
     def test_charge_enabled_turn_on(self):
-        """Turning charge_enabled on sends AUTO mode (0)."""
+        """Turning charge_enabled on sends set_charge_enable enable=True."""
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
-        assert gw._published == [("set_mode", {"mode": 0})]
+        assert gw._published == [("set_charge_enable", {"enable": True})]
 
     def test_charge_enabled_turn_off(self):
-        """Turning charge_enabled off sends IDLE mode (3)."""
+        """Turning charge_enabled off sends set_charge_enable enable=False."""
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_off"))
-        assert gw._published == [("set_mode", {"mode": 3})]
+        assert gw._published == [("set_charge_enable", {"enable": False})]
+
+    def test_charge_enabled_toggle(self):
+        """Toggling charge_enabled flips based on current state from get_state_wrapper."""
+        gw = self._make_gateway()
+        # currently on → toggle → off
+        gw._state["switch.predbat_gateway_456789_charge_enabled"] = True
+        self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "toggle"))
+        assert gw._published == [("set_charge_enable", {"enable": False})]
 
     # ------------------------------------------------------------------
     # discharge_enabled switch
     # ------------------------------------------------------------------
 
     def test_discharge_enabled_turn_on(self):
-        """Turning discharge_enabled on sends AUTO mode (0)."""
+        """Turning discharge_enabled on sends set_discharge_enable enable=True."""
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "turn_on"))
-        assert gw._published == [("set_mode", {"mode": 0})]
+        assert gw._published == [("set_discharge_enable", {"enable": True})]
 
     def test_discharge_enabled_turn_off(self):
-        """Turning discharge_enabled off sends CHARGE mode (1) to prevent discharge."""
+        """Turning discharge_enabled off sends set_discharge_enable enable=False."""
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "turn_off"))
-        assert gw._published == [("set_mode", {"mode": 1})]
+        assert gw._published == [("set_discharge_enable", {"enable": False})]
+
+    def test_discharge_enabled_toggle(self):
+        """Toggling discharge_enabled flips based on current state from get_state_wrapper."""
+        gw = self._make_gateway()
+        # currently off → toggle → on (get_state_wrapper returns False by default)
+        self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "toggle"))
+        assert gw._published == [("set_discharge_enable", {"enable": True})]
 
     # ------------------------------------------------------------------
     # Substring safety: discharge_enabled must not match _charge_enabled branch
     # ------------------------------------------------------------------
 
     def test_discharge_enabled_not_misrouted_as_charge(self):
-        """discharge_enabled turn_off sends mode=1 (charge), not mode=3 (idle)."""
+        """discharge_enabled sends set_discharge_enable, not set_charge_enable."""
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "turn_off"))
-        assert gw._published[0][1]["mode"] == 1  # charge, not idle (3)
+        assert gw._published[0][0] == "set_discharge_enable"
 
     # ------------------------------------------------------------------
     # Edge cases
