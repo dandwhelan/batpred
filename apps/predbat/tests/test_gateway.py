@@ -914,7 +914,6 @@ class TestAutomaticConfig:
         # idle_*_time should have one entry per inverter (1 in this case)
         assert len(gw._args["idle_start_time"]) == 1
         assert len(gw._args["idle_end_time"]) == 1
-        suffix = "em1234"  # last 6 of "EM123456" lower-cased — actually "123456"
         assert "discharge_slot1_start" in gw._args["idle_start_time"][0]
         assert "discharge_slot1_end" in gw._args["idle_end_time"][0]
 
