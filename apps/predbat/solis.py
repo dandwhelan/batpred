@@ -2744,8 +2744,7 @@ class SolisAPI(ComponentBase):
         new_mode = current_mode | (1 << SOLIS_BIT_BACKUP_MODE)
         await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
         await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_RESERVE_SOC, "5", field_description=f"Write reserve SOC to 5%")
-        new_mode = current_mode & ~(1 << SOLIS_BIT_BACKUP_MODE)
-        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
+        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(current_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
 
     async def run(self, seconds, first):
         """Main run cycle called every 5 seconds"""
