@@ -52,7 +52,7 @@ _TELEMETRY_STALE_THRESHOLD = 120
 
 # Time options for schedule select entities (HH:MM:SS, one per minute across 24 h)
 _GATEWAY_BASE_TIME = datetime.datetime.strptime("00:00", "%H:%M")
-_GATEWAY_OPTIONS_TIME = [(_GATEWAY_BASE_TIME + datetime.timedelta(seconds=m * 60)).strftime("%H:%M:%S") for m in range(0, 24 * 60)]
+_GATEWAY_OPTIONS_TIME = [(_GATEWAY_BASE_TIME + datetime.timedelta(seconds=m * 60)).strftime("%H:%M:%S") for m in range(0, 24 * 60, 5)]
 
 
 # Operating mode selector (0=AUTO, 1=MANUAL; higher values reserved)
