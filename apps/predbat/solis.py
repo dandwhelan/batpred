@@ -2736,6 +2736,17 @@ class SolisAPI(ComponentBase):
 
     # ==================== Component Lifecycle ====================
 
+    async def startup_reset_registers(self, device_sn):
+        """
+        Reset the startup registers for the given device serial number.
+        """
+        current_mode = self.get_current_solis_mode_value(device_sn)
+        new_mode = current_mode | (1 << SOLIS_BIT_BACKUP_MODE)
+        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
+        await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_RESERVE_SOC, "5", field_description="Test write reserve SOC to 5%")
+        new_mode = current_mode & ~(1 << SOLIS_BIT_BACKUP_MODE)
+        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
+
     async def run(self, seconds, first):
         """Main run cycle called every 5 seconds"""
         poll_success = True
@@ -2780,6 +2791,7 @@ class SolisAPI(ComponentBase):
                     self.log(f"Solis API: Inverter {sn} is in Time of Use V2 mode")
                 else:
                     self.log(f"Solis API: Inverter {sn} is in standard Time of Use mode")
+                await self.startup_reset_registers(sn)  # Reset registers on startup to ensure we have write access and correct initial state
 
             if not self.inverter_sn:
                 self.log("Error: Solis API: No inverters to manage after discovery")
@@ -2892,8 +2904,8 @@ class MockBase:  # pragma: no cover
             print(f"  Attributes: {json.dumps(attributes, indent=2)}")
         self.set_state_wrapper(entity_id, state, attributes)
 
-    def get_arg(self, key, default=None):
-        return self.args.get(key, default)
+    def get_arg(self, arg, default=None, indirect=True, combine=False, attribute=None, index=None, domain=None, can_override=True, required_unit=None):
+        return self.args.get(arg, default)
 
     def set_arg(self, key, value):
         self.args[key] = value
@@ -2928,9 +2940,15 @@ async def test_solis_api(key_id, secret):  # pragma: no cover
     print("Calling run() once...")
     await solis_api.run(seconds=0, first=True)
     for device_sn, values in solis_api.cached_values.items():
-         await solis_api.set_storage_mode_if_needed(device_sn, "Feed-in priority")
-         await solis_api.set_storage_mode_if_needed(device_sn, "Self-Use")
-    #    await solis_api.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_RESERVE_SOC, "12", field_description="Test write reserve SOC to 12%")
+        pass  # Just print the cached values for inspection
+        #await solis_api.set_storage_mode_if_needed(device_sn, "Feed-in priority")
+        #await solis_api.set_storage_mode_if_needed(device_sn, "Self-Use")
+        #current_mode = solis_api.get_current_solis_mode_value(device_sn)
+        #new_mode = current_mode | (1 << SOLIS_BIT_BACKUP_MODE)
+        #await solis_api.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
+        #await solis_api.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_RESERVE_SOC, "5", field_description="Test write reserve SOC to 5%")
+        #new_mode = current_mode & ~(1 << SOLIS_BIT_BACKUP_MODE)
+        #await solis_api.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
     print("Run completed successfully")
 
     await solis_api.final()
