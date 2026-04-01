@@ -2,7 +2,6 @@
 import sys
 import os
 import math
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -16,6 +15,7 @@ HAS_AIOMQTT = importlib.util.find_spec("aiomqtt") is not None
 def approx_equal(actual, expected, abs_tol=0.01):
     """Simple float comparison for when pytest is not available."""
     return math.isclose(actual, expected, abs_tol=abs_tol)
+
 
 class TestProtobufDecode:
     """Test protobuf telemetry → entity mapping."""
