@@ -57,7 +57,7 @@ message InverterData {
 }
 
 message ControlStatus {
-  uint32 mode               = 1;  // OperatingMode enum (0=auto,1=charge,2=discharge,3=idle)
+  uint32 mode               = 1;  // Plan Mode enum (0=auto,1=charge,2=discharge)
   bool   charge_enabled     = 2;
   bool   discharge_enabled  = 3;
   uint32 charge_rate_w      = 4;

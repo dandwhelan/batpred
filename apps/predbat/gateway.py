@@ -54,10 +54,15 @@ _TELEMETRY_STALE_THRESHOLD = 120
 _GATEWAY_BASE_TIME = datetime.datetime.strptime("00:00", "%H:%M")
 _GATEWAY_OPTIONS_TIME = [(_GATEWAY_BASE_TIME + datetime.timedelta(seconds=m * 60)).strftime("%H:%M:%S") for m in range(0, 24 * 60)]
 
-GATEWAY_MODE_AUTO = 0
-GATEWAY_MODE_CHARGE = 1
-GATEWAY_MODE_DISCHARGE = 2
-GATEWAY_MODE_IDLE = 3
+
+# Operating mode selector (0=AUTO, 1=MANUAL; higher values reserved)
+GATEWAY_OPERATING_MODE_NAMES = {0: "AUTO", 1: "MANUAL"}
+GATEWAY_OPERATING_MODE_VALUES = {"AUTO": 0, "MANUAL": 1}
+GATEWAY_OPERATING_MODE_OPTIONS = ["AUTO", "MANUAL"]
+
+PLAN_MODE_AUTO = 0
+PLAN_MODE_CHARGE = 1
+PLAN_MODE_DISCHARGE = 2
 
 # Entity attribute table — keyed by the semantic suffix used in dashboard_item calls
 GATEWAY_ATTRIBUTE_TABLE = {
@@ -95,6 +100,8 @@ GATEWAY_ATTRIBUTE_TABLE = {
     # Control switches
     "charge_enabled": {"friendly_name": "Charge Enabled", "icon": "mdi:battery-plus"},
     "discharge_enabled": {"friendly_name": "Discharge Enabled", "icon": "mdi:battery-minus"},
+    # Operating mode selector
+    "mode_select": {"friendly_name": "Operating Mode", "icon": "mdi:cog", "options": GATEWAY_OPERATING_MODE_OPTIONS},
     # Control numbers
     "charge_rate": {"friendly_name": "Charge Rate", "icon": "mdi:battery-plus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
     "discharge_rate": {"friendly_name": "Discharge Rate", "icon": "mdi:battery-minus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
@@ -209,7 +216,7 @@ class GatewayMQTT(ComponentBase):
                     "start_minute": start_minute,
                     "end_hour": end_hour,
                     "end_minute": end_minute,
-                    "mode": GATEWAY_MODE_CHARGE,  # charge
+                    "mode": PLAN_MODE_CHARGE,  # charge
                     "power_w": charge_rate_w,
                     "target_soc": int(limit),
                     "days_of_week": 0x7F,
@@ -240,7 +247,7 @@ class GatewayMQTT(ComponentBase):
                     "start_minute": start_minute,
                     "end_hour": end_hour,
                     "end_minute": end_minute,
-                    "mode": GATEWAY_MODE_DISCHARGE,  # discharge
+                    "mode": PLAN_MODE_DISCHARGE,  # discharge
                     "power_w": discharge_rate_w,
                     "target_soc": int(limit),
                     "days_of_week": 0x7F,
@@ -464,10 +471,10 @@ class GatewayMQTT(ComponentBase):
         if status.timestamp > 0 and len(status.inverters) > 0:
             primary_inv = next((inv for inv in status.inverters if inv.primary), status.inverters[0])
             ts_suffix = primary_inv.serial[-6:].lower() if len(primary_inv.serial) > 6 else primary_inv.serial.lower()
-            dt = datetime.datetime.fromtimestamp(status.timestamp)
+            dt = datetime.datetime.fromtimestamp(status.timestamp, tz=datetime.timezone.utc)
             self.dashboard_item(
                 f"sensor.{self.prefix}_gateway_{ts_suffix}_inverter_time",
-                dt.strftime("%Y-%m-%d %H:%M:%S"),
+                dt.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_time", {}),
                 app="gateway",
             )
@@ -536,12 +543,14 @@ class GatewayMQTT(ComponentBase):
             self.dashboard_item(f"sensor.{pfx}_inverter_temperature", inv.inverter.temperature_c, attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_temperature", {}), app="gateway")
 
         control = inv.control
-        self.dashboard_item(f"switch.{pfx}_charge_enabled", control.charge_enabled, attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_enabled", {}), app="gateway")
-        self.dashboard_item(f"switch.{pfx}_discharge_enabled", control.discharge_enabled, attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_enabled", {}), app="gateway")
+        self.dashboard_item(f"switch.{pfx}_charge_enabled", "on" if control.charge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_enabled", {}), app="gateway")
+        self.dashboard_item(f"switch.{pfx}_discharge_enabled", "on" if control.discharge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_enabled", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_charge_rate", control.charge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_discharge_rate", control.discharge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_reserve_soc", control.reserve_soc, attributes=GATEWAY_ATTRIBUTE_TABLE.get("reserve_soc", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_target_soc", control.target_soc, attributes=GATEWAY_ATTRIBUTE_TABLE.get("target_soc", {}), app="gateway")
+        mode_name = GATEWAY_OPERATING_MODE_NAMES.get(getattr(control, "mode", 0), "AUTO")
+        self.dashboard_item(f"select.{pfx}_mode_select", mode_name, attributes=GATEWAY_ATTRIBUTE_TABLE.get("mode_select", {}), app="gateway")
 
         # Schedule times (convert HHMM uint32 → HH:MM:SS string)
         # Always set with defaults so PredBat doesn't crash on missing charge_start_time
@@ -563,7 +572,7 @@ class GatewayMQTT(ComponentBase):
         # Inverter time (from GatewayStatus timestamp for clock drift detection)
         if self._last_status and self._last_status.timestamp:
             dt = datetime.datetime.fromtimestamp(self._last_status.timestamp, tz=datetime.timezone.utc)
-            self.dashboard_item(f"sensor.{pfx}_inverter_time", dt.strftime("%Y-%m-%d %H:%M:%S"), attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_time", {}), app="gateway")
+            self.dashboard_item(f"sensor.{pfx}_inverter_time", dt.strftime("%Y-%m-%dT%H:%M:%S%z"), attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_time", {}), app="gateway")
 
         # Battery scaling (depth of discharge) — from firmware pct, apps.yaml override, or 0.95 default
         dod_pct = 0
@@ -933,8 +942,17 @@ class GatewayMQTT(ComponentBase):
 
         Args:
             entity_id: The entity ID that changed.
-            value: The new selected value (HH:MM:SS for times).
+            value: The new selected value (HH:MM:SS for times, or mode name).
         """
+
+        self.log("Info: GatewayMQTT: select_event: entity_id={}, value={}".format(entity_id, value))
+        # Operating mode selector
+        if "_mode_select" in entity_id:
+            mode_int = GATEWAY_OPERATING_MODE_VALUES.get(str(value).strip(), 0)
+            await self.publish_command("set_mode", mode=mode_int)
+            self.log(f"Info: GatewayMQTT: Operating mode set to {value} ({mode_int})")
+            return
+
         # Schedule time changes — convert HH:MM:SS to HHMM and send slot command
         time_str = str(value).strip()
         parts = time_str.split(":")
@@ -976,6 +994,8 @@ class GatewayMQTT(ComponentBase):
             entity_id: The entity ID that changed.
             value: The new numeric value.
         """
+
+        self.log("Info: GatewayMQTT: number_event: entity_id={}, value={}".format(entity_id, value))
         try:
             val = int(float(value))
         except (ValueError, TypeError):
@@ -994,42 +1014,31 @@ class GatewayMQTT(ComponentBase):
     async def switch_event(self, entity_id, service):
         """Handle switch entity service calls (charge/discharge enable).
 
-        Maps enable/disable to set_mode commands:
-        - charge_enabled off → idle mode
-        - discharge_enabled off → charge mode (hold, no discharge)
-        - either on → auto mode (resume normal operation)
-
         Args:
             entity_id: The entity ID being controlled.
             service: The service being called (turn_on/turn_off).
         """
-        is_on = service == "turn_on"
+
+        self.log("Info: GatewayMQTT: switch_event: entity_id={}, service={}".format(entity_id, service))
+
+        old_value = self.get_state_wrapper(entity_id)
+        old_value = True if old_value in [True, "on"] else False
+        if service == "turn_on":
+            is_on = True
+        elif service == "turn_off":
+            is_on = False
+        elif service == "toggle":
+            is_on = not old_value
 
         if "_charge_enabled" in entity_id:
-            if is_on:
-                await self.publish_command("set_mode", mode=GATEWAY_MODE_AUTO)  # auto
-                self.log("Info: GatewayMQTT: Charge enabled → AUTO mode")
-            else:
-                await self.publish_command("set_mode", mode=GATEWAY_MODE_IDLE)  # idle
-                self.log("Info: GatewayMQTT: Charge disabled → IDLE mode")
+            await self.publish_command("set_charge_enable", enable=is_on)
+            self.log(f"Info: GatewayMQTT: Charge {'enabled' if is_on else 'disabled'}")
         elif "_discharge_enabled" in entity_id:
-            if is_on:
-                await self.publish_command("set_mode", mode=GATEWAY_MODE_AUTO)  # auto
-                self.log("Info: GatewayMQTT: Discharge enabled → AUTO mode")
-            else:
-                await self.publish_command("set_mode", mode=GATEWAY_MODE_CHARGE)  # charge (prevents discharge)
-                self.log("Info: GatewayMQTT: Discharge disabled → CHARGE mode")
+            await self.publish_command("set_discharge_enable", enable=is_on)
+            self.log(f"Info: GatewayMQTT: Discharge {'enabled' if is_on else 'disabled'}")
 
     async def final(self):
-        """Cleanup: send AUTO mode, cancel listener task, disconnect."""
-        try:
-            # Send AUTO mode before disconnecting
-            if self._mqtt_connected:
-                await self.publish_command("set_mode", mode=GATEWAY_MODE_AUTO)
-                self.log("Info: GatewayMQTT: Sent AUTO mode on shutdown")
-        except Exception as e:
-            self.log(f"Warn: GatewayMQTT: Error sending final AUTO mode: {e}")
-
+        """Cleanup: cancel listener task, disconnect."""
         # Cancel the MQTT listener task
         if self._mqtt_task and not self._mqtt_task.done():
             self._mqtt_task.cancel()
@@ -1197,7 +1206,7 @@ class GatewayMQTT(ComponentBase):
         """Build JSON command string for ad-hoc control.
 
         Args:
-            command: Command name (set_mode, set_charge_rate, etc.)
+            command: Command name (set_charge_enable, set_charge_rate, etc.)
             **kwargs: Command-specific fields (mode, power_w, target_soc).
 
         Returns:
@@ -1216,9 +1225,7 @@ class GatewayMQTT(ComponentBase):
             cmd["target_soc"] = kwargs["target_soc"]
         if "schedule_json" in kwargs:
             cmd["schedule_json"] = kwargs["schedule_json"]
-
-        # Mode commands need expires_at (5-minute deadman)
-        if command == "set_mode":
-            cmd["expires_at"] = int(time.time()) + 300
+        if "enable" in kwargs:
+            cmd["enable"] = bool(kwargs["enable"])
 
         return json.dumps(cmd)
