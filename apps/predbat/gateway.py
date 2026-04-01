@@ -200,7 +200,7 @@ class GatewayMQTT(ComponentBase):
             limit = calc_percent_limit(limit_kwh, soc_max)
             start_minutes = window.get("start", 0)
             end_minutes = window.get("end", 0)
-            # Apply % 24 to prevent hour overflow for overnight windows (e.g. end=1485 → 00:45)
+            # Work out hours and minutes
             start_hour = start_minutes // 60
             start_minute = start_minutes % 60
             end_hour = end_minutes // 60
@@ -231,7 +231,7 @@ class GatewayMQTT(ComponentBase):
                 continue
             start_minutes = window.get("start", 0)
             end_minutes = window.get("end", 0)
-            # Apply % 24 to prevent hour overflow for overnight windows
+            # Work out hours and minutes
             start_hour = start_minutes // 60
             start_minute = start_minutes % 60
             end_hour = end_minutes // 60
