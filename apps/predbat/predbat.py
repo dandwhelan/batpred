@@ -403,7 +403,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
                 self.pool.terminate()
                 self.pool.join()
             except Exception as e:
-                self.log("Warn: Failed to terminate thread pool: {}".format(e))
+                self.log("Warn: Failed to terminate multiprocessing pool: {}".format(e))
+                self.log(traceback.format_exc())
             self.pool = None
 
     def reset(self):
