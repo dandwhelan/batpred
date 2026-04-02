@@ -130,8 +130,12 @@ class KrakenAPI(ComponentBase, _AUTH_BASE):
         if export_account_id or export_mpan:
             self.log(f"Kraken: Export account configured — {export_account_id or 'same account'} MPAN {export_mpan or 'auto'}")
 
-        # Init auth — OAuthMixin or KrakenAuthMixin depending on import
-        if hasattr(self, "_init_oauth") and hasattr(_AUTH_BASE, "_init_oauth") and not hasattr(_AUTH_BASE, "_init_kraken_auth"):
+        # Init auth — prefer KrakenAuthMixin for local email/password or API key auth,
+        # use OAuthMixin only for SaaS OAuth mode (where tokens come from edge functions).
+        use_local_auth = auth_method in ("email", "api_key") and hasattr(self, "_init_kraken_auth")
+        if use_local_auth:
+            self._init_kraken_auth(auth_method, key=key, email=email, password=password)
+        elif hasattr(self, "_init_oauth"):
             self._init_oauth(auth_method, key, token_expires_at, "kraken")
             self.token_hash = token_hash or ""
         elif hasattr(self, "_init_kraken_auth"):
