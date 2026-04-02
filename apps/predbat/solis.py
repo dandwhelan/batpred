@@ -412,7 +412,6 @@ class SolisAPI(ComponentBase):
         async def read_operation():
             payload = {"inverterSn": inverter_sn, "cid": cid}
             data = await self._execute_request(SOLIS_READ_ENDPOINT, payload)
-            self.log("Read Payload: {} - result {}".format(payload, data))  # Debug log for payload and result
             if data is None:
                 raise SolisAPIError(f"Read CID {cid} failed: missing 'data' field")
             if "msg" not in data:
@@ -437,9 +436,7 @@ class SolisAPI(ComponentBase):
             # Convert CID list to comma-separated string
             cids_str = ",".join(str(cid) for cid in cids)
             payload = {"inverterSn": inverter_sn, "cids": cids_str}
-            self.log("Batch Read Payload: " + str(payload))  # Debug log for payload
             data = await self._execute_request(SOLIS_READ_BATCH_ENDPOINT, payload)
-            self.log("Batch Read Payload: {} - result {}".format(payload, data))  # Debug log for payload and result
 
             if data is None:
                 raise SolisAPIError("Batch read failed: missing 'data' field")
@@ -1039,8 +1036,6 @@ class SolisAPI(ComponentBase):
             }
             if old_value is not None:
                 payload["yuanzhi"] = str(old_value)
-
-            self.log("Write Payload: " + str(payload))  # Debug log for payload
 
             data = await self._execute_request(SOLIS_CONTROL_ENDPOINT, payload)
 
@@ -2744,7 +2739,7 @@ class SolisAPI(ComponentBase):
         new_mode = current_mode | (1 << SOLIS_BIT_BACKUP_MODE)
         await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(new_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
         await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_RESERVE_SOC, "5", field_description=f"Write reserve SOC to 5%")
-        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(current_mode), field_description=f"battery reserve to (mode: {current_mode} -> {new_mode})")
+        await self.read_and_write_cid(device_sn, SOLIS_CID_STORAGE_MODE, str(current_mode), field_description=f"restore battery reserve (mode: {new_mode} -> {current_mode})")
 
     async def run(self, seconds, first):
         """Main run cycle called every 5 seconds"""

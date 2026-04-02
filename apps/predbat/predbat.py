@@ -404,6 +404,22 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
         """
         return (self.midnight + timedelta(minutes=minute)).strftime("%m-%d %H:%M:%S")
 
+    def cleanup_pool(self):
+        """
+        Terminate and clean up the multiprocessing pool if it is active.
+
+        Ensures worker processes are properly terminated to prevent orphaned
+        processes when the prediction loop exits unexpectedly.
+        """
+        if getattr(self, "pool", None):
+            try:
+                self.pool.terminate()
+                self.pool.join()
+            except Exception as e:
+                self.log("Warn: Failed to terminate multiprocessing pool: {}".format(e))
+                self.log(traceback.format_exc())
+            self.pool = None
+
     def reset(self):
         """
         Init stub
@@ -431,6 +447,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
 
         # Forecast.solar API request metrics for monitoring
         self.currency_symbols = self.args.get("currency_symbols", "£p")
+        self.cleanup_pool()
         self.pool = None
         self.watch_list = []
         self.restart_active = False
@@ -1690,6 +1707,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
                 raise e
             finally:
                 self.prediction_started = False
+                self.cleanup_pool()
         elif not self.prediction_started:
             time_now = datetime.now()
             inverter_data_last_fetch = self.inverter_data_last_fetch
@@ -1768,6 +1786,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
                 raise e
             finally:
                 self.prediction_started = False
+                self.cleanup_pool()
 
     def run_time_loop_balance(self, cb_args):
         """
