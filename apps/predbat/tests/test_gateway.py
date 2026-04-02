@@ -1227,6 +1227,317 @@ class TestSwitchEvent:
         assert len(gw._published) == 1
 
 
+class TestPublishPredbatData:
+    """Tests for GatewayMQTT._publish_predbat_data() payload structure."""
+
+    def _make_gateway(self, states=None):
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.log = MagicMock()
+        gw.prefix = "predbat"
+        gw._topic_base = "predbat/devices/pbgw_test"
+        gw._last_predbat_data = None
+        gw._published = []  # (topic, payload, retain) tuples
+
+        defaults = {
+            "predbat.rates": "10.0",
+            "predbat.cost_today": "0",
+            "predbat.ppkwh_today": "10.0",
+            "predbat.savings_total_predbat": "0",
+            "predbat.savings_yesterday_predbat": "0",
+            "predbat.savings_total_predbat#start_date": None,
+        }
+        state_store = {**defaults, **(states or {})}
+
+        def fake_get_state_wrapper(entity_id, default=None, attribute=None):
+            if attribute:
+                return state_store.get(f"{entity_id}#{attribute}", default)
+            return state_store.get(entity_id, default)
+
+        gw.get_state_wrapper = fake_get_state_wrapper
+
+        async def fake_publish_raw(topic, payload, retain=False):
+            gw._published.append((topic, payload, retain))
+
+        gw._publish_raw = fake_publish_raw
+        return gw
+
+    def _run(self, coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    def _get_published_payload(self, gw):
+        import json
+
+        assert len(gw._published) == 1, f"Expected 1 publish, got {len(gw._published)}"
+        _, raw_bytes, _ = gw._published[0]
+        return json.loads(raw_bytes.decode())
+
+    # ------------------------------------------------------------------
+    # Payload key names
+    # ------------------------------------------------------------------
+
+    def test_payload_has_total_cost_not_total_saved(self):
+        """Payload must use 'total_cost' key, not the old 'total_saved' key."""
+        gw = self._make_gateway({"predbat.rates": "15.5", "predbat.cost_today": "200", "predbat.ppkwh_today": "18.2"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert "total_cost" in payload, "Expected 'total_cost' key in payload"
+        assert "total_saved" not in payload, "'total_saved' key must not appear in payload"
+
+    # ------------------------------------------------------------------
+    # Pence-to-pounds conversion
+    # ------------------------------------------------------------------
+
+    def test_cost_today_pence_converted_to_pounds(self):
+        """cost_today in pence (e.g. 1234) must be published as £12.34."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "1234", "predbat.ppkwh_today": "20.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert approx_equal(payload["total_cost"], 12.34), f"Expected 12.34, got {payload['total_cost']}"
+
+    def test_zero_cost_today_produces_zero(self):
+        """cost_today of 0 should publish total_cost=0.0."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert approx_equal(payload["total_cost"], 0.0)
+
+    def test_none_cost_today_produces_zero(self):
+        """Missing cost_today (None) should default to 0.0 without error."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert approx_equal(payload["total_cost"], 0.0)
+
+    # ------------------------------------------------------------------
+    # Other payload fields
+    # ------------------------------------------------------------------
+
+    def test_current_price_and_avg_price_published(self):
+        """current_price and avg_price are rounded to 1 decimal place."""
+        gw = self._make_gateway({"predbat.rates": "14.73", "predbat.cost_today": "0", "predbat.ppkwh_today": "19.56"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert approx_equal(payload["current_price"], 14.7, abs_tol=0.05)
+        assert approx_equal(payload["avg_price"], 19.6, abs_tol=0.05)
+
+    def test_default_timeline_is_twelve_zeros(self):
+        """When no plan_html is available the timeline is 12 zero slots."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["timeline"] == [0] * 12
+
+    # ------------------------------------------------------------------
+    # Deduplication
+    # ------------------------------------------------------------------
+
+    def test_no_republish_when_data_unchanged(self):
+        """Second call with identical data must not trigger another MQTT publish."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "500", "predbat.ppkwh_today": "15.0"})
+        self._run(gw._publish_predbat_data())
+        assert len(gw._published) == 1
+        # Second call — same data
+        self._run(gw._publish_predbat_data())
+        assert len(gw._published) == 1, "Should not publish again when data is unchanged"
+
+    def test_republish_when_price_changes(self):
+        """A change in current_price must trigger a second publish."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "500", "predbat.ppkwh_today": "15.0"})
+        self._run(gw._publish_predbat_data())
+        assert len(gw._published) == 1
+        # Change the rate via a fresh gateway helper (same savings defaults, different price)
+        gw2 = self._make_gateway({"predbat.rates": "20.0", "predbat.cost_today": "500", "predbat.ppkwh_today": "15.0"})
+        gw2._last_predbat_data = gw._last_predbat_data  # carry over dedup state
+        self._run(gw2._publish_predbat_data())
+        assert len(gw2._published) == 1, "Should publish again when price changes"
+
+    # ------------------------------------------------------------------
+    # Plan timeline and block_soc tests
+    # ------------------------------------------------------------------
+
+    def _make_rows(self, specs, base_offset_minutes=0):
+        """Build a list of plan rows with times relative to now.
+
+        Each spec is a dict with keys: state, soc_percent, pv_forecast (optional).
+        Rows are placed at base_offset_minutes, +30, +60, ... minutes from now.
+        """
+        import datetime as dt_mod
+
+        now = dt_mod.datetime.now(dt_mod.timezone.utc)
+        rows = []
+        for i, spec in enumerate(specs):
+            row_time = now + dt_mod.timedelta(minutes=base_offset_minutes + i * 30)
+            rows.append(
+                {
+                    "time": row_time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "state": spec.get("state", ""),
+                    "soc_percent": spec.get("soc_percent", 50),
+                    "pv_forecast": spec.get("pv_forecast", 0),
+                }
+            )
+        return rows
+
+    def _get_payload_with_plan(self, rows, extra_states=None):
+        """Call _publish_predbat_data with plan_html rows and return the published payload."""
+        import json
+
+        states = {"predbat.plan_html#raw": {"rows": rows}, **(extra_states or {})}
+        gw = self._make_gateway(states)
+        self._run(gw._publish_predbat_data())
+        assert len(gw._published) == 1
+        _, raw_bytes, _ = gw._published[0]
+        return json.loads(raw_bytes.decode())
+
+    def test_timeline_charging_maps_to_1(self):
+        """Charging state → timeline code 1."""
+        rows = self._make_rows([{"state": "Chrg", "soc_percent": 60}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 1
+
+    def test_timeline_freeze_charging_maps_to_1(self):
+        """Freeze charging state → timeline code 1."""
+        rows = self._make_rows([{"state": "FrzChrg", "soc_percent": 60}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 1
+
+    def test_timeline_hold_charging_maps_to_1(self):
+        """Hold charging state → timeline code 1."""
+        rows = self._make_rows([{"state": "HoldChrg", "soc_percent": 60}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 1
+
+    def test_timeline_discharging_maps_to_2(self):
+        """Discharging state → timeline code 2."""
+        rows = self._make_rows([{"state": "Exp", "soc_percent": 40}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 2
+
+    def test_timeline_freeze_discharging_maps_to_2(self):
+        """Freeze discharging state → timeline code 2."""
+        rows = self._make_rows([{"state": "FrzExp", "soc_percent": 40}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 2
+
+    def test_timeline_hold_discharging_maps_to_2(self):
+        """Hold export/discharge state → timeline code 2."""
+        rows = self._make_rows([{"state": "HoldExp", "soc_percent": 40}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 2
+
+    def test_timeline_solar_maps_to_3(self):
+        """Unknown state with pv_forecast > 0.1 → timeline code 3 (solar)."""
+        rows = self._make_rows([{"state": "Idle", "soc_percent": 50, "pv_forecast": 0.5}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 3
+
+    def test_timeline_grid_import_maps_to_4(self):
+        """Unknown state with pv_forecast <= 0.1 → timeline code 4 (grid import)."""
+        rows = self._make_rows([{"state": "Idle", "soc_percent": 50, "pv_forecast": 0.0}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 4
+
+    def test_timeline_only_fills_12_slots(self):
+        """More than 12 rows only fills the first 12 timeline slots."""
+        rows = self._make_rows([{"state": "Chrg", "soc_percent": 80}] * 15)
+        payload = self._get_payload_with_plan(rows)
+        assert len(payload["timeline"]) == 12
+        assert all(v == 1 for v in payload["timeline"])
+
+    def test_timeline_rows_older_than_30min_skipped(self):
+        """Rows with time > 30 minutes in the past are excluded from the timeline."""
+        # One old row (should be skipped) followed by a current row
+        import datetime as dt_mod
+
+        now = dt_mod.datetime.now(dt_mod.timezone.utc)
+        old_time = now - dt_mod.timedelta(minutes=45)
+        current_time = now + dt_mod.timedelta(minutes=5)
+        rows = [
+            {"time": old_time.strftime("%Y-%m-%dT%H:%M:%S%z"), "state": "Chrg", "soc_percent": 50, "pv_forecast": 0},
+            {"time": current_time.strftime("%Y-%m-%dT%H:%M:%S%z"), "state": "Exp", "soc_percent": 40, "pv_forecast": 0},
+        ]
+        payload = self._get_payload_with_plan(rows)
+        # First filled slot should be Exp (2), not Chrg (1)
+        assert payload["timeline"][0] == 2
+
+    def test_timeline_row_with_invalid_time_skipped(self):
+        """Rows with bad times are silently skipped."""
+        import datetime as dt_mod
+
+        now = dt_mod.datetime.now(dt_mod.timezone.utc)
+        rows = [
+            {"time": "not-a-date", "state": "Chrg", "soc_percent": 50, "pv_forecast": 0},
+            {"time": (now + dt_mod.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S%z"), "state": "Exp", "soc_percent": 40, "pv_forecast": 0},
+        ]
+        payload = self._get_payload_with_plan(rows)
+        assert payload["timeline"][0] == 2
+
+    def test_block_soc_and_state_for_multi_slot_block(self):
+        """block_soc collects SOC from consecutive rows with the same state."""
+        rows = self._make_rows(
+            [
+                {"state": "Chrg", "soc_percent": 60},
+                {"state": "Chrg", "soc_percent": 70},
+                {"state": "Chrg", "soc_percent": 80},
+                {"state": "Demand", "soc_percent": 80},
+            ]
+        )
+        payload = self._get_payload_with_plan(rows)
+        assert payload["block_state"] == "Chrg"
+        assert payload["block_soc"] == [60, 70, 80]
+
+    def test_block_soc_extends_single_slot_into_next_state(self):
+        """A single-slot first block is extended into the next block for sparkline rendering."""
+        rows = self._make_rows(
+            [
+                {"state": "Chrg", "soc_percent": 60},  # first block — only 1 slot
+                {"state": "Demand", "soc_percent": 62},  # second block — extended into
+                {"state": "Demand", "soc_percent": 64},
+            ]
+        )
+        payload = self._get_payload_with_plan(rows)
+        # block_state should switch to "Demand" and contain >= 2 SOC values
+        assert payload["block_state"] == "Demand"
+        assert len(payload["block_soc"]) >= 2
+
+    def test_block_soc_stops_at_state_change_after_two_slots(self):
+        """block_soc stops accumulating once a state change occurs after >= 2 slots."""
+        rows = self._make_rows(
+            [
+                {"state": "Exp", "soc_percent": 80},
+                {"state": "Exp", "soc_percent": 70},  # 2 slots — block complete
+                {"state": "Demand", "soc_percent": 70},  # state change closes block
+                {"state": "Demand", "soc_percent": 65},
+            ]
+        )
+        payload = self._get_payload_with_plan(rows)
+        assert payload["block_state"] == "Exp"
+        assert payload["block_soc"] == [80, 70]
+
+    def test_no_plan_rows_gives_empty_block_and_zero_timeline(self):
+        """When plan_html has no rows the block fields are empty and timeline is all zeros."""
+        states = {"predbat.plan_html#raw": {"rows": []}}
+        gw = self._make_gateway(states)
+        self._run(gw._publish_predbat_data())
+        import json
+
+        payload = json.loads(gw._published[0][1].decode())
+        assert payload["timeline"] == [0] * 12
+        assert payload["block_soc"] == []
+        assert payload["block_state"] == ""
+
+        """Data is published to predbat/devices/{device_id}/predbat_data."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        topic, _, retain = gw._published[0]
+        assert topic == "predbat/devices/pbgw_test/predbat_data"
+        assert retain is True
+
+
 def run_gateway_tests(my_predbat=None):
     """Run all GatewayMQTT tests. Returns True on failure, False on success."""
     test_classes = [
@@ -1242,6 +1553,7 @@ def run_gateway_tests(my_predbat=None):
         TestTokenRefresh,
         TestPlanHookConversion,
         TestMQTTIntegration,
+        TestPublishPredbatData,
     ]
     for cls in test_classes:
         instance = cls()

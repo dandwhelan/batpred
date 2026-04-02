@@ -782,11 +782,12 @@ class GatewayMQTT(ComponentBase):
                 now = datetime.datetime.now(datetime.timezone.utc)
 
                 state_map = {
-                    "Charging": 1,
-                    "Freeze charging": 1,
-                    "Hold charging": 1,
-                    "Discharging": 2,
-                    "Freeze discharging": 2,
+                    "Chrg": 1,
+                    "FrzChrg": 1,
+                    "HoldChrg": 1,
+                    "Exp": 2,
+                    "HoldExp": 2,
+                    "FrzExp": 2,
                 }
 
                 slot_idx = 0
@@ -833,25 +834,48 @@ class GatewayMQTT(ComponentBase):
                     slot_idx += 1
 
             # Build payload
+            saving_start_date = self.get_state_wrapper(self.prefix + ".savings_total_predbat", attribute="start_date")
+            saving_total = self.get_state_wrapper(self.prefix + ".savings_total_predbat") or 0
+            saving_yesterday = self.get_state_wrapper(self.prefix + ".savings_yesterday_predbat") or 0
+            try:
+                saving_total = float(saving_total) / 100.0  # pence → pounds
+                saving_yesterday = float(saving_yesterday) / 100.0  # pence → pounds
+            except ValueError:
+                saving_total = 0
+                saving_yesterday = 0
+            total_days_of_savings = 1
+            if saving_start_date:
+                try:
+                    start_date = datetime.datetime.strptime(saving_start_date, "%Y-%m-%d").date()
+                    total_days_of_savings = max((datetime.date.today() - start_date).days, 1)
+                except ValueError:
+                    pass
+            saving_month_average = round(float(saving_total) * 365 / 12 / total_days_of_savings, 2)
+
             payload = {
                 "current_price": round(float(current_price), 1),
                 "avg_price": round(float(avg_price or 0), 1),
-                "total_saved": round(float(cost_today or 0) / 100.0, 2),  # pence → pounds
+                "total_cost": round(float(cost_today or 0) / 100.0, 2),  # pence → pounds
                 "timeline": timeline,
                 "block_soc": block_soc,
                 "block_state": block_state_name,
+                "savings_yesterday": saving_yesterday,
+                "savings_total": saving_total,
+                "savings_total_days": total_days_of_savings,
+                "savings_month_average": saving_month_average,
             }
 
             # Only publish if data changed
             if payload == self._last_predbat_data:
                 return
 
+            self._last_predbat_data = dict(payload)  # store copy without timestamp so dedup works next cycle
+            payload["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             payload_json = json.dumps(payload)
             topic = f"{self._topic_base}/predbat_data"
 
             await self._publish_raw(topic, payload_json.encode(), retain=True)
-            self._last_predbat_data = payload
-            self.log(f"Info: Published predbat_data: price={payload['current_price']}p avg={payload['avg_price']}p saved=£{payload['total_saved']}")
+            self.log(f"Info: Published predbat_data: price={payload['current_price']}p avg={payload['avg_price']}p cost=£{payload['total_cost']}")
 
         except Exception as e:
             self.log(f"Warn: Failed to publish predbat_data: {e}")
