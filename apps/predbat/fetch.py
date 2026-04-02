@@ -1545,10 +1545,10 @@ class Fetch:
         midnight = time_string_to_stamp("00:00:00")
         for this_rate in info + manual_items:
             if this_rate and isinstance(this_rate, dict):
-                start_str = this_rate.get("start", "00:00:00")
-                start_str = self.resolve_arg("start", start_str, "00:00:00")
-                end_str = this_rate.get("end", "00:00:00")
-                end_str = self.resolve_arg("end", end_str, "00:00:00")
+                start_str = this_rate.get("start") or "00:00:00"
+                start_str = self.resolve_arg("start", start_str, "00:00:00") or "00:00:00"
+                end_str = this_rate.get("end") or "00:00:00"
+                end_str = self.resolve_arg("end", end_str, "00:00:00") or "00:00:00"
                 load_scaling = this_rate.get("load_scaling", None)
 
                 if start_str.count(":") < 2:
