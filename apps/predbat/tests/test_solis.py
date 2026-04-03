@@ -2752,9 +2752,12 @@ async def test_automatic_config():
     assert "export_today" in set_arg_calls, "export_today not configured"
     assert "pv_today" in set_arg_calls, "pv_today not configured"
 
-    # Verify reserve and limits configured
+    # Verify reserve and limits use over_discharge_soc (not reserve_soc)
     assert "reserve" in set_arg_calls, "reserve not configured"
+    expected_reserve = ["number.predbat_solis_abc123_over_discharge_soc", "number.predbat_solis_def456_over_discharge_soc"]
+    assert set_arg_calls["reserve"] == expected_reserve, f"Expected {expected_reserve}, got {set_arg_calls['reserve']}"
     assert "battery_min_soc" in set_arg_calls, "battery_min_soc not configured"
+    assert set_arg_calls["battery_min_soc"] == expected_reserve, f"Expected {expected_reserve}, got {set_arg_calls['battery_min_soc']}"
 
     # Verify rate controls configured
     assert "battery_rate_max" in set_arg_calls, "battery_rate_max not configured"

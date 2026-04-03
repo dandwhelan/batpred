@@ -1117,6 +1117,10 @@ class SolisAPI(ComponentBase):
         for inverter_sn in self.inverter_sn:
             detail = self.inverter_details.get(inverter_sn, {})
             battery_soh = detail.get("batteryHealthSoh")
+            try:
+                battery_soh = float(battery_soh) / 100.0
+            except (ValueError, TypeError):
+                battery_soh = None
             if battery_soh:
                 batteries.append(inverter_sn)
 
@@ -1156,7 +1160,6 @@ class SolisAPI(ComponentBase):
         # self.set_arg("soc_max", [f"sensor.{self.prefix}_solis_{device}_battery_capacity" for device in devices])
 
         # Reserve and limits
-        # Reserve isn't writable (so we don't use it for SolisCloud) instead we use it as the min SOC
         self.set_arg("reserve", [f"number.{self.prefix}_solis_{device}_over_discharge_soc" for device in devices])
         self.set_arg("battery_min_soc", [f"number.{self.prefix}_solis_{device}_over_discharge_soc" for device in devices])
 
@@ -2748,14 +2751,14 @@ class SolisAPI(ComponentBase):
         """
         Reset the startup registers for the given device serial number.
         """
-        value = self.read_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC)
+        value = await self.read_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC)
         try:
             value = float(value)
         except (ValueError, TypeError):
             value = 0
         # If the value is above 20, reset it to 20 default
         if value > 20:
-            await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC, "20", field_description="Test over discharge soc to 20 default")
+            await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC, "20", field_description="Set over discharge soc to 20 default")
 
     async def run(self, seconds, first):
         """Main run cycle called every 5 seconds"""
