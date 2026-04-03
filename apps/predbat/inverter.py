@@ -384,10 +384,10 @@ class Inverter:
 
         # Battery cannot be zero size
         if not self.soc_max or self.soc_max <= 0:
-            self.log("Note: Battery size was not set, attempting to find it..")
+            self.log("Note: Battery size was not set for inverter {}, attempting to find it..".format(self.id))
             found_size = self.find_battery_size()
             if not found_size or found_size <= 0:
-                self.log("Warn: Unable to determine battery size, setting to 8 kWh default, you must set soc_max in apps.yaml or wait until enough data is collected to estimate battery size")
+                self.log("Warn: Unable to determine battery size for inverter {}, setting to 8 kWh default, you must set soc_max in apps.yaml or wait until enough data is collected to estimate battery size".format(self.id))
                 self.soc_max = 8.0
             else:
                 # Store found battery size so we don't keep having to fetch it
