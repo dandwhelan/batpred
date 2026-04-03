@@ -368,16 +368,13 @@ class SolaxAPI(ComponentBase):
 
         # Find all plants with inverters and batteries
         plants = []
-        self.log("Plant inverters {}".format(self.plant_inverters))
         for plant_id in self.plant_inverters:
             inverter_sns = self.plant_inverters[plant_id]
-            self.log("Plant {} inverter_sns {}".format(plant_id, inverter_sns))
             if inverter_sns:
                 # Check if plant has at least one battery
                 has_battery = False
                 for device_sn in self.device_info:
                     device = self.device_info[device_sn]
-                    self.log("Checking device {} for plant {}: {}".format(device_sn, plant_id, device))
                     if device.get("plantId") == plant_id and device.get("deviceType") == 2:  # Battery
                         has_battery = True
                         break
@@ -1082,7 +1079,6 @@ class SolaxAPI(ComponentBase):
         """
         self.log("Solax: Request get path {} params {} json {}".format(path, params, json_data))
         result = await self.request_wrapper(lambda: self._request_get_impl(path, params, post, json_data))
-        self.log("Solax: Request get result {}".format(result))
         return result
 
     async def fetch_paginated_data(self, path, base_params, page_size=100):
@@ -1277,8 +1273,8 @@ class SolaxAPI(ComponentBase):
                         self.plant_batteries[plant_id].append(deviceSn)
                     self.log(f"Solax: Stored device info for SN: {deviceSn} info {device}")
 
-        # Workaround, if for some reason there is no device info for the batter, but there is a battery capacity then add
-        # a battery device with the plant ID and a fake SN so that the battery sensors can still be created and show the battery SOC and other info. 
+        # Workaround, if for some reason there is no device info for the battery, but there is a battery capacity then add
+        # a battery device with the plant ID and a fake SN so that the battery sensors can still be created and show the battery SOC and other info.
         # This is because some SolaX users have reported that their battery device info is not showing up in the API, but they can see the battery capacity in the plant info.
         if device_type == 2 and not self.plant_batteries.get(plant_id) and self.plant_info:
             for plant in self.plant_info:
@@ -1463,6 +1459,7 @@ class SolaxAPI(ComponentBase):
             sn: Device serial number
             device_type: Device type (1=Inverter, 2=Battery, 3=Meter, 4=EV Charger)
             business_type: Business type (1=Residential, 4=Commercial), defaults to residential
+            real_sn: Optional real device SN to use for battery queries when device info is missing (workaround for some SolaX users with missing battery device info)
 
         Returns:
             List of device realtime data dictionaries or None on failure
@@ -2448,7 +2445,7 @@ class SolaxAPI(ComponentBase):
                 self.log(f"SolaX API: Fetching device information for plant ID {plantID}...")
                 await self.query_device_info(plantID, device_type=SOLAX_DEVICE_TYPE_INVERTER)  # Inverter
                 await self.query_device_info(plantID, device_type=SOLAX_DEVICE_TYPE_BATTERY)  # Battery
-                
+
                 # await self.query_device_info(plantID, device_type=SOLAX_DEVICE_TYPE_METER)  # Meter
                 # await self.query_plant_statistics_daily(plantID)
 

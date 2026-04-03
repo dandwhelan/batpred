@@ -3383,6 +3383,68 @@ async def test_query_device_realtime_data_main():
     else:
         print(f"✓ Overwrite existing device data test passed")
 
+    # Test 8: real_sn != sn (shared Device ID / fake battery suffix)
+    # When real_sn differs from sn, snList must use real_sn and requestSnType must be set.
+    print("Test 8: real_sn != sn - snList uses real_sn and requestSnType is set")
+    api8 = MockSolaxAPI()
+    api8.initialize(client_id="test", client_secret="test", region="eu")
+
+    captured_params = []
+
+    async def mock_fetch_capture_params(path, params=None, post=False, json_data=None):
+        captured_params.append(dict(params) if params else {})
+        return [{"deviceSn": "INV001_battery", "batterySOC": 80}], "req_1"
+
+    api8.fetch_single_result = mock_fetch_capture_params
+
+    await api8.query_device_realtime_data("INV001_battery", device_type=2, real_sn="INV001")
+
+    if len(captured_params) != 1:
+        print(f"**** ERROR: Expected 1 fetch call, got {len(captured_params)} ****")
+        failed = True
+    else:
+        p = captured_params[0]
+        if p.get("snList") != ["INV001"]:
+            print(f"**** ERROR: snList should be ['INV001'] (real_sn), got {p.get('snList')} ****")
+            failed = True
+        elif p.get("requestSnType") != 1:
+            print(f"**** ERROR: requestSnType should be 1 when real_sn != sn, got {p.get('requestSnType')} ****")
+            failed = True
+        elif api8.realtime_device_data.get("INV001_battery", {}).get("batterySOC") != 80:
+            print(f"**** ERROR: Result stored under wrong key or data incorrect ****")
+            failed = True
+        else:
+            print(f"✓ real_sn != sn request params test passed")
+
+    # Also verify that when real_sn == sn, requestSnType is NOT added to params
+    print("Test 8b: real_sn == sn - requestSnType is absent")
+    api8b = MockSolaxAPI()
+    api8b.initialize(client_id="test", client_secret="test", region="eu")
+
+    captured_params_b = []
+
+    async def mock_fetch_no_override(path, params=None, post=False, json_data=None):
+        captured_params_b.append(dict(params) if params else {})
+        return [{"deviceSn": "INV001", "gridPower": -1000}], "req_2"
+
+    api8b.fetch_single_result = mock_fetch_no_override
+
+    await api8b.query_device_realtime_data("INV001", device_type=1)
+
+    if len(captured_params_b) != 1:
+        print(f"**** ERROR: Expected 1 fetch call, got {len(captured_params_b)} ****")
+        failed = True
+    else:
+        p = captured_params_b[0]
+        if p.get("snList") != ["INV001"]:
+            print(f"**** ERROR: snList should be ['INV001'], got {p.get('snList')} ****")
+            failed = True
+        elif "requestSnType" in p:
+            print(f"**** ERROR: requestSnType should not be present when real_sn == sn, got {p.get('requestSnType')} ****")
+            failed = True
+        else:
+            print(f"✓ real_sn == sn no requestSnType test passed")
+
     if not failed:
         print("✓ query_device_realtime_data tests passed")
 
