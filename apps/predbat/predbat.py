@@ -1400,7 +1400,9 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Outpu
                                     errors += 1
                                     break
                     elif expected_type == "int_float_dict":
-                        if isinstance(value, dict):
+                        if spec.get("or_auto", False) and value == "auto":
+                            matches = True
+                        elif isinstance(value, dict):
                             matches = True
                             for key in value:
                                 if not self.validate_is_int(key):
