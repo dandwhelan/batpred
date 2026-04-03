@@ -472,7 +472,7 @@ class Inverter:
             self.reserve_min = battery_min_soc
 
         self.base.log("Reserve min: {}%, battery_min: {}%".format(self.reserve_min, dp0(battery_min_soc)))
-        if self.base.set_reserve_enable and self.inv_has_reserve_soc:
+        if (self.base.set_reserve_enable and self.inv_has_reserve_soc) or not self.inv_has_reserve_soc:
             self.reserve_percent = self.reserve_min
         else:
             self.reserve_percent = self.reserve_percent_current
