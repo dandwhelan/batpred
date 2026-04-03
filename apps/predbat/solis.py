@@ -2749,11 +2749,10 @@ class SolisAPI(ComponentBase):
         Reset the startup registers for the given device serial number.
         """
         value = self.read_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC)
-        if value is not None:
-            try:
-                value = float(value)
-            except (ValueError, TypeError):
-                value = 0
+        try:
+            value = float(value)
+        except (ValueError, TypeError):
+            value = 0
         # If the value is above 20, reset it to 20 default
         if value > 20:
             await self.read_and_write_cid(device_sn, SOLIS_CID_BATTERY_OVER_DISCHARGE_SOC, "20", field_description="Test over discharge soc to 20 default")
