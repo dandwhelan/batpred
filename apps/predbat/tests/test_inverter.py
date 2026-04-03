@@ -1658,10 +1658,6 @@ def run_inverter_tests(my_predbat_dummy):
     failed |= test_adjust_reserve("adjust_reserve3", ha, inv, dummy_rest, 20, 100, reserve_max=100)
     failed |= test_adjust_reserve("adjust_reserve4", ha, inv, dummy_rest, 20, 100, 98, reserve_min=4, reserve_max=98)
     failed |= test_adjust_reserve("adjust_reserve5", ha, inv, dummy_rest, 50, 0, 0, reserve_min=0, reserve_max=100)
-    # Test SolisCloud "sticky reserve" bug fix: reserve_percent is elevated (80%) but reserve_min is low (4%).
-    # adjust_reserve(0) must clamp to reserve_min (4%), not to reserve_percent (80%).
-    failed |= test_adjust_reserve("adjust_reserve6_sticky_reserve", ha, inv, dummy_rest, 80, 0, 4, reserve_min=4, reserve_max=100, reserve_percent=80)
-    failed |= test_adjust_reserve("adjust_reserve7_sticky_reserve_custom_min", ha, inv, dummy_rest, 80, 0, 11, reserve_min=11, reserve_max=100, reserve_percent=80)
     if failed:
         return failed
 

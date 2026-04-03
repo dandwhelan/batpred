@@ -472,18 +472,10 @@ class Inverter:
             self.reserve_min = battery_min_soc
 
         self.base.log("Reserve min: {}%, battery_min: {}%".format(self.reserve_min, dp0(battery_min_soc)))
-        if self.base.set_reserve_enable and self.inv_has_reserve_soc:
+        if (self.base.set_reserve_enable and self.inv_has_reserve_soc) or not self.inv_has_reserve_soc:
             self.reserve_percent = self.reserve_min
         else:
             self.reserve_percent = self.reserve_percent_current
-            if self.reserve_percent_current > self.reserve_min and not quiet:
-                self.base.log(
-                    "Warn: Inverter {} reserve is currently {}% which is higher than set_reserve_min of {}%. "
-                    "The battery plan will be constrained to this reserve level until it is lowered. "
-                    "If set_reserve_enable is on, Predbat will automatically reset it during the next execution cycle.".format(
-                        self.id, dp0(self.reserve_percent_current), self.reserve_min
-                    )
-                )
         self.reserve = dp3(self.soc_max * self.reserve_percent / 100.0)
 
         # Max inverter rate override
@@ -1464,12 +1456,10 @@ class Inverter:
         else:
             current_reserve = self.base.get_arg("reserve", index=self.id, default=0.0, required_unit="%")
 
-        # Round to integer and clamp to minimum (use reserve_min not reserve_percent so that
-        # the reset call adjust_reserve(0) correctly resets to reserve_min rather than being
-        # clamped to a previously-elevated reserve_percent, which would leave a "sticky" reserve)
+        # Round to integer and clamp to minimum
         reserve = int(reserve + 0.5)
-        if reserve < self.reserve_min:
-            reserve = self.reserve_min
+        if reserve < self.reserve_percent:
+            reserve = self.reserve_percent
 
         # Clamp reserve at max setting
         reserve = min(reserve, self.reserve_max)
