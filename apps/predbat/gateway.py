@@ -15,6 +15,7 @@ import time
 import uuid
 import traceback
 from utils import calc_percent_limit
+import pytz as _pytz
 
 from component_base import ComponentBase
 
@@ -471,7 +472,7 @@ class GatewayMQTT(ComponentBase):
         if status.timestamp > 0 and len(status.inverters) > 0:
             primary_inv = next((inv for inv in status.inverters if inv.primary), status.inverters[0])
             ts_suffix = primary_inv.serial[-6:].lower() if len(primary_inv.serial) > 6 else primary_inv.serial.lower()
-            dt = datetime.datetime.fromtimestamp(status.timestamp, tz=datetime.timezone.utc)
+            dt = datetime.datetime.fromtimestamp(status.timestamp, tz=self.local_tz)
             self.dashboard_item(
                 f"sensor.{self.prefix}_gateway_{ts_suffix}_inverter_time",
                 dt.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -571,15 +572,15 @@ class GatewayMQTT(ComponentBase):
 
         # Inverter time (from GatewayStatus timestamp for clock drift detection)
         if self._last_status and self._last_status.timestamp:
-            dt = datetime.datetime.fromtimestamp(self._last_status.timestamp, tz=datetime.timezone.utc)
+            dt = datetime.datetime.fromtimestamp(self._last_status.timestamp, tz=self.local_tz)
             self.dashboard_item(f"sensor.{pfx}_inverter_time", dt.strftime("%Y-%m-%dT%H:%M:%S%z"), attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_time", {}), app="gateway")
 
-        # Battery scaling (depth of discharge) — from firmware pct, apps.yaml override, or 0.95 default
+        # Battery scaling (depth of discharge) — from firmware pct, apps.yaml override, or 1.0 default
         dod_pct = 0
         if inv.battery.ByteSize() > 0 and inv.battery.depth_of_discharge_pct > 0:
             dod_pct = inv.battery.depth_of_discharge_pct
         if dod_pct <= 0:
-            dod_pct = int(self.args.get("gateway_battery_dod_pct", 95)) if isinstance(self.args, dict) else 95
+            dod_pct = int(self.args.get("gateway_battery_dod_pct", 100)) if isinstance(self.args, dict) else 100
         self.dashboard_item(f"sensor.{pfx}_battery_dod", round(dod_pct / 100.0, 3), attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_dod", {}), app="gateway")
 
         # Energy counters (Wh → kWh)
@@ -779,7 +780,7 @@ class GatewayMQTT(ComponentBase):
             plan_raw = self.get_state_wrapper(self.prefix + ".plan_html", attribute="raw")
             if plan_raw and isinstance(plan_raw, dict) and "rows" in plan_raw:
                 rows = plan_raw["rows"]
-                now = datetime.datetime.now(datetime.timezone.utc)
+                now = datetime.datetime.now(self.local_tz)
 
                 state_map = {
                     "Chrg": 1,
@@ -837,6 +838,16 @@ class GatewayMQTT(ComponentBase):
             saving_start_date = self.get_state_wrapper(self.prefix + ".savings_total_predbat", attribute="start_date")
             saving_total = self.get_state_wrapper(self.prefix + ".savings_total_predbat") or 0
             saving_yesterday = self.get_state_wrapper(self.prefix + ".savings_yesterday_predbat") or 0
+            predbat_status = self.get_state_wrapper(self.prefix + ".status") or "Unknown"
+            predbat_status_detail = self.get_state_wrapper(self.prefix + ".status", attribute="detail") or ""
+            if "error" in predbat_status.lower():
+                # Remove long complex text
+                predbat_status_detail = predbat_status
+                predbat_status = "Server Error"
+            if "warn" in predbat_status.lower():
+                predbat_status_detail = predbat_status
+                predbat_status = "Server warning"
+
             try:
                 saving_total = float(saving_total) / 100.0  # pence → pounds
                 saving_yesterday = float(saving_yesterday) / 100.0  # pence → pounds
@@ -863,6 +874,8 @@ class GatewayMQTT(ComponentBase):
                 "savings_total": saving_total,
                 "savings_total_days": total_days_of_savings,
                 "savings_month_average": saving_month_average,
+                "predbat_status": predbat_status,
+                "predbat_status_detail": predbat_status_detail,
             }
 
             # Only publish if data changed
@@ -870,7 +883,7 @@ class GatewayMQTT(ComponentBase):
                 return
 
             self._last_predbat_data = dict(payload)  # store copy without timestamp so dedup works next cycle
-            payload["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            payload["timestamp"] = int(time.time())
             payload_json = json.dumps(payload)
             topic = f"{self._topic_base}/predbat_data"
 
@@ -1159,13 +1172,74 @@ class GatewayMQTT(ComponentBase):
             self._refresh_in_progress = False
 
     @staticmethod
+    def iana_to_posix_tz(iana_tz):
+        """Convert an IANA timezone name to a POSIX TZ string for ESP32 firmware.
+
+        TZif v2/v3 binary files embed the POSIX TZ string as the last newline-delimited
+        record. This method looks up the tzfile in the pytz package's bundled
+        ``zoneinfo`` directory and reads the string directly — no lookup table
+        required, works for any valid zone.
+
+        Args:
+            iana_tz: IANA timezone string (e.g. "Europe/London").
+
+        Returns:
+            POSIX TZ string (e.g. "GMT0BST,M3.5.0/1,M10.5.0"), or "UTC0" on failure.
+        """
+
+        iana_tz = str(iana_tz)
+        rel_path = iana_tz.replace("/", os.sep)
+        pytz_zones = os.path.join(os.path.dirname(_pytz.__file__), "zoneinfo")
+        path = os.path.join(pytz_zones, rel_path)
+
+        if os.path.isfile(path):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                # TZif v2/v3: POSIX string is appended after the main data block as \nSTRING\n
+                if data[:4] == b"TZif" and data[4:5] in (b"2", b"3") and data[-1:] == b"\n":
+                    nl = data.rfind(b"\n", 0, -1)
+                    if nl >= 0:
+                        posix = data[nl + 1 : -1].decode("ascii", errors="replace").strip()
+                        if posix:
+                            return posix
+            except OSError:
+                pass
+
+        # Fall back: derive a no-DST POSIX string from the pytz UTC offset
+        try:
+            tz = _pytz.timezone(iana_tz)
+            # Probe both hemispheres' winters to find standard time (smaller UTC offset).
+            # Jan is winter in NH but summer in SH, so we take whichever probe gives the
+            # smaller (less positive) offset — that is always the non-DST offset.
+            dt_jan = datetime.datetime(2024, 1, 15, 12, 0, 0)
+            dt_jul = datetime.datetime(2024, 7, 15, 12, 0, 0)
+            off_jan = tz.utcoffset(dt_jan).total_seconds()
+            off_jul = tz.utcoffset(dt_jul).total_seconds()
+            std_dt = dt_jan if off_jan <= off_jul else dt_jul
+            offset = tz.utcoffset(std_dt)
+            total_minutes = int(offset.total_seconds() / 60)
+            # POSIX sign is opposite to UTC offset; use divmod to avoid floor-division
+            # errors on negative fractional offsets (e.g. UTC-03:30 → -210 min)
+            posix_total_minutes = -total_minutes
+            posix_hours, posix_mins = divmod(abs(posix_total_minutes), 60)
+            if posix_total_minutes < 0:
+                posix_hours = -posix_hours
+            abbr = tz.tzname(std_dt) or "TZ"
+            if posix_mins:
+                return "{}{:d}:{:02d}".format(abbr, posix_hours, posix_mins)
+            return "{}{:d}".format(abbr, posix_hours)
+        except Exception:
+            return "UTC0"
+
+    @staticmethod
     def build_execution_plan(entries, plan_version, timezone):
         """Build protobuf ExecutionPlan from a list of plan entry dicts.
 
         Args:
             entries: List of dicts with keys matching PlanEntry fields.
             plan_version: Monotonic version number.
-            timezone: IANA timezone string (e.g. "Europe/London").
+            timezone: IANA timezone string (e.g. "Europe/London") — converted to POSIX format internally.
 
         Returns:
             Serialized protobuf bytes.
@@ -1173,7 +1247,7 @@ class GatewayMQTT(ComponentBase):
         plan = pb.ExecutionPlan()
         plan.timestamp = int(time.time())
         plan.plan_version = plan_version
-        plan.timezone = timezone
+        plan.timezone = GatewayMQTT.iana_to_posix_tz(timezone)
 
         for entry_dict in entries:
             pe = plan.entries.add()

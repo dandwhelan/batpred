@@ -376,6 +376,8 @@ tojson
 Trefor
 treforsiphone
 twinx
+tzfile
+tzpath
 unsmoothed
 unstaged
 useid
