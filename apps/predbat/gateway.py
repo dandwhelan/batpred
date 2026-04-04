@@ -1176,8 +1176,9 @@ class GatewayMQTT(ComponentBase):
         """Convert an IANA timezone name to a POSIX TZ string for ESP32 firmware.
 
         TZif v2/v3 binary files embed the POSIX TZ string as the last newline-delimited
-        record. This method uses zoneinfo.TZPATH (Python 3.9+) to locate the file and
-        reads the string directly — no lookup table required, works for any valid zone.
+        record. This method looks up the tzfile in the pytz package's bundled
+        ``zoneinfo`` directory and reads the string directly — no lookup table
+        required, works for any valid zone.
 
         Args:
             iana_tz: IANA timezone string (e.g. "Europe/London").
