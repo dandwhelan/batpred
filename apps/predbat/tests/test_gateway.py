@@ -1564,6 +1564,27 @@ class TestIanaToPosixTz:
         result = self._convert("Australia/Sydney")
         assert result == "AEST-10AEDT,M10.1.0,M4.1.0/3", f"Got {result!r}"  # cspell:disable-line
 
+    def test_southern_hemisphere_standard_offset(self):
+        """Australia/Sydney fallback must use AEST (UTC+10) not AEDT (UTC+11). # cspell:disable-line
+
+        January is Southern Hemisphere summer (DST active), so a hardwired Jan probe
+        would yield UTC+11 instead of the correct standard UTC+10 offset.
+        """
+        import datetime
+        import pytz as _pytz
+
+        tz = _pytz.timezone("Australia/Sydney")
+        # Manually compute what the fallback would produce using just January (wrong)
+        off_jan = tz.utcoffset(datetime.datetime(2024, 1, 15, 12, 0, 0)).total_seconds() / 60
+        # January is DST in Sydney: UTC+11 → posix_total = -660 → hours = -11 (wrong)
+        # The correct standard offset is UTC+10 (July)
+        off_jul = tz.utcoffset(datetime.datetime(2024, 7, 15, 12, 0, 0)).total_seconds() / 60
+        assert off_jan > off_jul, "Precondition: Sydney has higher offset in Jan (DST) than Jul (standard)"
+        # The actual conversion should use the smaller offset (July = standard time)
+        result = self._convert("Australia/Sydney")
+        # Standard AEST is UTC+10; POSIX sign flips → "-10" must appear # cspell:disable-line
+        assert "-10" in result, f"Expected standard offset -10 in POSIX string, got {result!r}"  # cspell:disable-line
+
     def test_asia_kolkata_half_hour_offset(self):
         """Asia/Kolkata (UTC+5:30) includes the fractional-hour offset."""
         result = self._convert("Asia/Kolkata")
@@ -1593,6 +1614,44 @@ class TestIanaToPosixTz:
 
         result = self._convert(pytz.timezone("Europe/London"))
         assert result == "GMT0BST,M3.5.0/1,M10.5.0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_negative_fractional_offset(self):
+        """America/St_Johns (UTC-3:30) must produce offset 3:30, not 4:30 (floor-division bug)."""
+        result = self._convert("America/St_Johns")
+        # The POSIX string from the TZif file is authoritative; the fallback must also be correct.
+        # Either way, the offset component must not contain "4:30".
+        assert "4:30" not in result, f"Floor-division bug: got {result!r} for America/St_Johns"  # cspell:disable-line
+        assert "3:30" in result, f"Expected '3:30' in POSIX string, got {result!r}"  # cspell:disable-line
+
+    def test_fallback_northern_hemisphere(self):
+        """Fallback path (TZif file bypassed): Europe/London standard time is GMT (UTC+0) → 'GMT0'."""
+        from unittest.mock import patch
+        from gateway import GatewayMQTT
+
+        with patch("os.path.isfile", return_value=False):
+            result = GatewayMQTT.iana_to_posix_tz("Europe/London")
+        assert result == "GMT0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_fallback_southern_hemisphere(self):
+        """Fallback path: dual-probe picks July (standard AEST UTC+10), not January (DST AEDT UTC+11)."""  # cspell:disable-line
+        from unittest.mock import patch
+        from gateway import GatewayMQTT
+
+        with patch("os.path.isfile", return_value=False):
+            result = GatewayMQTT.iana_to_posix_tz("Australia/Sydney")
+        assert "AEST" in result, f"Expected AEST abbr in fallback result, got {result!r}"  # cspell:disable-line
+        assert "-10" in result, f"Expected standard offset -10 in fallback result, got {result!r}"  # cspell:disable-line
+        assert "-11" not in result, f"DST offset -11 must not appear in fallback result, got {result!r}"  # cspell:disable-line
+
+    def test_fallback_negative_fractional_offset(self):
+        """Fallback path divmod fix: America/St_Johns standard time is NST (UTC-3:30) → '3:30'."""
+        from unittest.mock import patch
+        from gateway import GatewayMQTT
+
+        with patch("os.path.isfile", return_value=False):
+            result = GatewayMQTT.iana_to_posix_tz("America/St_Johns")
+        assert "4:30" not in result, f"Floor-division bug in fallback: got {result!r}"  # cspell:disable-line
+        assert "3:30" in result, f"Expected 3:30 in fallback result, got {result!r}"  # cspell:disable-line
 
     def test_invalid_zone_returns_utc0(self):
         """Unknown/invalid zone name falls back to 'UTC0' instead of raising."""

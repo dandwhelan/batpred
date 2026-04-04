@@ -1208,11 +1208,22 @@ class GatewayMQTT(ComponentBase):
         # Fall back: derive a no-DST POSIX string from the pytz UTC offset
         try:
             tz = _pytz.timezone(iana_tz)
-            std_dt = datetime.datetime(2024, 1, 15, 12, 0, 0)
+            # Probe both hemispheres' winters to find standard time (smaller UTC offset).
+            # Jan is winter in NH but summer in SH, so we take whichever probe gives the
+            # smaller (less positive) offset — that is always the non-DST offset.
+            dt_jan = datetime.datetime(2024, 1, 15, 12, 0, 0)
+            dt_jul = datetime.datetime(2024, 7, 15, 12, 0, 0)
+            off_jan = tz.utcoffset(dt_jan).total_seconds()
+            off_jul = tz.utcoffset(dt_jul).total_seconds()
+            std_dt = dt_jan if off_jan <= off_jul else dt_jul
             offset = tz.utcoffset(std_dt)
             total_minutes = int(offset.total_seconds() / 60)
-            posix_hours = -(total_minutes // 60)  # POSIX sign is opposite to UTC offset
-            posix_mins = abs(total_minutes) % 60
+            # POSIX sign is opposite to UTC offset; use divmod to avoid floor-division
+            # errors on negative fractional offsets (e.g. UTC-03:30 → -210 min)
+            posix_total_minutes = -total_minutes
+            posix_hours, posix_mins = divmod(abs(posix_total_minutes), 60)
+            if posix_total_minutes < 0:
+                posix_hours = -posix_hours
             abbr = tz.tzname(std_dt) or "TZ"
             if posix_mins:
                 return "{}{:d}:{:02d}".format(abbr, posix_hours, posix_mins)
