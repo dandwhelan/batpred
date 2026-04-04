@@ -373,6 +373,7 @@ timestep
 timestr
 timezone
 tojson
+tzfile
 Trefor
 treforsiphone
 twinx
