@@ -575,12 +575,12 @@ class GatewayMQTT(ComponentBase):
             dt = datetime.datetime.fromtimestamp(self._last_status.timestamp, tz=self.local_tz)
             self.dashboard_item(f"sensor.{pfx}_inverter_time", dt.strftime("%Y-%m-%dT%H:%M:%S%z"), attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_time", {}), app="gateway")
 
-        # Battery scaling (depth of discharge) — from firmware pct, apps.yaml override, or 0.95 default
+        # Battery scaling (depth of discharge) — from firmware pct, apps.yaml override, or 1.0 default
         dod_pct = 0
         if inv.battery.ByteSize() > 0 and inv.battery.depth_of_discharge_pct > 0:
             dod_pct = inv.battery.depth_of_discharge_pct
         if dod_pct <= 0:
-            dod_pct = int(self.args.get("gateway_battery_dod_pct", 95)) if isinstance(self.args, dict) else 95
+            dod_pct = int(self.args.get("gateway_battery_dod_pct", 100)) if isinstance(self.args, dict) else 100
         self.dashboard_item(f"sensor.{pfx}_battery_dod", round(dod_pct / 100.0, 3), attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_dod", {}), app="gateway")
 
         # Energy counters (Wh → kWh)

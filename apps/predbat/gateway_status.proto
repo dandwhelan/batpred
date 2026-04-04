@@ -33,7 +33,7 @@ message BatteryStatus {
   uint32 cycle_count     = 7;
   int32  capacity_wh     = 8;  // rated capacity
   uint32 rate_max_w      = 9;  // max charge/discharge rate in W
-  uint32 depth_of_discharge_pct = 10;  // usable % 0-100 (e.g. 95 = 0.95); 0 = unknown (use 95)
+  uint32 depth_of_discharge_pct = 10;  // usable % 0-100 (e.g. 95 = 0.95); 0 = unknown (use 100)
 }
 
 message PvStatus {
