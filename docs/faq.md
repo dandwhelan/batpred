@@ -222,14 +222,19 @@ recorder:
       - sensor.predbat_pv_d2
       - sensor.predbat_pv_d3
       - sensor.predbat_temperature
+      - sensor.predbat_pv_forecast_h0
   include:
     entities: #The history of these entities is used by Predbat
+      - predbat.cost_today
       - predbat.cost_today_car
       - predbat.cost_yesterday
       - predbat.cost_yesterday_car
-      - predbat.load_inday_adjustment
       - predbat.load_ml_stats
       - predbat.load_power
+      - predbat.load_energy_actual
+      - predbat.load_energy_predicted
+      - predbat.load_energy_adjusted
+      - predbat.load_inday_adjustment
       - predbat.ppkwh_today
       - predbat.ppkwh_hour
       - predbat.pv_power
