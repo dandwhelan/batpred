@@ -1512,7 +1512,7 @@ class Fetch:
                 rate = float(rate)
             except (ValueError, TypeError):
                 self.log("Warn: Bad rate {} provided in manual rates".format(rate))
-                self.record_status("Bad rate {} provided in manual rates".format(rate), had_errors=True)
+                self.record_status("Warn: Bad rate {} provided in manual rates".format(rate), had_errors=True)
                 continue
             rates[minute] = rate
             rate_replicate[minute] = "manual"
@@ -1560,14 +1560,14 @@ class Fetch:
                     start = time_string_to_stamp(start_str)
                 except (ValueError, TypeError):
                     self.log("Warn: Bad start time {} provided in energy rates".format(start_str))
-                    self.record_status("Bad start time {} provided in energy rates".format(start_str), had_errors=True)
+                    self.record_status("Warn: Bad start time {} provided in energy rates".format(start_str), had_errors=True)
                     continue
 
                 try:
                     end = time_string_to_stamp(end_str)
                 except (ValueError, TypeError):
                     self.log("Warn: Bad end time {} provided in energy rates".format(end_str))
-                    self.record_status("Bad end time {} provided in energy rates".format(end_str), had_errors=True)
+                    self.record_status("Warn: Bad end time {} provided in energy rates".format(end_str), had_errors=True)
                     continue
 
                 date = None
@@ -1577,7 +1577,7 @@ class Fetch:
                         date = datetime.strptime(date_str, "%Y-%m-%d")
                     except (ValueError, TypeError):
                         self.log("Warn: Bad date {} provided in energy rates".format(this_rate["date"]))
-                        self.record_status("Bad date {} provided in energy rates".format(this_rate["date"]), had_errors=True)
+                        self.record_status("Warn: Bad date {} provided in energy rates".format(this_rate["date"]), had_errors=True)
                         continue
                 day_of_week = []
                 if "day_of_week" in this_rate:
@@ -1588,11 +1588,11 @@ class Fetch:
                             day = int(day)
                         except (ValueError, TypeError):
                             self.log("Warn: Bad day_of_week {} provided in energy rates, should be 1-7".format(day_of_week))
-                            self.record_status("Bad day_of_week {} provided in energy rates, should be 1-7".format(day_of_week), had_errors=True)
+                            self.record_status("Warn: Bad day_of_week {} provided in energy rates, should be 1-7".format(day_of_week), had_errors=True)
                             continue
                         if day < 1 or day > 7:
                             self.log("Warn: Bad day_of_week {} provided in energy rates, should be 1-7".format(day))
-                            self.record_status("Bad day_of_week {} provided in energy rates, should be 1-7".format(day), had_errors=True)
+                            self.record_status("Warn: Bad day_of_week {} provided in energy rates, should be 1-7".format(day), had_errors=True)
                             continue
                         # Store as Python day of week
                         day_of_week.append(day - 1)
@@ -1619,7 +1619,7 @@ class Fetch:
                     rate = float(rate)
                 except (ValueError, TypeError):
                     self.log("Warn: Bad rate {} provided in energy rates".format(rate))
-                    self.record_status("Bad rate {} provided in energy rates".format(rate), had_errors=True)
+                    self.record_status("Warn:Bad rate {} provided in energy rates".format(rate), had_errors=True)
                     continue
 
                 if load_scaling is not None:
@@ -2055,7 +2055,7 @@ class Fetch:
         """
         if not isinstance(curve, dict):
             self.log("Warn: {} is incorrectly configured - ignoring".format(curve_name))
-            self.record_status("{} is incorrectly configured - ignoring".format(curve_name), had_errors=True)
+            self.record_status("Warn: {} is incorrectly configured - ignoring".format(curve_name), had_errors=True)
             return {}
 
         validated_curve = {}
@@ -2066,7 +2066,7 @@ class Fetch:
                 validated_curve[int_key] = value
             except (ValueError, TypeError):
                 self.log("Warn: {} has bad key/value for key {} - ignoring".format(curve_name, key))
-                self.record_status("{} has bad key/value for key {} - ignoring".format(curve_name, key), had_errors=True)
+                self.record_status("Warn: {} has bad key/value for key {} - ignoring".format(curve_name, key), had_errors=True)
 
         return validated_curve
 

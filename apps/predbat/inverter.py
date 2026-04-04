@@ -442,7 +442,7 @@ class Inverter:
                     )
                 )
                 self.base.record_status(
-                    "Inverter time is {}, Predbat computer time {}, this is {} minutes skewed, Predbat may not function correctly, please fix this by updating your inverter time, checking HA is synchronising with your inverter, or fixing Predbat computer time zone".format(
+                    "Warn: Inverter time is {}, Predbat computer time {}, this is {} minutes skewed, Predbat may not function correctly, please fix this by updating your inverter time, checking HA is synchronising with your inverter, or fixing Predbat computer time zone".format(
                         self.inverter_time, now_utc, tdiff
                     ),
                     had_errors=True,
@@ -2746,7 +2746,7 @@ class Inverter:
 
         # Exhausted retry attempts, fail REST GET and fallback to using HA entities (if they have been configured in apps.yaml)
         self.base.log("Warn: Inverter {} unable to read REST data from {} - REST will be skipped for this run".format(self.id, url))
-        self.base.record_status("Inverter {} unable to read REST data from {} - REST will be skipped".format(self.id, url), had_errors=True)
+        self.base.record_status("Warn: Inverter {} unable to read REST data from {} - REST will be skipped".format(self.id, url), had_errors=True)
         return None
 
     def rest_runAll(self, old_data=None):

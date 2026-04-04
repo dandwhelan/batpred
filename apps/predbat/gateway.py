@@ -838,6 +838,16 @@ class GatewayMQTT(ComponentBase):
             saving_start_date = self.get_state_wrapper(self.prefix + ".savings_total_predbat", attribute="start_date")
             saving_total = self.get_state_wrapper(self.prefix + ".savings_total_predbat") or 0
             saving_yesterday = self.get_state_wrapper(self.prefix + ".savings_yesterday_predbat") or 0
+            predbat_status = self.get_state_wrapper(self.prefix + ".status") or "Unknown"
+            predbat_status_detail = self.get_state_wrapper(self.prefix + ".status", attribute="detail") or ""
+            if "error" in predbat_status.lower():
+                # Remove long complex text
+                predbat_status_detail = predbat_status
+                predbat_status = "Server Error"
+            if "warn" in predbat_status.lower():
+                predbat_status_detail = predbat_status
+                predbat_status = "Server warning"
+
             try:
                 saving_total = float(saving_total) / 100.0  # pence → pounds
                 saving_yesterday = float(saving_yesterday) / 100.0  # pence → pounds
@@ -864,6 +874,8 @@ class GatewayMQTT(ComponentBase):
                 "savings_total": saving_total,
                 "savings_total_days": total_days_of_savings,
                 "savings_month_average": saving_month_average,
+                "predbat_status": predbat_status,
+                "predbat_status_detail": predbat_status_detail,
             }
 
             # Only publish if data changed
