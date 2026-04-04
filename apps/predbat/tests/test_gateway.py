@@ -1479,47 +1479,60 @@ class TestPublishPredbatData:
         payload = self._get_payload_with_plan(rows)
         assert payload["timeline"][0] == 2
 
-    def test_block_soc_and_state_for_multi_slot_block(self):
-        """block_soc collects SOC from consecutive rows with the same state."""
+    def test_block_soc_collects_all_slots(self):
+        """block_soc has one entry per slot regardless of state changes."""
         rows = self._make_rows(
             [
                 {"state": "Chrg", "soc_percent": 60},
                 {"state": "Chrg", "soc_percent": 70},
                 {"state": "Chrg", "soc_percent": 80},
-                {"state": "Demand", "soc_percent": 80},
+                {"state": "Demand", "soc_percent": 85},
             ]
         )
         payload = self._get_payload_with_plan(rows)
         assert payload["block_state"] == "Chrg"
-        assert payload["block_soc"] == [60, 70, 80]
+        assert payload["block_soc"] == [60, 70, 80, 85]
 
-    def test_block_soc_extends_single_slot_into_next_state(self):
-        """A single-slot first block is extended into the next block for sparkline rendering."""
+    def test_block_state_from_first_row(self):
+        """block_state is always taken from the first valid row regardless of later states."""
         rows = self._make_rows(
             [
-                {"state": "Chrg", "soc_percent": 60},  # first block — only 1 slot
-                {"state": "Demand", "soc_percent": 62},  # second block — extended into
+                {"state": "Chrg", "soc_percent": 60},
+                {"state": "Demand", "soc_percent": 62},
                 {"state": "Demand", "soc_percent": 64},
             ]
         )
         payload = self._get_payload_with_plan(rows)
-        # block_state should switch to "Demand" and contain >= 2 SOC values
-        assert payload["block_state"] == "Demand"
-        assert len(payload["block_soc"]) >= 2
+        assert payload["block_state"] == "Chrg"
+        assert payload["block_soc"] == [60, 62, 64]
 
-    def test_block_soc_stops_at_state_change_after_two_slots(self):
-        """block_soc stops accumulating once a state change occurs after >= 2 slots."""
+    def test_block_soc_continues_after_state_change(self):
+        """block_soc continues accumulating after state changes — one entry per slot."""
         rows = self._make_rows(
             [
                 {"state": "Exp", "soc_percent": 80},
-                {"state": "Exp", "soc_percent": 70},  # 2 slots — block complete
-                {"state": "Demand", "soc_percent": 70},  # state change closes block
+                {"state": "Exp", "soc_percent": 70},
+                {"state": "Demand", "soc_percent": 70},
                 {"state": "Demand", "soc_percent": 65},
             ]
         )
         payload = self._get_payload_with_plan(rows)
         assert payload["block_state"] == "Exp"
-        assert payload["block_soc"] == [80, 70]
+        assert payload["block_soc"] == [80, 70, 70, 65]
+
+    def test_block_soc_capped_at_24_slots(self):
+        """block_soc collects at most 24 entries even when more rows are present."""
+        rows = self._make_rows([{"state": "Chrg", "soc_percent": 50 + i} for i in range(30)])
+        payload = self._get_payload_with_plan(rows)
+        assert len(payload["block_soc"]) == 24
+        assert payload["block_soc"][0] == 50
+        assert payload["block_soc"][23] == 73
+
+    def test_block_soc_single_entry_extended_to_two(self):
+        """A single-row plan yields block_soc with the value duplicated to ensure >= 2 points."""
+        rows = self._make_rows([{"state": "Chrg", "soc_percent": 60}])
+        payload = self._get_payload_with_plan(rows)
+        assert payload["block_soc"] == [60, 60]
 
     def test_no_plan_rows_gives_empty_block_and_zero_timeline(self):
         """When plan_html has no rows the block fields are empty and timeline is all zeros."""

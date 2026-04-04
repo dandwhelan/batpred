@@ -792,8 +792,6 @@ class GatewayMQTT(ComponentBase):
                 }
 
                 slot_idx = 0
-                current_block_state = None
-                block_done = False
                 for row in rows:
                     try:
                         row_time = datetime.datetime.strptime(row.get("time", ""), "%Y-%m-%dT%H:%M:%S%z")
@@ -815,24 +813,17 @@ class GatewayMQTT(ComponentBase):
                     if slot_idx < 12:
                         timeline[slot_idx] = code
 
-                    # Track current block: consecutive rows with same state.
-                    # If first block is only 1 slot, extend into next block
-                    # so the sparkline always has >= 2 points to render.
-                    if not block_done:
-                        if current_block_state is None:
-                            current_block_state = state
-                            block_state_name = state
-                        if state == current_block_state:
-                            block_soc.append(int(float(row.get("soc_percent", 0) or 0)))
-                        elif len(block_soc) < 2:
-                            # Single-slot block — extend into next block
-                            current_block_state = state
-                            block_state_name = state
-                            block_soc.append(int(float(row.get("soc_percent", 0) or 0)))
-                        else:
-                            block_done = True
+                    if slot_idx == 0:
+                        block_state_name = state
+
+                    if slot_idx < 24:
+                        block_soc.append(int(float(row.get("soc_percent", 0) or 0)))
 
                     slot_idx += 1
+
+                # Ensure at least 2 points so sparkline renderers have a valid range
+                if len(block_soc) == 1:
+                    block_soc.append(block_soc[0])
 
             # Build payload
             saving_start_date = self.get_state_wrapper(self.prefix + ".savings_total_predbat", attribute="start_date")
