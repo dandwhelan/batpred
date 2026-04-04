@@ -5,6 +5,7 @@ import math
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pytz
 import gateway_status_pb2 as pb
 
 import importlib.util
@@ -121,7 +122,7 @@ class TestPlanSerialization:
         plan.ParseFromString(data)
 
         assert plan.plan_version == 42
-        assert plan.timezone == "Europe/London"
+        assert plan.timezone == "GMT0BST,M3.5.0/1,M10.5.0"
         assert len(plan.entries) == 2
         assert plan.entries[0].start_hour == 1
         assert plan.entries[0].start_minute == 30
@@ -208,6 +209,7 @@ class TestInjectEntities:
         gw.prefix = "predbat"
         gw._last_status = None
         gw.args = {}
+        gw.local_tz = pytz.timezone("Europe/London")
         gw._dashboard_calls = {}  # entity_id → (state, attributes)
 
         def capture_dashboard(entity_id, state=None, attributes=None, app=None):
@@ -681,7 +683,7 @@ class TestMQTTIntegration:
         plan.ParseFromString(data)
         assert plan.entries[0].start_hour == 1
         assert plan.entries[0].use_native is True
-        assert plan.timezone == "Europe/London"
+        assert plan.timezone == "GMT0BST,M3.5.0/1,M10.5.0"
 
         # Verify plan_version is monotonically increasing
         data2 = GatewayMQTT.build_execution_plan(entries, plan_version=2, timezone="Europe/London")
@@ -1239,6 +1241,7 @@ class TestPublishPredbatData:
         gw.prefix = "predbat"
         gw._topic_base = "predbat/devices/pbgw_test"
         gw._last_predbat_data = None
+        gw.local_tz = pytz.timezone("Europe/London")
         gw._published = []  # (topic, payload, retain) tuples
 
         defaults = {
@@ -1538,6 +1541,75 @@ class TestPublishPredbatData:
         assert retain is True
 
 
+class TestIanaToPosixTz:
+    """Tests for GatewayMQTT.iana_to_posix_tz() — IANA to POSIX TZ string conversion."""
+
+    def _convert(self, iana_tz):
+        from gateway import GatewayMQTT
+
+        return GatewayMQTT.iana_to_posix_tz(iana_tz)
+
+    def test_europe_london(self):
+        """Europe/London returns the DST-aware POSIX string."""
+        result = self._convert("Europe/London")
+        assert result == "GMT0BST,M3.5.0/1,M10.5.0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_america_new_york(self):
+        """America/New_York returns the US Eastern POSIX string."""
+        result = self._convert("America/New_York")
+        assert result == "EST5EDT,M3.2.0,M11.1.0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_australia_sydney(self):
+        """Australia/Sydney returns the AEST/AEDT POSIX string."""  # cspell:disable-line
+        result = self._convert("Australia/Sydney")
+        assert result == "AEST-10AEDT,M10.1.0,M4.1.0/3", f"Got {result!r}"  # cspell:disable-line
+
+    def test_asia_kolkata_half_hour_offset(self):
+        """Asia/Kolkata (UTC+5:30) includes the fractional-hour offset."""
+        result = self._convert("Asia/Kolkata")
+        assert result == "IST-5:30", f"Got {result!r}"  # cspell:disable-line
+
+    def test_utc(self):
+        """UTC maps to 'UTC0'."""
+        result = self._convert("UTC")
+        assert result == "UTC0", f"Got {result!r}"
+
+    def test_returns_non_empty_string(self):
+        """Always returns a non-empty string for any well-known zone."""
+        for iana in ["Europe/Paris", "America/Los_Angeles", "Asia/Tokyo", "Australia/Perth"]:
+            result = self._convert(iana)
+            assert isinstance(result, str) and result, f"{iana} returned empty/non-string: {result!r}"
+
+    def test_posix_string_format(self):
+        """Result never contains spaces and always contains at least one digit (the offset)."""
+        for iana in ["Europe/London", "America/New_York", "Asia/Kolkata", "UTC"]:
+            result = self._convert(iana)
+            assert " " not in result, f"{iana} result has spaces: {result!r}"
+            assert any(c.isdigit() for c in result), f"{iana} result has no digit: {result!r}"
+
+    def test_pytz_object_input(self):
+        """Accepts a pytz timezone object (str() is called internally)."""
+        import pytz
+
+        result = self._convert(pytz.timezone("Europe/London"))
+        assert result == "GMT0BST,M3.5.0/1,M10.5.0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_invalid_zone_returns_utc0(self):
+        """Unknown/invalid zone name falls back to 'UTC0' instead of raising."""
+        result = self._convert("Invalid/NotAZone")
+        assert result == "UTC0", f"Got {result!r}"  # cspell:disable-line
+
+    def test_build_execution_plan_encodes_posix_tz(self):
+        """build_execution_plan() stores the POSIX string in plan.timezone, not the raw IANA name."""
+        from gateway import GatewayMQTT
+
+        data = GatewayMQTT.build_execution_plan([], plan_version=1, timezone="Europe/London")
+        plan = pb.ExecutionPlan()
+        plan.ParseFromString(data)
+        assert plan.timezone != "Europe/London", "plan.timezone must be POSIX string, not IANA name"
+        assert plan.timezone == "GMT0BST,M3.5.0/1,M10.5.0", f"Got {plan.timezone!r}"  # cspell:disable-line
+
+
 def run_gateway_tests(my_predbat=None):
     """Run all GatewayMQTT tests. Returns True on failure, False on success."""
     test_classes = [
@@ -1554,6 +1626,7 @@ def run_gateway_tests(my_predbat=None):
         TestPlanHookConversion,
         TestMQTTIntegration,
         TestPublishPredbatData,
+        TestIanaToPosixTz,
     ]
     for cls in test_classes:
         instance = cls()
