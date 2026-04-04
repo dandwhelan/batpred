@@ -373,10 +373,10 @@ timestep
 timestr
 timezone
 tojson
-tzfile
 Trefor
 treforsiphone
 twinx
+tzfile
 tzpath
 unsmoothed
 unstaged
