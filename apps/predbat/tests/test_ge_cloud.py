@@ -54,6 +54,7 @@ class MockGECloudDirect(GECloudDirect):
         self.ems_device = None
         self.gateway_device = None
         self._now_utc_exact = datetime.now(timezone.utc)
+
         class MockHAInterface:
             def __init__(self):
                 self.external_states = {}
