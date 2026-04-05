@@ -16,7 +16,7 @@ import json
 from unittest.mock import MagicMock, patch, AsyncMock
 import tempfile
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tests.test_infra import create_aiohttp_mock_response, create_aiohttp_mock_session, run_async
 
 
@@ -53,9 +53,8 @@ class MockGECloudDirect(GECloudDirect):
         self.evc_devices_dict = []
         self.ems_device = None
         self.gateway_device = None
-        self._now_utc_exact = datetime.now()
+        self._now_utc_exact = datetime.now(timezone.utc)
 
-        # Mock base with ha_interface for set_state_external calls
         class MockHAInterface:
             def __init__(self):
                 self.external_states = {}
@@ -115,7 +114,7 @@ class MockGECloudData(GECloudData):
         self._config_root = config_root
         self.log_messages = []
         self.config_args = {}
-        self._now_utc_exact = datetime.now()
+        self._now_utc_exact = datetime.now(timezone.utc)
 
     @property
     def config_root(self):
@@ -1122,6 +1121,33 @@ def _test_async_get_evc_device_data(my_predbat):
                 print(f"ERROR: Expected 2 valid measurands, got {len(result)}")
                 return 1
 
+        # Scenario 6: BST timezone - verify UTC times are sent to API
+        # After clocks move to BST (UTC+1), now_utc_exact returns BST time.
+        # The API expects UTC times (EVC always works on GMT), so we must convert.
+        bst_tz = timezone(timedelta(hours=1))
+        bst_time = datetime(2026, 3, 29, 10, 37, 15, tzinfo=bst_tz)  # 10:37:15 BST = 09:37:15 UTC
+        ge_cloud._now_utc_exact = bst_time
+        captured_kwargs = {}
+
+        async def mock_get_data_capture(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {"data": []}
+
+        with patch("gecloud.asyncio.sleep", new_callable=AsyncMock):
+            ge_cloud.async_get_inverter_data_retry = mock_get_data_capture
+
+            await ge_cloud.async_get_evc_device_data(test_uuid, previous_data)
+
+            # API must receive UTC times, not BST times
+            expected_end_utc = "2026-03-29T09:37:15Z"
+            expected_start_utc = "2026-03-29T09:27:15Z"
+            if captured_kwargs.get("end_time") != expected_end_utc:
+                print(f"ERROR: BST test: Expected end_time {expected_end_utc}, got {captured_kwargs.get('end_time')}")
+                return 1
+            if captured_kwargs.get("start_time") != expected_start_utc:
+                print(f"ERROR: BST test: Expected start_time {expected_start_utc}, got {captured_kwargs.get('start_time')}")
+                return 1
+
         return 0
 
     return run_async(test())
@@ -1390,6 +1416,33 @@ def _test_async_get_evc_sessions(my_predbat):
 
             if result != previous_sessions:
                 print("ERROR: Expected fallback to previous when None, got {}".format(result))
+                return 1
+
+        # Test BST timezone - verify UTC times are sent to API
+        # After clocks move to BST (UTC+1), now_utc_exact returns BST time.
+        # The EVC always works on GMT so the API expects UTC times.
+        bst_tz = timezone(timedelta(hours=1))
+        bst_time = datetime(2026, 3, 29, 10, 37, 15, tzinfo=bst_tz)  # 10:37:15 BST = 09:37:15 UTC
+        ge_cloud._now_utc_exact = bst_time
+        captured_kwargs = {}
+
+        async def mock_retry_bst_capture(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        with patch("gecloud.asyncio.sleep", new_callable=AsyncMock):
+            ge_cloud.async_get_inverter_data_retry = mock_retry_bst_capture
+
+            await ge_cloud.async_get_evc_sessions(test_uuid)
+
+            # API must receive UTC times, not BST times
+            expected_end_utc = "2026-03-29T09:37:15Z"
+            expected_start_utc = "2026-03-28T09:37:15Z"  # 24 hours earlier
+            if captured_kwargs.get("end_time") != expected_end_utc:
+                print("ERROR: BST test: Expected end_time {}, got {}".format(expected_end_utc, captured_kwargs.get("end_time")))
+                return 1
+            if captured_kwargs.get("start_time") != expected_start_utc:
+                print("ERROR: BST test: Expected start_time {}, got {}".format(expected_start_utc, captured_kwargs.get("start_time")))
                 return 1
 
         return 0

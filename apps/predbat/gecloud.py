@@ -13,7 +13,7 @@ management via the GivEnergy Cloud REST API.
 """
 
 import aiohttp
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from utils import str2time, dp1, dp2
 from predbat_metrics import record_api_call
 import asyncio
@@ -1106,7 +1106,7 @@ class GECloudDirect(ComponentBase):
         """
         Get list of EVC sessions
         """
-        now = self.now_utc_exact
+        now = self.now_utc_exact.astimezone(timezone.utc)
         start = now - timedelta(hours=24)
         start_time = start.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1120,7 +1120,7 @@ class GECloudDirect(ComponentBase):
         """
         Get smart device data points
         """
-        now = self.now_utc_exact
+        now = self.now_utc_exact.astimezone(timezone.utc)
         start = now - timedelta(minutes=10)
         start_time = start.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
