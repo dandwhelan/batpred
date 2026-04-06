@@ -2746,7 +2746,7 @@ chart.render();
 
             text += self.render_chart(series_data, f"Daily Savings ({self.currency_symbols[0]})", "Cost Savings Analysis", now_str, daily_chart=False, extra_yaxis=secondary_axis)
         elif chart == "MarginalCosts":
-            sensor_attrs = self.base.dashboard_values.get('sensor.' + self.prefix + "_marginal_energy_costs", {}).get("attributes", {})
+            sensor_attrs = self.base.dashboard_values.get("sensor." + self.prefix + "_marginal_energy_costs", {}).get("attributes", {})
             matrix = sensor_attrs.get("matrix", {})
             energy_labels = list(matrix.keys())
             time_labels = list(next(iter(matrix.values()), {}).keys())

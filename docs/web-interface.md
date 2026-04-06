@@ -106,9 +106,9 @@ The chart also shows where charging is planned under the Base and Best scenarios
 - **LoadMLPower** - Similar to the Load ML chart, but also plots actual PV production, predicted PV production and temperature predictions.
 - **MarginalCosts** - Shows the marginal cost of consuming extra electricity at different load levels (1, 2, 4, 8 kWh) across upcoming time windows.
   The page contains three sections:
-  - A status table showing whether the current marginal rate for each load level is **cheap** or **moderate** based on today's import rate range
-  - A compact **Grid Rates** heatmap showing the actual import and export rate at each time window
-  - A full **Marginal Energy Cost** heatmap matrix coloured green (cheap) to red (expensive) on a shared scale
+    - A status table showing whether the current marginal rate for each load level is **cheap** or **moderate** based on today's import rate range
+    - A compact **Grid Rates** heatmap showing the actual import and export rate at each time window
+    - A full **Marginal Energy Cost** heatmap matrix coloured green (cheap) to red (expensive) on a shared scale
 
 Example PV chart:
 
