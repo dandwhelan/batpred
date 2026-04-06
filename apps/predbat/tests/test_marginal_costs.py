@@ -18,7 +18,8 @@ def test_marginal_costs(my_predbat):
     """
     Test the marginal energy cost matrix calculation.
 
-    Verifies that calculate_marginal_costs() produces a correctly structured 4x4 matrix,
+    Verifies that calculate_marginal_costs() produces a correctly structured 4×7 matrix
+    (4 load levels: low/med/high/ev × 7 time windows: now through +12 h in 2-hour steps),
     all values are numeric, and min/max bounds are sane.
     """
     failed = False

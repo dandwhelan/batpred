@@ -76,7 +76,7 @@ from component_base import ComponentBase
 from config import APPS_SCHEMA
 from web_metrics_dashboard import get_metrics_dashboard_css, get_metrics_dashboard_body
 from predbat_metrics import metrics_handler, metrics_json_handler, metrics, PROMETHEUS_AVAILABLE
-from marginal import MARGINAL_EXTRA_KWH_LEVEL_NAMES, MARGINAL_EXTRA_KWH_LEVELS
+from marginal import MARGINAL_EXTRA_KWH_LEVEL_NAMES, MARGINAL_EXTRA_KWH_LEVELS, MARGINAL_TIME_OFFSETS
 
 ROOT_YAML_KEY = "pred_bat"
 
@@ -2761,7 +2761,7 @@ chart.render();
                 # Status table — cheap/moderate for each level
                 curr = self.currency_symbols[1]
                 text += "<br><h2>Marginal Energy Costs</h2>\n"
-                text += "<p>Marginal costs for each additional kWh of load, based on current plan. Shows how much more expensive (or cheaper) it is to use more energy right now.</p>\n"
+                text += "<p>Marginal costs for each additional kWh of load, based on current plan. Shows how much more expensive (or cheaper) it is to use more energy than forecasted.</p>\n"
                 text += "<table style='border-collapse:collapse;margin-bottom:16px;font-size:0.95em;'>\n"
                 text += "<tr><th style='padding:6px 12px;border:1px solid #555;text-align:left;'>Level</th>"
                 text += "<th style='padding:6px 12px;border:1px solid #555;'>kWh</th>"
@@ -2799,6 +2799,47 @@ chart.render();
                     marginal_series.append({"name": "{}kWh".format(label), "data": data_points})
                 text += "<div id='chart'></div>\n"
                 text += self.render_heatmap_chart(marginal_series, title, range_min, range_max, chart_id="chart")
+                # Historical + forecast line chart
+                marginal_hist = self.get_history_with_now_attrs("sensor." + self.prefix + "_marginal_energy_costs", 7)
+
+                def _mhist(key):
+                    return prune_today(history_attribute(marginal_hist, attributes=True, state_key=key), self.now_utc, self.midnight_utc, prune=False, prune_past_days=7, prune_future=True)
+
+                hist_low = _mhist("rate_now_low_consumption")
+                hist_med = _mhist("rate_now_med_consumption")
+                hist_high = _mhist("rate_now_high_consumption")
+                hist_ev = _mhist("rate_now_ev_consumption")
+                hist_import = _mhist("grid_import_now")
+                hist_export = _mhist("grid_export_now")
+
+                # Build forward-looking series from matrix — use actual datetime from offset, not just HH:MM
+                fwd_low, fwd_med, fwd_high, fwd_ev, fwd_import_fwd, fwd_export_fwd = {}, {}, {}, {}, {}, {}
+                for idx, offset in enumerate(MARGINAL_TIME_OFFSETS):
+                    t_label = time_labels[idx]
+                    ts = (self.now_utc + timedelta(minutes=offset)).isoformat()
+                    fwd_low[ts] = matrix.get(MARGINAL_EXTRA_KWH_LEVELS[0], {}).get(t_label, 0)
+                    fwd_med[ts] = matrix.get(MARGINAL_EXTRA_KWH_LEVELS[1], {}).get(t_label, 0)
+                    fwd_high[ts] = matrix.get(MARGINAL_EXTRA_KWH_LEVELS[2], {}).get(t_label, 0)
+                    fwd_ev[ts] = matrix.get(MARGINAL_EXTRA_KWH_LEVELS[3], {}).get(t_label, 0)
+                    fwd_import_fwd[ts] = grid_import.get(t_label, 0)
+                    fwd_export_fwd[ts] = grid_export.get(t_label, 0)
+
+                line_series = [
+                    {"name": "Low 1kWh", "data": hist_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#3291a8"},
+                    {"name": "Low 1kWh (future)", "data": fwd_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#3291a8"},
+                    {"name": "Med 2kWh", "data": hist_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#f5a442"},
+                    {"name": "Med 2kWh (future)", "data": fwd_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#f5a442"},
+                    {"name": "High 4kWh", "data": hist_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb2323"},
+                    {"name": "High 4kWh (future)", "data": fwd_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb2323"},
+                    {"name": "EV 8kWh (future)", "data": fwd_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#9b59b6"},
+                    {"name": "EV 8kWh", "data": hist_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#9b59b6"},
+                    {"name": "Import rate", "data": hist_import, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb8b"},
+                    {"name": "Export rate", "data": hist_export, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb1c"},
+                    {"name": "Import rate (future)", "data": fwd_import_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb8b"},
+                    {"name": "Export rate (future)", "data": fwd_export_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb1c"},
+                ]
+                text += "<div id='chart_marginal_hist'></div>\n"
+                text += self.render_chart(line_series, curr, "Marginal Energy Rates \u2014 History & Forecast", now_str, tagname="chart_marginal_hist", daily_chart=False)
         else:
             text += "<br><h2>Unknown chart type</h2>"
 

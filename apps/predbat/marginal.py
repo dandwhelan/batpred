@@ -41,7 +41,7 @@ class Marginal:
 
         Runs an internal baseline prediction (save=None, so standing charges are
         excluded) against the current best plan, then runs N what-if simulations
-        (5 extra-kWh levels x 6 time windows) with the same save=None conditions.
+        with the same save=None conditions.
         Taking the delta against the internal baseline ensures both sides are
         computed consistently without the standing-charge offset that is only
         added when save='best'/'base'.
@@ -80,18 +80,16 @@ class Marginal:
 
                 # Deep-copy both load forecasts to avoid mutating shared data
                 modified_load = copy.deepcopy(self.load_minutes_step)
-                modified_load10 = copy.deepcopy(self.load_minutes_step10)
 
                 # Inject extra load into the 1-hour window starting at `offset` minutes from now
                 for minute in range(offset, offset + 60, PREDICT_STEP):
                     if minute in modified_load:
                         modified_load[minute] += extra_per_step
-                    if minute in modified_load10:
-                        modified_load10[minute] += extra_per_step
 
                 # Create a fresh Prediction with the modified load; this updates PRED_GLOBAL
                 # which is safe since we run synchronously (pool is idle at this point)
-                pred = Prediction(self, self.pv_forecast_minute_step, self.pv_forecast_minute10_step, modified_load, modified_load10)
+                # No need to include 10% extra load as we only run normal simulations.
+                pred = Prediction(self, self.pv_forecast_minute_step, self.pv_forecast_minute_step, modified_load, modified_load)
 
                 # Run prediction against the current best charge/discharge plan, no save to HA
                 (new_metric, *_) = pred.run_prediction(
@@ -128,7 +126,7 @@ class Marginal:
         """Publish the marginal energy cost matrix as a Home Assistant sensor.
 
         The sensor state is the 1kWh/now cell (most immediate scenario).
-        The full 5x5 matrix is stored in the 'matrix' attribute.
+        The full matrix is stored in the 'matrix' attribute.
         """
         if not getattr(self, "marginal_costs_matrix", None):
             return
@@ -148,6 +146,7 @@ class Marginal:
             "grid_export": getattr(self, "marginal_grid_export", {}),
             "grid_import_now": dp2(self.rate_import.get(self.minutes_now, 0)),
             "grid_export_now": dp2(self.rate_export.get(self.minutes_now, 0)),
+            "timestamp": self.now_utc.isoformat(),
         }
 
         min_import_cost = self.rate_min
