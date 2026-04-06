@@ -2802,15 +2802,15 @@ chart.render();
                 # Historical + forecast line chart
                 marginal_hist = self.get_history_with_now_attrs("sensor." + self.prefix + "_marginal_energy_costs", 7)
 
-                def _mhist(key):
+                def _marginal_history(key):
                     return prune_today(history_attribute(marginal_hist, attributes=True, state_key=key), self.now_utc, self.midnight_utc, prune=False, prune_past_days=7, prune_future=True)
 
-                hist_low = _mhist("rate_now_low_consumption")
-                hist_med = _mhist("rate_now_med_consumption")
-                hist_high = _mhist("rate_now_high_consumption")
-                hist_ev = _mhist("rate_now_ev_consumption")
-                hist_import = _mhist("grid_import_now")
-                hist_export = _mhist("grid_export_now")
+                hist_low = _marginal_history("rate_now_low_consumption")
+                hist_med = _marginal_history("rate_now_med_consumption")
+                hist_high = _marginal_history("rate_now_high_consumption")
+                hist_ev = _marginal_history("rate_now_ev_consumption")
+                hist_import = _marginal_history("grid_import_now")
+                hist_export = _marginal_history("grid_export_now")
 
                 # Build forward-looking series from matrix — use actual datetime from offset, not just HH:MM
                 fwd_low, fwd_med, fwd_high, fwd_ev, fwd_import_fwd, fwd_export_fwd = {}, {}, {}, {}, {}, {}
