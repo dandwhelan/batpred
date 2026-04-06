@@ -291,10 +291,6 @@ class FutureRate:
 
         adjust_import = self.get_arg("futurerate_adjust_import", False)
         adjust_export = self.get_arg("futurerate_adjust_export", False)
-        adjust_auto = self.get_arg("futurerate_adjust_auto", False)
-        if adjust_auto:
-            adjust_import, adjust_export = self.import_export_is_agile()
-
         mdata_import = self.futurerate_calibrate(rate_import_real if adjust_import else {}, mdata_import, is_import=True, peak_start_minutes=peak_start_minutes, peak_end_minutes=peak_end_minutes)
         mdata_export = self.futurerate_calibrate(rate_export_real if adjust_export else {}, mdata_export, is_import=False, peak_start_minutes=peak_start_minutes, peak_end_minutes=peak_end_minutes)
 
@@ -324,6 +320,9 @@ class FutureRate:
             futurerate_adjust_auto = self.get_arg("futurerate_adjust_auto", False)
             if futurerate_adjust_auto:
                 import_agile, export_agile = self.import_export_is_agile()
+                # Change settings based on auto
+                self.set_arg("futurerate_adjust_import", import_agile)
+                self.set_arg("futurerate_adjust_export", export_agile)
                 if not import_agile and not export_agile:
                     return {}, {}
             return self.futurerate_analysis_new(url, rate_import_real, rate_export_real)
