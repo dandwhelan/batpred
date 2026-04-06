@@ -29,6 +29,7 @@ class FutureRate:
         self.plan_interval_minutes = base.plan_interval_minutes
         self.log = base.log
         self.get_arg = base.get_arg
+        self.set_arg = base.set_arg
         self.midnight = base.midnight
         self.midnight_utc = base.midnight_utc
         self.forecast_days = base.forecast_days
@@ -37,6 +38,14 @@ class FutureRate:
         self.time_abs_str = base.time_abs_str
         self.futurerate_url_cache = base.futurerate_url_cache
         self.get_state_wrapper = base.get_state_wrapper
+
+        futurerate_adjust_auto = self.get_arg("futurerate_adjust_auto", False)
+        if futurerate_adjust_auto:
+            import_agile, export_agile = self.import_export_is_agile()
+            # Change settings based on auto
+            self.set_arg("futurerate_adjust_import", import_agile)
+            self.set_arg("futurerate_adjust_export", export_agile)
+
 
     def futurerate_calibrate(self, real_mdata, mdata, is_import, peak_start_minutes, peak_end_minutes):
         """
@@ -314,17 +323,14 @@ class FutureRate:
         if not url:
             return {}, {}
 
-        self.log("Fetching futurerate data from {}".format(url))
 
         if "DATE" in url:
-            futurerate_adjust_auto = self.get_arg("futurerate_adjust_auto", False)
-            if futurerate_adjust_auto:
-                import_agile, export_agile = self.import_export_is_agile()
-                # Change settings based on auto
-                self.set_arg("futurerate_adjust_import", import_agile)
-                self.set_arg("futurerate_adjust_export", export_agile)
-                if not import_agile and not export_agile:
-                    return {}, {}
+            import_agile = self.get_arg("futurerate_adjust_import", False)
+            export_agile = self.get_arg("futurerate_adjust_export", False)
+            if not import_agile and not export_agile:
+                self.log("FutureRate: No futurerate adjustment enabled, skipping futurerate analysis")
+                return {}, {}
+            self.log("Fetching futurerate data from {}".format(url))
             return self.futurerate_analysis_new(url, rate_import_real, rate_export_real)
         else:
             print("Warning: Old futurerate URL, you must update this in apps.yaml")

@@ -2160,6 +2160,7 @@ APPS_SCHEMA = {
     "futurerate_url": {"type": "string", "empty": False},
     "futurerate_adjust_import": {"type": "boolean"},
     "futurerate_adjust_export": {"type": "boolean"},
+    "futurerate_adjust_auto": {"type": "boolean"},
     "futurerate_peak_start": {"type": "string", "empty": False},
     "futurerate_peak_end": {"type": "string", "empty": False},
     "octopus_region": {"type": "string", "empty": False},

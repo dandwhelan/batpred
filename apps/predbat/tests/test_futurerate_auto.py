@@ -61,6 +61,10 @@ class MockFutureRateBase:
     def get_arg(self, arg, default=None, indirect=False):
         """Return value from args dict or the supplied default."""
         return self.args.get(arg, default)
+    
+    def set_arg(self, arg, value):
+        """Helper to set args for tests."""
+        self.args[arg] = value
 
     def time_abs_str(self, minutes):
         """Convert minutes-since-midnight to HH:MM string."""
@@ -257,9 +261,10 @@ def _test_futurerate_auto_no_url(my_predbat):
 
 
 def _test_futurerate_auto_disabled_proceeds(my_predbat):
-    """futurerate_adjust_auto=False: always calls futurerate_analysis_new regardless of tariff."""
+    """futurerate_adjust_auto=False with a manual flag set: calls futurerate_analysis_new."""
     base = MockFutureRateBase()
     base.args["futurerate_adjust_auto"] = False
+    base.args["futurerate_adjust_import"] = True
     future = _make_future_rate(base)
 
     sentinel = ({"key": 1}, {"key": 2})
