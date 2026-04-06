@@ -61,7 +61,7 @@ class MockFutureRateBase:
     def get_arg(self, arg, default=None, indirect=False):
         """Return value from args dict or the supplied default."""
         return self.args.get(arg, default)
-    
+
     def set_arg(self, arg, value):
         """Helper to set args for tests."""
         self.args[arg] = value

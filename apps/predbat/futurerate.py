@@ -46,7 +46,6 @@ class FutureRate:
             self.set_arg("futurerate_adjust_import", import_agile)
             self.set_arg("futurerate_adjust_export", export_agile)
 
-
     def futurerate_calibrate(self, real_mdata, mdata, is_import, peak_start_minutes, peak_end_minutes):
         """
         Calibrate nordpool data
@@ -322,7 +321,6 @@ class FutureRate:
             url = self.base.args["futurerate_url"]
         if not url:
             return {}, {}
-
 
         if "DATE" in url:
             import_agile = self.get_arg("futurerate_adjust_import", False)
