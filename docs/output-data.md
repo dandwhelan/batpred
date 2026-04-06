@@ -613,16 +613,16 @@ levels and at different times in the upcoming forecast window. The results are p
 
 - **sensor.predbat_marginal_energy_costs** - The primary marginal cost sensor. State is the 1 kWh marginal cost for the current time window.
   Attributes include:
-  - `matrix` - Nested dict `{kWh_level: {HH:MM: cost_p_per_kWh}}` for all simulated load levels and time windows
-  - `grid_import` - Dict of actual grid import rate (p/kWh) at each time window label
-  - `grid_export` - Dict of actual grid export rate (p/kWh) at each time window label
-  - `grid_import_now` - Current grid import rate (p/kWh)
-  - `grid_export_now` - Current grid export rate (p/kWh)
-  - `baseline_metric` - Internal baseline cost used to compute deltas (standing charge excluded)
-  - `rate_now_low_consumption` - Marginal cost now for the 'low' (1 kWh) load level
-  - `rate_now_med_consumption` - Marginal cost now for the 'med' (2 kWh) load level
-  - `rate_now_high_consumption` - Marginal cost now for the 'high' (4 kWh) load level
-  - `rate_now_ev_consumption` - Marginal cost now for the 'ev' (8 kWh) load level
+    - `matrix` - Nested dict `{kWh_level: {HH:MM: cost_p_per_kWh}}` for all simulated load levels and time windows
+    - `grid_import` - Dict of actual grid import rate (p/kWh) at each time window label
+    - `grid_export` - Dict of actual grid export rate (p/kWh) at each time window label
+    - `grid_import_now` - Current grid import rate (p/kWh)
+    - `grid_export_now` - Current grid export rate (p/kWh)
+    - `baseline_metric` - Internal baseline cost used to compute deltas (standing charge excluded)
+    - `rate_now_low_consumption` - Marginal cost now for the 'low' (1 kWh) load level
+    - `rate_now_med_consumption` - Marginal cost now for the 'med' (2 kWh) load level
+    - `rate_now_high_consumption` - Marginal cost now for the 'high' (4 kWh) load level
+    - `rate_now_ev_consumption` - Marginal cost now for the 'ev' (8 kWh) load level
 
 ### Cheap/moderate binary sensors
 
