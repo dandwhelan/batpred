@@ -198,6 +198,7 @@ attribute_table = {
     "grid_import_total": {"friendly_name": "Grid Import Total", "icon": "mdi:transmission-tower", "unit_of_measurement": "kWh", "device_class": "energy", "state_class": "total"},
     "grid_export_total": {"friendly_name": "Grid Export Total", "icon": "mdi:transmission-tower", "unit_of_measurement": "kWh", "device_class": "energy", "state_class": "total"},
     "max_charge_rate": {"friendly_name": "Max Charge Rate", "icon": "mdi:battery", "unit_of_measurement": "W", "device_class": "power"},
+    "max_inverter_rate": {"friendly_name": "Max Inverter Rate", "icon": "mdi:flash", "unit_of_measurement": "W", "device_class": "power"},
     "battery_size": {"friendly_name": "Battery Size", "icon": "mdi:battery", "unit_of_measurement": "kWh", "device_class": "energy"},
     "battery_dod": {"friendly_name": "Battery Depth of Discharge", "icon": "mdi:battery", "unit_of_measurement": "*", "device_class": "battery"},
     "model": {"friendly_name": "Model", "icon": "mdi:information", "unit_of_measurement": None},
@@ -388,6 +389,23 @@ class GECloudDirect(ComponentBase):
                 dod = info.get("battery", {}).get("depth_of_discharge", None)
                 model = info.get("model", "Unknown")
                 max_charge_rate = info.get("max_charge_rate", 0)
+                max_inverter_rate = max_charge_rate # Default to max charge rate
+
+                # If the model ends in a number like GIV-HY3.6 then we can try to extract the inverter rating and save to max_inverter_rate
+                if '.' in model:
+                    # Keep all the characters from the end backwards until we get something not a number
+                    rating_str = ''
+                    for char in model[::-1]:
+                        if char.isdigit() or char == '.':
+                            rating_str = char + rating_str
+                        else:
+                            break
+                    try:
+                        max_inverter_rate = int(float(rating_str) * 1000)
+                        self.log("GECloud: Extracted inverter rating of {}W from model {}".format(max_inverter_rate, model))
+                    except ValueError:
+                        pass
+
 
                 capacity = None
                 if cap and volt:
@@ -396,7 +414,7 @@ class GECloudDirect(ComponentBase):
                     except (ValueError, TypeError):
                         pass
 
-                self.log("GECloud: Updated data for device {}: battery capacity {}kWh, max charge rate {}kW".format(device, capacity, max_charge_rate))
+                self.log("GECloud: Updated data for device {}: battery capacity {}kWh, max charge rate {}kW, max inverter rate {}W".format(device, capacity, max_charge_rate, max_inverter_rate))
 
                 self.dashboard_item(entity_name + "_battery_size", capacity, attributes=attribute_table.get("battery_size", {}), app="gecloud")
                 self.dashboard_item(entity_name + "_max_charge_rate", max_charge_rate, attributes=attribute_table.get("max_charge_rate", {}), app="gecloud")
@@ -404,6 +422,7 @@ class GECloudDirect(ComponentBase):
                 model_attr = attribute_table.get("model", {}).copy()
                 model_attr["details"] = device_info
                 self.dashboard_item(entity_name + "_model", model, attributes=model_attr, app="gecloud")
+                self.dashboard_item(entity_name + "_max_inverter_rate", max_inverter_rate, attributes=attribute_table.get("max_inverter_rate", {}), app="gecloud")
                 self.dashboard_item(entity_name + "_last_updated", last_updated, attributes=attribute_table.get("time", {}), app="gecloud")
 
     async def publish_evc_data(self, serial, evc_data):
@@ -772,6 +791,7 @@ class GECloudDirect(ComponentBase):
         self.set_arg("scheduled_discharge_enable", [f"switch.{self.prefix}_gecloud_{device}_enable_dc_discharge" for device in batteries])
         self.set_arg("battery_temperature", [f"sensor.{self.prefix}_gecloud_{device}_battery_temperature" for device in batteries])
         self.set_arg("battery_scaling", [f"sensor.{self.prefix}_gecloud_{device}_battery_dod" for device in batteries])
+        self.set_arg("inverter_limit", [f"sensor.{self.prefix}_gecloud_{device}_max_inverter_rate" for device in batteries])
 
         if len(batteries):
             self.set_arg("battery_temperature_history", f"sensor.{self.prefix}_gecloud_{batteries[0]}_battery_temperature")
@@ -1328,6 +1348,7 @@ class GECloudDirect(ComponentBase):
         Get basis status for inverter
         """
         result = await self.async_get_inverter_data_retry(GE_API_INVERTER_STATUS, serial)
+        self.log("GECloud: Status for {}: {}".format(serial, result))
         if result is None:
             return previous
         return result
@@ -1703,6 +1724,14 @@ class GECloudData(ComponentBase):
         return self.mdata, self.oldest_data_time
 
 
+class MockHAInterface:  # pragma: no cover
+    """Mock HA interface for testing"""
+
+    def __init__(self):
+        pass
+    async def set_state_external(self, entity_id, state):
+        print(f"Set state external {entity_id} = {state}")
+
 class MockBase:  # pragma: no cover
     """Mock base class for testing"""
 
@@ -1716,6 +1745,7 @@ class MockBase:  # pragma: no cover
         self.entities = {}
         self.config_root = "./temp_gecloud"
         self.plan_interval_minutes = 30
+        self.ha_interface = MockHAInterface()
 
     def get_state_wrapper(self, entity_id, default=None, attribute=None, refresh=False, required_unit=None, raw=None):
         if raw:
@@ -1737,7 +1767,7 @@ class MockBase:  # pragma: no cover
             print(f"  Attributes: {json.dumps(attributes, indent=2)}")
         self.set_state_wrapper(entity_id, state, attributes)
 
-    def get_arg(self, key, default=None):
+    def get_arg(self, arg, default=None, indirect=True, combine=False, attribute=None, index=None, domain=None, can_override=True, required_unit=None):
         return default
 
     def set_arg(self, key, value):
