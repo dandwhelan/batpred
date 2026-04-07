@@ -1358,7 +1358,6 @@ class GECloudDirect(ComponentBase):
         Get basis status for inverter
         """
         result = await self.async_get_inverter_data_retry(GE_API_INVERTER_STATUS, serial)
-        self.log("GECloud: Status for {}: {}".format(serial, result))
         if result is None:
             return previous
         return result
