@@ -382,7 +382,6 @@ class GECloudDirect(ComponentBase):
         if matches:
             try:
                 max_inverter_rate = int(float(matches[-1]) * 1000)
-                self.log("GECloud: Extracted inverter rating of {}W from model {}".format(max_inverter_rate, model))
                 return max_inverter_rate
             except ValueError:
                 pass
