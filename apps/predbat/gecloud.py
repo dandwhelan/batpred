@@ -364,16 +364,16 @@ class GECloudDirect(ComponentBase):
 
     def get_max_inverter_rate_from_model(self, model, max_charge_rate=None):
         """
-            GivEnergy models (descriptive names):
-            - All-In-One  - 6kW inverter with integrated battery, should use the max_charge_rate value as the inverter rating
-            - Gateway     - Not an inverter, should use the individual inverter values
-            - GIV-AC3.0.  - 3kW inverter
-            - GIV-AIO-AC-13.5-12.0  - 12kW inverter (last decimal number is the inverter power)
-            - GIV-HY-10.0-G3-HV - 10kW inverter (decimal number is mid-string)
-            - GIV-HY3.6         - 3.6kW inverter
-            - GIV-HY5.0         - 5.0kW inverter
-            - GIV-HY-8.0-G3-HV. - 8kW inverter
-            - Plant EMS   - Not an inverter, should use the individual inverter values
+        GivEnergy models (descriptive names):
+        - All-In-One  - 6kW inverter with integrated battery, should use the max_charge_rate value as the inverter rating
+        - Gateway     - Not an inverter, should use the individual inverter values
+        - GIV-AC3.0.  - 3kW inverter
+        - GIV-AIO-AC-13.5-12.0  - 12kW inverter (last decimal number is the inverter power)
+        - GIV-HY-10.0-G3-HV - 10kW inverter (decimal number is mid-string)
+        - GIV-HY3.6         - 3.6kW inverter
+        - GIV-HY5.0         - 5.0kW inverter
+        - GIV-HY-8.0-G3-HV. - 8kW inverter
+        - Plant EMS   - Not an inverter, should use the individual inverter values
         """
 
         # Find all decimal numbers anywhere in the model string (e.g. 3.6, 10.0, 12.0)
@@ -870,7 +870,7 @@ class GECloudDirect(ComponentBase):
             model = info.get("model", "").lower()
             if model:
                 model_name = info["model"]
-                if ("ac" in model) or ("aio" in model):
+                if ("ac" in model) or ("aio" in model) or ("all-in-one" in model):
                     ac_coupled = True
                     break
         entity_id = "switch.{}_inverter_hybrid".format(self.prefix)
@@ -1740,8 +1740,10 @@ class MockHAInterface:  # pragma: no cover
 
     def __init__(self):
         pass
+
     async def set_state_external(self, entity_id, state):
         print(f"Set state external {entity_id} = {state}")
+
 
 class MockBase:  # pragma: no cover
     """Mock base class for testing"""
