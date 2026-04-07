@@ -12,6 +12,7 @@ status monitoring, meter data collection, and inverter control settings
 management via the GivEnergy Cloud REST API.
 """
 
+import re
 import aiohttp
 from datetime import timedelta, datetime, timezone
 from utils import str2time, dp1, dp2
@@ -361,6 +362,32 @@ class GECloudDirect(ComponentBase):
                     else:
                         self.log("GECloud: Warn: Failed to write setting {} {} to {}".format(device, key, new_value))
 
+    def get_max_inverter_rate_from_model(self, model, max_charge_rate=None):
+        """
+            GivEnergy models (descriptive names):
+            - All-In-One  - 6kW inverter with integrated battery, should use the max_charge_rate value as the inverter rating
+            - Gateway     - Not an inverter, should use the individual inverter values
+            - GIV-AC3.0.  - 3kW inverter
+            - GIV-AIO-AC-13.5-12.0  - 12kW inverter (last decimal number is the inverter power)
+            - GIV-HY-10.0-G3-HV - 10kW inverter (decimal number is mid-string)
+            - GIV-HY3.6         - 3.6kW inverter
+            - GIV-HY5.0         - 5.0kW inverter
+            - GIV-HY-8.0-G3-HV. - 8kW inverter
+            - Plant EMS   - Not an inverter, should use the individual inverter values
+        """
+
+        # Find all decimal numbers anywhere in the model string (e.g. 3.6, 10.0, 12.0)
+        # Use the last match so that e.g. GIV-AIO-AC-13.5-12.0 resolves to 12kW not 13.5kW
+        matches = re.findall(r"\d+\.\d+", model)
+        if matches:
+            try:
+                max_inverter_rate = int(float(matches[-1]) * 1000)
+                self.log("GECloud: Extracted inverter rating of {}W from model {}".format(max_inverter_rate, model))
+                return max_inverter_rate
+            except ValueError:
+                pass
+        return max_charge_rate
+
     async def publish_info(self, device, device_info):
         """
         Publish the device info
@@ -389,23 +416,7 @@ class GECloudDirect(ComponentBase):
                 dod = info.get("battery", {}).get("depth_of_discharge", None)
                 model = info.get("model", "Unknown")
                 max_charge_rate = info.get("max_charge_rate", 0)
-                max_inverter_rate = max_charge_rate # Default to max charge rate
-
-                # If the model ends in a number like GIV-HY3.6 then we can try to extract the inverter rating and save to max_inverter_rate
-                if '.' in model:
-                    # Keep all the characters from the end backwards until we get something not a number
-                    rating_str = ''
-                    for char in model[::-1]:
-                        if char.isdigit() or char == '.':
-                            rating_str = char + rating_str
-                        else:
-                            break
-                    try:
-                        max_inverter_rate = int(float(rating_str) * 1000)
-                        self.log("GECloud: Extracted inverter rating of {}W from model {}".format(max_inverter_rate, model))
-                    except ValueError:
-                        pass
-
+                max_inverter_rate = self.get_max_inverter_rate_from_model(model, max_charge_rate)
 
                 capacity = None
                 if cap and volt:

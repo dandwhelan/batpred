@@ -218,6 +218,7 @@ def test_ge_cloud(my_predbat=None):
         ("regname_to_ha", _test_regname_to_ha, "Regname to HA conversion"),
         ("get_data", _test_get_data, "Get data method"),
         ("filter_data", _test_filter_data, "Filter data method"),
+        ("max_inverter_rate", _test_get_max_inverter_rate_from_model, "Get max inverter rate from model"),
     ]
 
     # Run all sub-tests
@@ -3230,3 +3231,40 @@ def _test_filter_data(my_predbat):
         return 1
 
     return 0
+
+
+def _test_get_max_inverter_rate_from_model(my_predbat):
+    """Test get_max_inverter_rate_from_model with all docstring cases"""
+    ge_cloud = MockGECloudDirect()
+
+    test_cases = [
+        # (model, max_charge_rate, expected, description)
+        # Rating at end of string
+        ("GIV-AC3.0", None, 3000, "GIV-AC3.0 => 3kW"),
+        ("GIV-HY3.6", None, 3600, "GIV-HY3.6 => 3.6kW"),
+        ("GIV-HY5.0", None, 5000, "GIV-HY5.0 => 5kW"),
+        # Rating mid-string (suffix is non-numeric)
+        ("GIV-HY-10.0-G3-HV", None, 10000, "GIV-HY-10.0-G3-HV => 10kW"),
+        ("GIV-HY-8.0-G3-HV", None, 8000, "GIV-HY-8.0-G3-HV => 8kW"),
+        # Multiple decimals - last one wins
+        ("GIV-AIO-AC-13.5-12.0", None, 12000, "GIV-AIO-AC-13.5-12.0 => 12kW (last decimal wins)"),
+        # All-In-One: no decimal extractable for inverter power, falls back to max_charge_rate
+        ("All-In-One", 6000, 6000, "All-In-One => fallback to max_charge_rate"),
+        # No number at all - returns None when no max_charge_rate provided
+        ("Gateway", None, None, "Gateway => None (no number)"),
+        ("Plant EMS", None, None, "Plant EMS => None (no number)"),
+        # No number, but max_charge_rate provided as fallback
+        ("Gateway", 2600, 2600, "Gateway => fallback to max_charge_rate"),
+    ]
+
+    failed = 0
+    for model, max_charge_rate, expected, description in test_cases:
+        ge_cloud.log_messages = []
+        result = ge_cloud.get_max_inverter_rate_from_model(model, max_charge_rate)
+        if result != expected:
+            print("ERROR {}: expected {}, got {}".format(description, expected, result))
+            failed += 1
+        else:
+            print("OK {}: got {}".format(description, result))
+
+    return 1 if failed else 0
