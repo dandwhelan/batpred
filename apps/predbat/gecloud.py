@@ -424,7 +424,7 @@ class GECloudDirect(ComponentBase):
                     except (ValueError, TypeError):
                         pass
 
-                self.log("GECloud: Updated data for device {}: battery capacity {}kWh, max charge rate {}kW, max inverter rate {}W".format(device, capacity, max_charge_rate, max_inverter_rate))
+                self.log("GECloud: Updated data for device {}: battery capacity {}kWh, max charge rate {}W, max inverter rate {}W".format(device, capacity, max_charge_rate, max_inverter_rate))
 
                 self.dashboard_item(entity_name + "_battery_size", capacity, attributes=attribute_table.get("battery_size", {}), app="gecloud")
                 self.dashboard_item(entity_name + "_max_charge_rate", max_charge_rate, attributes=attribute_table.get("max_charge_rate", {}), app="gecloud")

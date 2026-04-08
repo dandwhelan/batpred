@@ -112,6 +112,7 @@ from tests.test_clip_export_slots import run_clip_export_slots_tests
 from tests.test_clip_charge_slots import run_clip_charge_slots_tests
 from tests.test_discard_unused_charge_slots import run_discard_unused_charge_slots_tests
 from tests.test_discard_unused_export_slots import run_discard_unused_export_slots_tests
+from tests.test_marginal_costs import test_marginal_costs
 
 
 # Mock the components and plugin system
@@ -283,6 +284,7 @@ def main():
         ("discard_unused_charge_slots", run_discard_unused_charge_slots_tests, "Discard unused charge slots tests", False),
         ("discard_unused_export_slots", run_discard_unused_export_slots_tests, "Discard unused export slots tests", False),
         ("optimise_levels", run_optimise_levels_tests, "Optimise levels tests", False),
+        ("marginal_costs", test_marginal_costs, "Marginal energy cost matrix tests", False),
         ("gateway", run_gateway_tests, "GatewayMQTT component tests (protobuf, plan serialization, commands, telemetry)", False),
         ("optimise_windows", run_optimise_all_windows_tests, "Optimise all windows tests", True),
         ("debug_cases", run_debug_cases, "Debug case file tests", True),
