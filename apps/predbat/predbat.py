@@ -36,7 +36,7 @@ import pytz
 import requests
 import asyncio
 
-THIS_VERSION = "v8.35.8"
+THIS_VERSION = "v8.36.0"
 
 from download import predbat_update_move, predbat_update_download, check_install, resolve_predbat_repository, DEFAULT_PREDBAT_REPOSITORY
 from const import MINUTE_WATT
@@ -76,6 +76,7 @@ from octopus import Octopus
 from energydataservice import Energidataservice
 from components import Components
 from execute import Execute
+from marginal import Marginal
 from plan import Plan
 from fetch import Fetch
 from output import Output
@@ -84,7 +85,7 @@ from compare import Compare
 from plugin_system import PluginSystem
 
 
-class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Execute, Output, UserInterface):
+class PredBat(hass.Hass, Octopus, Energidataservice, Fetch, Plan, Marginal, Execute, Output, UserInterface):
     """Main PredBat orchestrator combining all subsystems via multiple inheritance.
 
     Inherits from Hass (HA interface), Octopus (rate loading), Energidataservice,
