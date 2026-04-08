@@ -15,21 +15,29 @@ GraphQL schema notes (validated against live EDF/E.ON APIs):
 
 import aiohttp
 import asyncio
+import types as _types
 from datetime import datetime, timedelta, timezone
 
 from component_base import ComponentBase
 
-# Auth strategy selection — priority: OAuthMixin > KrakenAuthMixin > no-op
+# Auth strategy selection — OAuthMixin for SaaS OAuth, KrakenAuthMixin for local auth.
+# Both may ship in the same release package.  _KrakenAuthMixin is stored at module level
+# so that initialize() can bind its methods to instances requiring local email/api_key auth
+# even when OAuthMixin occupies the class-level _AUTH_BASE slot.
+_KrakenAuthMixin = None
+try:
+    from kraken_auth_mixin import KrakenAuthMixin as _KrakenAuthMixin
+except ImportError:
+    pass
+
 try:
     from oauth_mixin import OAuthMixin
 
     _AUTH_BASE = OAuthMixin
 except ImportError:
-    try:
-        from kraken_auth_mixin import KrakenAuthMixin
-
-        _AUTH_BASE = KrakenAuthMixin
-    except ImportError:
+    if _KrakenAuthMixin is not None:
+        _AUTH_BASE = _KrakenAuthMixin
+    else:
 
         class _NoAuth:
             def _init_oauth(self, *args, **kwargs):
@@ -132,9 +140,16 @@ class KrakenAPI(ComponentBase, _AUTH_BASE):
 
         # Init auth — prefer KrakenAuthMixin for local email/password or API key auth,
         # use OAuthMixin only for SaaS OAuth mode (where tokens come from edge functions).
-        use_local_auth = auth_method in ("email", "api_key") and hasattr(self, "_init_kraken_auth")
+        # NOTE: both mixins may ship in the same release, so we check the module-level
+        # _KrakenAuthMixin reference rather than hasattr() which only sees the class hierarchy.
+        use_local_auth = auth_method in ("email", "api_key") and _KrakenAuthMixin is not None
         if use_local_auth:
-            self._init_kraken_auth(auth_method, key=key, email=email, password=password)
+            _KrakenAuthMixin._init_kraken_auth(self, auth_method, key=key, email=email, password=password)
+            # Bind KrakenAuthMixin token methods directly to this instance so they take
+            # priority over OAuthMixin when both are present in the class hierarchy.
+            self.check_and_refresh_oauth_token = _types.MethodType(_KrakenAuthMixin.check_and_refresh_oauth_token, self)
+            self.handle_oauth_401 = _types.MethodType(_KrakenAuthMixin.handle_oauth_401, self)
+            self._kraken_token_request = _types.MethodType(_KrakenAuthMixin._kraken_token_request, self)
         elif hasattr(self, "_init_oauth"):
             self._init_oauth(auth_method, key, token_expires_at, "kraken")
             self.token_hash = token_hash or ""

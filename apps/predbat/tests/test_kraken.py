@@ -1,5 +1,6 @@
 # src/batpred/apps/predbat/tests/test_kraken.py
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import sys
@@ -546,6 +547,76 @@ def test_normalize_rate_timestamps_mixed_null_and_real():
     assert normalized[1]["valid_from"] == "2026-04-01T00:00:00Z"  # Set from earliest valid_to
 
 
+def test_email_auth_obtains_token_when_oauth_mixin_is_base():
+    """Regression: email auth must obtain a token even when OAuthMixin is _AUTH_BASE.
+
+    Bug: when both oauth_mixin and kraken_auth_mixin are present, OAuthMixin becomes
+    _AUTH_BASE.  The old hasattr(self, '_init_kraken_auth') check returned False because
+    KrakenAPI only inherited OAuthMixin.  OAuthMixin._init_oauth() sets access_token=None
+    and check_and_refresh_oauth_token() returns True without obtaining a token, causing
+    "Warn: Kraken: No access token for find-tariffs".
+
+    Fix: use module-level _KrakenAuthMixin reference and bind its methods to the instance.
+    """
+    import kraken as kraken_module
+
+    assert kraken_module._KrakenAuthMixin is not None, "KrakenAuthMixin must be importable for this test"
+
+    api = make_kraken_api(auth_method="email", email="user@eon.com", password="secret123", key=None)
+
+    # access_token must be None before first auth — KrakenAuthMixin lazy-obtains on first call
+    assert api.access_token is None, "access_token should be None before first auth"
+
+    # Mock _kraken_token_request so no real HTTP call is made
+    api._kraken_token_request = AsyncMock(
+        return_value={
+            "token": "email-jwt-token",
+            "refreshToken": "email-refresh-token",
+            "exp": int(time.time()) + 3600,
+        }
+    )
+
+    result = asyncio.run(api.check_and_refresh_oauth_token())
+    assert result is True, "check_and_refresh_oauth_token must return True on success"
+    assert api.access_token == "email-jwt-token", "access_token must be set after email auth (was None — OAuthMixin bug)"
+
+
+def test_api_key_auth_obtains_token_when_oauth_mixin_is_base():
+    """Regression: api_key auth must obtain a token even when OAuthMixin is _AUTH_BASE."""
+    import kraken as kraken_module
+
+    assert kraken_module._KrakenAuthMixin is not None, "KrakenAuthMixin must be importable for this test"
+
+    api = make_kraken_api(auth_method="api_key", key="sk_live_test123")
+    assert api.access_token is None
+
+    api._kraken_token_request = AsyncMock(
+        return_value={
+            "token": "api-key-jwt-token",
+            "refreshToken": "api-key-refresh-token",
+            "exp": int(time.time()) + 3600,
+        }
+    )
+
+    result = asyncio.run(api.check_and_refresh_oauth_token())
+    assert result is True
+    assert api.access_token == "api-key-jwt-token", "access_token must be set after api_key auth"
+
+
+def test_oauth_mode_unaffected_by_kraken_auth_mixin():
+    """Regression: OAuthMixin OAuth mode must still work (SaaS scenario).
+
+    Ensure the fix for email/api_key auth does not break SaaS users who use
+    auth_method='oauth' with a pre-issued access_token.
+    """
+    api = make_kraken_api(auth_method="oauth", key="saas-access-token", token_expires_at="2099-01-01T00:00:00Z")
+    # For OAuth mode, OAuthMixin._init_oauth() is called and access_token = key
+    assert api.access_token == "saas-access-token", "OAuth mode must preserve the pre-issued access_token"
+    # Token is valid (far future expiry) — must return True without refresh
+    result = asyncio.run(api.check_and_refresh_oauth_token())
+    assert result is True
+
+
 def run_kraken_tests(my_predbat=None):
     """Run all KrakenAPI tests. Returns True on failure, False on success."""
     tests = [
@@ -577,6 +648,9 @@ def run_kraken_tests(my_predbat=None):
         test_normalize_rate_timestamps_normal_rates_unchanged,
         test_normalize_rate_timestamps_empty_list,
         test_normalize_rate_timestamps_mixed_null_and_real,
+        test_email_auth_obtains_token_when_oauth_mixin_is_base,
+        test_api_key_auth_obtains_token_when_oauth_mixin_is_base,
+        test_oauth_mode_unaffected_by_kraken_auth_mixin,
     ]
     for test_func in tests:
         try:
