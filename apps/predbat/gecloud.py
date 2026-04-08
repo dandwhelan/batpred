@@ -414,7 +414,7 @@ class GECloudDirect(ComponentBase):
                 volt = info.get("battery", {}).get("nominal_voltage", None)
                 dod = info.get("battery", {}).get("depth_of_discharge", None)
                 model = info.get("model", "Unknown")
-                max_charge_rate = info.get("max_charge_rate", 0)
+                max_charge_rate = info.get("max_charge_rate", 3600)
                 max_inverter_rate = self.get_max_inverter_rate_from_model(model, max_charge_rate)
 
                 capacity = None
