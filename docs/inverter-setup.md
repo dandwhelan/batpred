@@ -2259,6 +2259,53 @@ action:
 mode: single
 ```
 
+- Optional: create the following automation to prevent export when the current export price is negative.
+  - On negative price, it sets Sunsynk to `Zero export to CT` and turns off `switch.sunsynk_solar_sell`
+  - On positive price, it only turns `switch.sunsynk_solar_sell` back on (it does not restore work mode)
+  - `grid_export_now` is an attribute of `sensor.predbat_marginal_energy_costs`
+
+```yaml
+alias: "Sunsynk - Negative Export Price Safety"
+description: "Set Zero export to CT on negative export price and re-enable solar_sell when price recovers"
+trigger:
+  - platform: template
+    value_template: >
+      {{ (state_attr('sensor.predbat_marginal_energy_costs', 'grid_export_now') | float(9999)) < 0 }}
+    for: "00:02:00"
+    id: negative_price
+
+  - platform: template
+    value_template: >
+      {{ (state_attr('sensor.predbat_marginal_energy_costs', 'grid_export_now') | float(-9999)) > 1 }}
+    for: "00:02:00"
+    id: positive_price
+
+condition: []
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: negative_price
+        sequence:
+          - service: select.select_option
+            target:
+              entity_id: select.sunsynk_work_mode
+            data:
+              option: "Zero export to CT"
+          - service: switch.turn_off
+            target:
+              entity_id: switch.sunsynk_solar_sell
+
+      - conditions:
+          - condition: trigger
+            id: positive_price
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: switch.sunsynk_solar_sell
+mode: single
+```
+
 ```yaml
 alias: PredBat - Copy Charge Limit
 description: Copy Battery SoC to all timezone (time) slots
