@@ -9,10 +9,10 @@
 # pylint: disable=attribute-defined-outside-init
 
 """
-Tests for futurerate_auto and futurerate_adjust_auto features.
+Tests for Agile tariff auto-detection and the futurerate_adjust_auto feature.
 
-futurerate_auto: when True, auto-detects whether the user is on an Agile tariff
-and only fetches Nordpool future rates if at least one of import/export is Agile.
+These tests cover detection of whether configured import/export entities are
+on Agile tariffs, along with futurerate_adjust_auto behavior.
 
 futurerate_adjust_auto: when True, auto-detects which of import/export rates
 should be calibrated against actual Agile rates (as opposed to the manual
