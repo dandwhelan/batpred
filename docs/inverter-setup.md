@@ -2260,9 +2260,9 @@ mode: single
 ```
 
 - Optional: create the following automation to prevent export when the current export price is negative.
-  - On negative price, it sets Sunsynk to `Zero export to CT` and turns off `switch.sunsynk_solar_sell`
-  - On positive price, it only turns `switch.sunsynk_solar_sell` back on (it does not restore work mode)
-  - `grid_export_now` is an attribute of `sensor.predbat_marginal_energy_costs`
+    - On negative price, it sets Sunsynk to `Zero export to CT` and turns off `switch.sunsynk_solar_sell`
+    - On positive price, it only turns `switch.sunsynk_solar_sell` back on (it does not restore work mode)
+    - `grid_export_now` is an attribute of `sensor.predbat_marginal_energy_costs`
 
 ```yaml
 alias: "Sunsynk - Negative Export Price Safety"
