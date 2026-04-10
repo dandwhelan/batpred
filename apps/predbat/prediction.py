@@ -193,6 +193,9 @@ class Prediction:
             self.prediction_cache = {}
             self.plan_interval_minutes = base.plan_interval_minutes
             self.charge_scaling10 = base.charge_scaling10
+            self.metric_fit_generation_rate = base.metric_fit_generation_rate
+            self.metric_fit_deemed_export_rate = base.metric_fit_deemed_export_rate
+            self.metric_fit_deemed_export_percentage = base.metric_fit_deemed_export_percentage
 
             # Store this dictionary in global so we can reconstruct it in the thread without passing the data
             PRED_GLOBAL["dict"] = self.__dict__.copy()
@@ -459,6 +462,10 @@ class Prediction:
         final_battery_cycle = battery_cycle
         final_metric_keep = metric_keep
         final_carbon_g = carbon_g
+        fit_generation_income = 0
+        fit_deemed_export_income = 0
+        final_fit_generation_income = 0
+        final_fit_deemed_export_income = 0
         metric = self.cost_today_sofar
         final_soc = soc
         first_charge_soc = soc
@@ -575,6 +582,10 @@ class Prediction:
                 import_rate = self.rate_max  # Assume in worst case that slot goes away and max rate applies
             export_rate = rate_export.get(minute_absolute, 0)
 
+            # FIT deemed export: actual exports have no additional value since deemed export pays regardless
+            if self.metric_fit_generation_rate > 0:
+                export_rate = 0
+
             # Alert?
             alert_keep = all_active_keep.get(minute_absolute, 0)
 
@@ -656,6 +667,13 @@ class Prediction:
 
             # Count PV kWh
             pv_kwh += pv_now
+
+            # FIT income: generation tariff on all solar production, deemed export on a percentage
+            if self.metric_fit_generation_rate > 0:
+                fit_generation_income += pv_now * self.metric_fit_generation_rate
+                fit_deemed_export_income += pv_now * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
+                metric -= pv_now * self.metric_fit_generation_rate
+                metric -= pv_now * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
 
             # Modelling reset of charge/discharge rate
             if set_charge_window or set_export_window:
@@ -1119,6 +1137,8 @@ class Prediction:
                 final_carbon_g = carbon_g
                 final_load_kwh = load_kwh
                 final_pv_kwh = pv_kwh
+                final_fit_generation_income = fit_generation_income
+                final_fit_deemed_export_income = fit_deemed_export_income
 
                 # Store export data
                 if diff < 0:
@@ -1167,6 +1187,8 @@ class Prediction:
             self.final_pv_kwh = round(final_pv_kwh, 4)
             self.final_iboost_kwh = round(final_iboost_kwh, 4)
             self.final_battery_cycle = round(final_battery_cycle, 4)
+            self.final_fit_generation_income = round(final_fit_generation_income, 4)
+            self.final_fit_deemed_export_income = round(final_fit_deemed_export_income, 4)
             self.final_soc_min = round(soc_min, 4)
             self.final_soc_min_minute = soc_min_minute
             self.export_to_first_charge = export_to_first_charge

@@ -262,6 +262,9 @@ class MockConfigProvider:
             "metric_min_improvement_export_freeze": 0.5,
             "metric_battery_cycle": 0.6,
             "metric_self_sufficiency": 0.7,
+            "metric_fit_generation_rate": 0,
+            "metric_fit_deemed_export_rate": 0,
+            "metric_fit_deemed_export_percentage": 50,
             "metric_future_rate_offset_import": 0.8,
             "metric_future_rate_offset_export": 0.9,
             "metric_inday_adjust_damping": 1.0,
@@ -470,6 +473,9 @@ def reset_inverter(my_predbat):
     my_predbat.battery_rate_max_scaling = 1.0
     my_predbat.battery_rate_max_scaling_discharge = 1.0
     my_predbat.metric_battery_cycle = 0
+    my_predbat.metric_fit_generation_rate = 0
+    my_predbat.metric_fit_deemed_export_rate = 0
+    my_predbat.metric_fit_deemed_export_percentage = 50
     my_predbat.num_cars = 0
     my_predbat.car_charging_slots[0] = []
     my_predbat.car_charging_from_battery = True
