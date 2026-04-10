@@ -118,3 +118,44 @@ mkdocs serve   # Live preview at http://localhost:8000
 ```
 
 When adding a new doc page, add it to `mkdocs.yml`. The published site at <https://springfall2008.github.io/batpred/> is built automatically from `main` via GitHub Actions.
+
+## Feed-in Tariff (FIT) Support
+
+Predbat supports UK Feed-in Tariff schemes where users earn a generation tariff on all solar production plus a deemed export payment on a percentage of generation (typically 50%).
+
+### How It Works
+
+When `metric_fit_generation_rate` is set above 0 (Expert Mode), FIT mode is activated:
+
+- **Export rate zeroed in optimizer**: Since deemed export pays regardless of actual export, the optimizer treats actual export as having zero additional value. This makes the optimizer prefer self-consumption of solar over exporting it.
+- **Battery headroom for solar**: The optimizer will not charge the battery to 100% from the grid when solar generation is forecast, leaving room for solar to charge the battery during the day.
+- **FIT income tracked**: Generation and deemed export income are subtracted from the cost metric for accurate cost/savings display.
+
+### Config Items
+
+All under Expert Mode in `config.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `metric_fit_generation_rate` | 0 p/kWh | FIT generation tariff rate |
+| `metric_fit_deemed_export_rate` | 0 p/kWh | Deemed export tariff rate |
+| `metric_fit_deemed_export_percentage` | 50% | Deemed export percentage |
+
+### HA Sensors (when FIT enabled)
+
+| Sensor | Description |
+|--------|-------------|
+| `predbat.fit_income` | Predicted FIT income (base plan) |
+| `predbat.fit_income_best` | Predicted FIT income (best/optimised plan) |
+
+Both sensors include attributes: `generation_income`, `deemed_export_income`, `generation_rate`, `deemed_export_rate`, `deemed_export_percentage`.
+
+### Key Files
+
+| File | What changed |
+|------|-------------|
+| `config.py` | Three new `CONFIG_ITEMS` entries for FIT settings |
+| `fetch.py` | Loads FIT config values, logs when FIT is enabled |
+| `prediction.py` | Zeros export rate when FIT enabled; tracks FIT income per simulation step |
+| `plan.py` | Extracts FIT income from prediction results; publishes `fit_income` / `fit_income_best` sensors |
+| `tests/test_infra.py` | FIT defaults added to test config and `reset_inverter()` |
