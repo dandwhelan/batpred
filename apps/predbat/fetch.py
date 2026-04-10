@@ -2123,6 +2123,11 @@ class Fetch:
         self.metric_min_improvement_export_freeze = self.get_arg("metric_min_improvement_export_freeze")
         self.metric_battery_cycle = self.get_arg("metric_battery_cycle")
         self.metric_self_sufficiency = self.get_arg("metric_self_sufficiency")
+        self.metric_fit_generation_rate = self.get_arg("metric_fit_generation_rate")
+        self.metric_fit_deemed_export_rate = self.get_arg("metric_fit_deemed_export_rate")
+        self.metric_fit_deemed_export_percentage = self.get_arg("metric_fit_deemed_export_percentage")
+        if self.metric_fit_generation_rate > 0:
+            self.log("FIT enabled: generation rate {}p/kWh, deemed export rate {}p/kWh at {}%".format(dp2(self.metric_fit_generation_rate), dp2(self.metric_fit_deemed_export_rate), dp2(self.metric_fit_deemed_export_percentage)))
         self.metric_future_rate_offset_import = self.get_arg("metric_future_rate_offset_import")
         self.metric_future_rate_offset_export = self.get_arg("metric_future_rate_offset_export")
         self.metric_inday_adjust_damping = self.get_arg("metric_inday_adjust_damping")
