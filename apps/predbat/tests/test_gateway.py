@@ -1051,6 +1051,35 @@ class TestSelectEvent:
         self._run(gw.select_event("select.predbat_some_other_select", "01:00:00"))
         assert gw._published == []
 
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_mode_select_includes_serial_when_known(self):
+        """mode_select passes full inverter serial to publish_command when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.select_event("select.predbat_gateway_456789_mode_select", "Eco"))
+        assert len(gw._published) == 1
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_charge_slot_includes_serial_when_known(self):
+        """charge_slot1_start passes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.select_event("select.predbat_gateway_456789_charge_slot1_start", "01:30:00"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        # _suffix_to_serial is empty — suffix "456789" unknown
+        self._run(gw.select_event("select.predbat_gateway_456789_mode_select", "Eco"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
+
 
 class TestNumberEvent:
     """Tests for GatewayMQTT.number_event() — numeric entity → command routing."""
@@ -1152,6 +1181,33 @@ class TestNumberEvent:
         gw = self._make_gateway()
         self._run(gw.number_event("number.predbat_some_other_number", "50"))
         assert gw._published == []
+
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_charge_rate_includes_serial_when_known(self):
+        """charge_rate entity includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.number_event("number.predbat_gateway_456789_charge_rate", "3000"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_discharge_rate_includes_serial_when_known(self):
+        """discharge_rate entity includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.number_event("number.predbat_gateway_456789_discharge_rate", "2500"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        self._run(gw.number_event("number.predbat_gateway_456789_charge_rate", "3000"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
 
 
 class TestSwitchEvent:
@@ -1259,6 +1315,33 @@ class TestSwitchEvent:
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
         assert len(gw._published) == 1
+
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_charge_enabled_includes_serial_when_known(self):
+        """charge_enabled switch includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_discharge_enabled_includes_serial_when_known(self):
+        """discharge_enabled switch includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "turn_off"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
 
 
 class TestPublishPredbatData:
