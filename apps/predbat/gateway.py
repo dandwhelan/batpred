@@ -1077,6 +1077,9 @@ class GatewayMQTT(ComponentBase):
             is_on = False
         elif service == "toggle":
             is_on = not old_value
+        else:
+            self.log("Warn: GatewayMQTT: switch_event: Unsupported service={} for entity_id={}".format(service, entity_id))
+            return
 
         serial = self._serial_from_entity_id(entity_id)
         serial_kwarg = {"serial": serial} if serial else {}
