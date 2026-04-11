@@ -1430,7 +1430,7 @@ actions:
       entity_id: input_boolean.freeze_charge_guard
     action: input_boolean.turn_off
     - alias: "StartupReset: Wait for battery voltage to be > 0"
-    wait_template: "{{ states('sensor.lux_battery_voltage_live') | float > 0 }}"
+    wait_template: "{{ states('sensor.lux_battery_voltage_live') | float(0) > 0 }}"
     timeout: "00:01:00"
     continue_on_timeout: true
     - alias: "StartupReset: Set discharge current limit from battery_rate_max"
