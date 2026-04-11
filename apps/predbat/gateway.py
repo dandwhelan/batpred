@@ -979,8 +979,13 @@ class GatewayMQTT(ComponentBase):
         if idx == -1:
             return None
         after = entity_id[idx + len(marker) :]
-        suffix = after[:6]
-        return self._suffix_to_serial.get(suffix)
+        # Extract everything up to the next underscore (handles serials shorter than 6 chars)
+        underscore = after.find("_")
+        suffix = after[:underscore].lower() if underscore != -1 else after.lower()
+        serial = self._suffix_to_serial.get(suffix)
+        if serial is None:
+            self.log(f"Warn: GatewayMQTT: _serial_from_entity_id: no serial found for suffix '{suffix}' in entity '{entity_id}'")
+        return serial
 
     async def select_event(self, entity_id, value):
         """Handle select entity changes (mode, schedule times).
