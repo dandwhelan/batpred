@@ -173,6 +173,34 @@ class TestCommandFormat:
         assert parsed["command"] == "set_reserve"
         assert parsed["target_soc"] == 10
 
+    def test_serial_included_when_provided(self):
+        """serial kwarg is included verbatim in the JSON payload."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_mode", mode=1, serial="CE123456789")
+        parsed = json.loads(cmd)
+        assert parsed["serial"] == "CE123456789"
+
+    def test_serial_preserves_original_case(self):
+        """Serial is stored as-is (uppercase) even though entity suffixes are lowercased."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_charge_rate", power_w=3000, serial="CE123456789")
+        parsed = json.loads(cmd)
+        assert parsed["serial"] == "CE123456789"
+        assert parsed["serial"] != parsed["serial"].lower()
+
+    def test_serial_omitted_when_not_provided(self):
+        """serial key is absent from the JSON when no serial kwarg is given."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_mode", mode=1)
+        parsed = json.loads(cmd)
+        assert "serial" not in parsed
+
 
 class TestScheduleSlotCommand:
     def test_set_charge_slot_command(self):
@@ -194,6 +222,53 @@ class TestScheduleSlotCommand:
         parsed = json.loads(cmd)
         assert parsed["command"] == "set_discharge_slot"
         assert parsed["schedule_json"] == '{"start": 1600}'
+
+
+class TestSerialFromEntityId:
+    """Tests for GatewayMQTT._serial_from_entity_id() suffix extraction and map lookup."""
+
+    def _make_gateway(self):
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.log = MagicMock()
+        gw._suffix_to_serial = {}
+        return gw
+
+    def test_standard_6char_suffix(self):
+        """Normal entity with 6-char suffix resolves to the correct full serial."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        assert gw._serial_from_entity_id("select.predbat_gateway_456789_mode_select") == "CE123456789"
+
+    def test_short_serial_suffix(self):
+        """Serials shorter than 6 chars produce a shorter suffix; lookup still succeeds."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["abc"] = "ABC"  # serial == suffix (3 chars)
+        assert gw._serial_from_entity_id("select.predbat_gateway_abc_mode_select") == "ABC"
+
+    def test_suffix_lookup_is_case_insensitive(self):
+        """Entity ID suffix is lowercased before lookup even if entity_id contains upper chars."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        # Uppercase in entity_id (unusual but should still resolve)
+        assert gw._serial_from_entity_id("select.predbat_gateway_456789_mode_select") == "CE123456789"
+
+    def test_no_gateway_marker_returns_none(self):
+        """Entity IDs without '_gateway_' return None without logging."""
+        gw = self._make_gateway()
+        result = gw._serial_from_entity_id("select.predbat_some_other_entity")
+        assert result is None
+        gw.log.assert_not_called()
+
+    def test_unknown_suffix_returns_none_and_warns(self):
+        """Unknown suffix returns None and emits a Warn log."""
+        gw = self._make_gateway()
+        result = gw._serial_from_entity_id("select.predbat_gateway_456789_mode_select")
+        assert result is None
+        gw.log.assert_called_once()
+        assert "Warn" in gw.log.call_args[0][0]
 
 
 class TestInjectEntities:
@@ -705,6 +780,7 @@ class TestAutomaticConfig:
         gw.prefix = "predbat"
         gw._last_status = None
         gw._auto_configured = False
+        gw._suffix_to_serial = {}
         gw.args = {}
         gw._args = {}
 
@@ -929,6 +1005,7 @@ class TestSelectEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
@@ -1021,6 +1098,35 @@ class TestSelectEvent:
         self._run(gw.select_event("select.predbat_some_other_select", "01:00:00"))
         assert gw._published == []
 
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_mode_select_includes_serial_when_known(self):
+        """mode_select passes full inverter serial to publish_command when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.select_event("select.predbat_gateway_456789_mode_select", "Eco"))
+        assert len(gw._published) == 1
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_charge_slot_includes_serial_when_known(self):
+        """charge_slot1_start passes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.select_event("select.predbat_gateway_456789_charge_slot1_start", "01:30:00"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        # _suffix_to_serial is empty — suffix "456789" unknown
+        self._run(gw.select_event("select.predbat_gateway_456789_mode_select", "Eco"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
+
 
 class TestNumberEvent:
     """Tests for GatewayMQTT.number_event() — numeric entity → command routing."""
@@ -1032,6 +1138,7 @@ class TestNumberEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
@@ -1122,6 +1229,33 @@ class TestNumberEvent:
         self._run(gw.number_event("number.predbat_some_other_number", "50"))
         assert gw._published == []
 
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_charge_rate_includes_serial_when_known(self):
+        """charge_rate entity includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.number_event("number.predbat_gateway_456789_charge_rate", "3000"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_discharge_rate_includes_serial_when_known(self):
+        """discharge_rate entity includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.number_event("number.predbat_gateway_456789_discharge_rate", "2500"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        self._run(gw.number_event("number.predbat_gateway_456789_charge_rate", "3000"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
+
 
 class TestSwitchEvent:
     """Tests for GatewayMQTT.switch_event() — charge/discharge enable → mode commands."""
@@ -1133,6 +1267,7 @@ class TestSwitchEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
@@ -1227,6 +1362,33 @@ class TestSwitchEvent:
         gw = self._make_gateway()
         self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
         assert len(gw._published) == 1
+
+    # ------------------------------------------------------------------
+    # Serial routing
+    # ------------------------------------------------------------------
+
+    def test_charge_enabled_includes_serial_when_known(self):
+        """charge_enabled switch includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_discharge_enabled_includes_serial_when_known(self):
+        """discharge_enabled switch includes full inverter serial when suffix is in the map."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw.switch_event("switch.predbat_gateway_456789_discharge_enabled", "turn_off"))
+        _, kwargs = gw._published[0]
+        assert kwargs.get("serial") == "CE123456789"
+
+    def test_serial_omitted_when_suffix_not_in_map(self):
+        """serial is absent from kwargs when the suffix has no entry in _suffix_to_serial."""
+        gw = self._make_gateway()
+        self._run(gw.switch_event("switch.predbat_gateway_456789_charge_enabled", "turn_on"))
+        _, kwargs = gw._published[0]
+        assert "serial" not in kwargs
 
 
 class TestPublishPredbatData:
