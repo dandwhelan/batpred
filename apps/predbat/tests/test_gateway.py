@@ -173,6 +173,34 @@ class TestCommandFormat:
         assert parsed["command"] == "set_reserve"
         assert parsed["target_soc"] == 10
 
+    def test_serial_included_when_provided(self):
+        """serial kwarg is included verbatim in the JSON payload."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_mode", mode=1, serial="CE123456789")
+        parsed = json.loads(cmd)
+        assert parsed["serial"] == "CE123456789"
+
+    def test_serial_preserves_original_case(self):
+        """Serial is stored as-is (uppercase) even though entity suffixes are lowercased."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_charge_rate", power_w=3000, serial="CE123456789")
+        parsed = json.loads(cmd)
+        assert parsed["serial"] == "CE123456789"
+        assert parsed["serial"] != parsed["serial"].lower()
+
+    def test_serial_omitted_when_not_provided(self):
+        """serial key is absent from the JSON when no serial kwarg is given."""
+        from gateway import GatewayMQTT
+        import json
+
+        cmd = GatewayMQTT.build_command("set_mode", mode=1)
+        parsed = json.loads(cmd)
+        assert "serial" not in parsed
+
 
 class TestScheduleSlotCommand:
     def test_set_charge_slot_command(self):
@@ -705,6 +733,7 @@ class TestAutomaticConfig:
         gw.prefix = "predbat"
         gw._last_status = None
         gw._auto_configured = False
+        gw._suffix_to_serial = {}
         gw.args = {}
         gw._args = {}
 
@@ -929,6 +958,7 @@ class TestSelectEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
@@ -1032,6 +1062,7 @@ class TestNumberEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
@@ -1133,6 +1164,7 @@ class TestSwitchEvent:
         gw = GatewayMQTT.__new__(GatewayMQTT)
         gw.log = MagicMock()
         gw.prefix = "predbat"
+        gw._suffix_to_serial = {}
         gw._mqtt_connected = True
         gw._mqtt_client = MagicMock()
         gw.topic_command = "predbat/devices/pbgw_test/command"
