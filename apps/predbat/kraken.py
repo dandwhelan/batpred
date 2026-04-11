@@ -526,8 +526,15 @@ class KrakenAPI(ComponentBase, _AUTH_BASE):
         Returns list of rate dicts with value_inc_vat, value_exc_vat, valid_from, valid_to, or None.
         """
         now = datetime.now(timezone.utc)
-        start_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_at = (now + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        midnight_utc = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Mirror the window used by fetch_octopus_rates → minute_data(forecast_days + 1, midnight_utc).
+        # Start one day before midnight so any rate period that began earlier today is included.
+        # End at midnight + (forecast_days + 1) to cover the full planning horizon.
+        forecast_hours = self.get_arg("forecast_hours", 48)
+        forecast_days = int((forecast_hours + 23) / 24)
+        start_at = (midnight_utc - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_at = (midnight_utc + timedelta(days=forecast_days + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         query = KRAKEN_APPLICABLE_RATES_QUERY.format(
             account_number=self.account_id,
             mpan=mpan,
@@ -605,7 +612,10 @@ class KrakenAPI(ComponentBase, _AUTH_BASE):
             return None
 
         if http_error_status is not None:
-            if is_import and self.import_mpan:
+            # Only fall back to GraphQL for permanent "product not found" responses (404/410).
+            # Transient errors (429, 500, 503, …) should surface as failures, not trigger
+            # an extra GraphQL request that would mask the outage.
+            if http_error_status in (404, 410) and is_import and self.import_mpan:
                 self.log(f"Kraken: REST rates returned HTTP {http_error_status}, falling back to GraphQL applicableRates for MPAN {self.import_mpan}")
                 return await self.async_fetch_rates_graphql(self.import_mpan)
             return None
