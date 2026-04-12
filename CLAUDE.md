@@ -147,8 +147,9 @@ All under Expert Mode in `config.py`:
 |--------|-------------|
 | `predbat.fit_income` | Predicted FIT income (base plan) |
 | `predbat.fit_income_best` | Predicted FIT income (best/optimised plan) |
+| `predbat.fit_income_yesterday` | Predicted FIT income for yesterday's baseline |
 
-Both sensors include attributes: `generation_income`, `deemed_export_income`, `generation_rate`, `deemed_export_rate`, `deemed_export_percentage`.
+All sensors include attributes: `generation_income`, `deemed_export_income`, `generation_rate`, `deemed_export_rate`, `deemed_export_percentage`.
 
 ### Key Files
 
@@ -158,4 +159,5 @@ Both sensors include attributes: `generation_income`, `deemed_export_income`, `g
 | `fetch.py` | Loads FIT config values, logs when FIT is enabled |
 | `prediction.py` | Zeros export rate when FIT enabled; tracks FIT income per simulation step |
 | `plan.py` | Extracts FIT income from prediction results; publishes `fit_income` / `fit_income_best` sensors |
+| `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
 | `tests/test_infra.py` | FIT defaults added to test config and `reset_inverter()` |
