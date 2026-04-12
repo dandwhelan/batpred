@@ -2885,6 +2885,10 @@ class Output:
             final_carbon_g,
         ) = self.run_prediction(charge_limit_best, charge_window_best, [], [], False, end_record=end_record, save="yesterday")
 
+        # Extract FIT income from the baseline prediction
+        fit_generation_income_baseline = self.prediction.final_fit_generation_income
+        fit_deemed_export_income_baseline = self.prediction.final_fit_deemed_export_income
+
         # Add back in battery value
         overall_metric, battery_value_baseline = self.compute_metric(
             end_record, final_soc, final_soc, metric_baseline, metric_baseline, final_iboost, final_iboost, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh
@@ -3079,12 +3083,35 @@ class Output:
             },
         )
 
+        # Publish FIT income for yesterday's baseline prediction
+        if self.metric_fit_generation_rate > 0:
+            fit_total_income_yesterday = fit_generation_income_baseline + fit_deemed_export_income_baseline
+            self.dashboard_item(
+                self.prefix + ".fit_income_yesterday",
+                state=dp2(fit_total_income_yesterday),
+                attributes={
+                    "friendly_name": "Predicted FIT income yesterday",
+                    "state_class": "measurement",
+                    "unit_of_measurement": self.currency_symbols[1],
+                    "icon": "mdi:solar-power",
+                    "generation_income": dp2(fit_generation_income_baseline),
+                    "deemed_export_income": dp2(fit_deemed_export_income_baseline),
+                    "generation_rate": dp2(self.metric_fit_generation_rate),
+                    "deemed_export_rate": dp2(self.metric_fit_deemed_export_rate),
+                    "deemed_export_percentage": dp2(self.metric_fit_deemed_export_percentage),
+                },
+            )
+
         # Simulate no PV or battery
         self.soc_kw = 0
         self.soc_max = 0
 
         self.prediction = Prediction(self, yesterday_pv_step_zero, yesterday_pv_step_zero, yesterday_load_step, yesterday_load_step)
         metric_no_pvbat, import_kwh_battery, import_kwh_house, export_kwh, soc_min, final_soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = self.run_prediction([], [], [], [], False, end_record=end_record, save="yesterday")
+
+        # Extract FIT income from the no-PV/battery prediction (will be zero since no PV)
+        fit_generation_income_no_pvbat = self.prediction.final_fit_generation_income
+        fit_deemed_export_income_no_pvbat = self.prediction.final_fit_deemed_export_income
 
         # Add back in battery value
         overall_metric, battery_value_no_pvbat = self.compute_metric(
