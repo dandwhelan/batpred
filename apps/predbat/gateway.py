@@ -175,6 +175,7 @@ class GatewayMQTT(ComponentBase):
         self._auto_configured = False
         self._last_published_plan = None
         self._pending_plan = None
+        self._suffix_to_serial = {}  # maps entity suffix (last 6 chars of serial) -> full serial string
 
         # Predbat data publish state (price/timeline for device display)
         self._last_predbat_data = None
@@ -655,6 +656,7 @@ class GatewayMQTT(ComponentBase):
         for inv in inverters:
             suffix = inv.serial[-6:].lower()
             base = f"{self.prefix}_gateway_{suffix}"
+            self._suffix_to_serial[suffix] = inv.serial
 
             soc_entities.append(f"sensor.{base}_soc")
             battery_power_entities.append(f"sensor.{base}_battery_power")
@@ -965,6 +967,26 @@ class GatewayMQTT(ComponentBase):
         """Return the cumulative error count (decode failures, MQTT disconnects, publish failures)."""
         return self._error_count
 
+    def _serial_from_entity_id(self, entity_id):
+        """Extract the full inverter serial from a gateway entity_id.
+
+        Entity IDs follow the pattern {domain}.{prefix}_gateway_{suffix}_{attribute}
+        where suffix is the last 6 chars of the inverter serial, lowercased.
+        Returns the full serial string, or None if the suffix is not in the map.
+        """
+        marker = "_gateway_"
+        idx = entity_id.find(marker)
+        if idx == -1:
+            return None
+        after = entity_id[idx + len(marker) :]
+        # Extract everything up to the next underscore (handles serials shorter than 6 chars)
+        underscore = after.find("_")
+        suffix = after[:underscore].lower() if underscore != -1 else after.lower()
+        serial = self._suffix_to_serial.get(suffix)
+        if serial is None:
+            self.log(f"Warn: GatewayMQTT: _serial_from_entity_id: no serial found for suffix '{suffix}' in entity '{entity_id}'")
+        return serial
+
     async def select_event(self, entity_id, value):
         """Handle select entity changes (mode, schedule times).
 
@@ -974,10 +996,11 @@ class GatewayMQTT(ComponentBase):
         """
 
         self.log("Info: GatewayMQTT: select_event: entity_id={}, value={}".format(entity_id, value))
+        serial = self._serial_from_entity_id(entity_id)
         # Operating mode selector
         if "_mode_select" in entity_id:
             mode_int = GATEWAY_OPERATING_MODE_VALUES.get(str(value).strip(), 0)
-            await self.publish_command("set_mode", mode=mode_int)
+            await self.publish_command("set_mode", mode=mode_int, **({"serial": serial} if serial else {}))
             self.log(f"Info: GatewayMQTT: Operating mode set to {value} ({mode_int})")
             return
 
@@ -991,28 +1014,28 @@ class GatewayMQTT(ComponentBase):
                 return
 
             if "_discharge_slot1_start" in entity_id or "_discharge_slot1_end" in entity_id:
-                await self._update_discharge_slot(entity_id, hhmm)
+                await self._update_discharge_slot(entity_id, hhmm, serial=serial)
             elif "_charge_slot1_start" in entity_id or "_charge_slot1_end" in entity_id:
                 # Read current charge slot times to send both start and end
-                await self._update_charge_slot(entity_id, hhmm)
+                await self._update_charge_slot(entity_id, hhmm, serial=serial)
 
-    async def _update_charge_slot(self, entity_id, hhmm):
+    async def _update_charge_slot(self, entity_id, hhmm, serial=None):
         """Send set_charge_slot command with updated start or end time."""
         # Determine which field changed
         if "_start" in entity_id:
             schedule = {"start": hhmm}
         else:
             schedule = {"end": hhmm}
-        await self.publish_command("set_charge_slot", schedule_json=json.dumps(schedule))
+        await self.publish_command("set_charge_slot", schedule_json=json.dumps(schedule), **({"serial": serial} if serial else {}))
         self.log(f"Info: GatewayMQTT: Charge slot update: {schedule}")
 
-    async def _update_discharge_slot(self, entity_id, hhmm):
+    async def _update_discharge_slot(self, entity_id, hhmm, serial=None):
         """Send set_discharge_slot command with updated start or end time."""
         if "_start" in entity_id:
             schedule = {"start": hhmm}
         else:
             schedule = {"end": hhmm}
-        await self.publish_command("set_discharge_slot", schedule_json=json.dumps(schedule))
+        await self.publish_command("set_discharge_slot", schedule_json=json.dumps(schedule), **({"serial": serial} if serial else {}))
         self.log(f"Info: GatewayMQTT: Discharge slot update: {schedule}")
 
     async def number_event(self, entity_id, value):
@@ -1030,14 +1053,16 @@ class GatewayMQTT(ComponentBase):
             self.log(f"Warn: GatewayMQTT: Invalid number value: {value}")
             return
 
+        serial = self._serial_from_entity_id(entity_id)
+        serial_kwarg = {"serial": serial} if serial else {}
         if "_discharge_rate" in entity_id:
-            await self.publish_command("set_discharge_rate", power_w=val)
+            await self.publish_command("set_discharge_rate", power_w=val, **serial_kwarg)
         elif "_charge_rate" in entity_id:
-            await self.publish_command("set_charge_rate", power_w=val)
+            await self.publish_command("set_charge_rate", power_w=val, **serial_kwarg)
         elif "_reserve" in entity_id:
-            await self.publish_command("set_reserve", target_soc=val)
+            await self.publish_command("set_reserve", target_soc=val, **serial_kwarg)
         elif "_target_soc" in entity_id:
-            await self.publish_command("set_target_soc", target_soc=val)
+            await self.publish_command("set_target_soc", target_soc=val, **serial_kwarg)
 
     async def switch_event(self, entity_id, service):
         """Handle switch entity service calls (charge/discharge enable).
@@ -1057,12 +1082,17 @@ class GatewayMQTT(ComponentBase):
             is_on = False
         elif service == "toggle":
             is_on = not old_value
+        else:
+            self.log("Warn: GatewayMQTT: switch_event: Unsupported service={} for entity_id={}".format(service, entity_id))
+            return
 
+        serial = self._serial_from_entity_id(entity_id)
+        serial_kwarg = {"serial": serial} if serial else {}
         if "_charge_enabled" in entity_id:
-            await self.publish_command("set_charge_enable", enable=is_on)
+            await self.publish_command("set_charge_enable", enable=is_on, **serial_kwarg)
             self.log(f"Info: GatewayMQTT: Charge {'enabled' if is_on else 'disabled'}")
         elif "_discharge_enabled" in entity_id:
-            await self.publish_command("set_discharge_enable", enable=is_on)
+            await self.publish_command("set_discharge_enable", enable=is_on, **serial_kwarg)
             self.log(f"Info: GatewayMQTT: Discharge {'enabled' if is_on else 'disabled'}")
 
     async def final(self):
@@ -1316,5 +1346,7 @@ class GatewayMQTT(ComponentBase):
             cmd["schedule_json"] = kwargs["schedule_json"]
         if "enable" in kwargs:
             cmd["enable"] = bool(kwargs["enable"])
+        if "serial" in kwargs:
+            cmd["serial"] = kwargs["serial"]
 
         return json.dumps(cmd)
