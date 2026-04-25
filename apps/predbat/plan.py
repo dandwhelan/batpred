@@ -3592,7 +3592,7 @@ class Plan:
                             "icon": "mdi:molecule-co2",
                         },
                     )
-                if self.metric_fit_generation_rate > 0:
+                if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
                     fit_total_income = final_fit_generation_income + final_fit_deemed_export_income
                     self.dashboard_item(
                         self.prefix + ".fit_income",
@@ -3863,7 +3863,7 @@ class Plan:
                             "icon": "mdi:molecule-co2",
                         },
                     )
-                if self.metric_fit_generation_rate > 0:
+                if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
                     fit_total_income = final_fit_generation_income + final_fit_deemed_export_income
                     self.dashboard_item(
                         self.prefix + ".fit_income_best",

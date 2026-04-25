@@ -582,8 +582,9 @@ class Prediction:
                 import_rate = self.rate_max  # Assume in worst case that slot goes away and max rate applies
             export_rate = rate_export.get(minute_absolute, 0)
 
-            # FIT deemed export: actual exports have no additional value since deemed export pays regardless
-            if self.metric_fit_generation_rate > 0:
+            # FIT deemed export: when deemed-export is active, actual exports earn nothing extra since payment is on a fixed % of generation.
+            # Generation tariff alone (with metered or no export) leaves the configured export rate signal intact.
+            if self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0:
                 export_rate = 0
 
             # Alert?
@@ -665,15 +666,11 @@ class Prediction:
             pv_now = pv_forecast_minute_step_flat[minute]
             load_yesterday = load_minutes_step_flat[minute]
 
+            # Snapshot the running clipped total so the FIT calculation below can charge generation tariff only on PV the inverter actually delivers this step
+            clipped_before_step = clipped_today
+
             # Count PV kWh
             pv_kwh += pv_now
-
-            # FIT income: generation tariff on all solar production, deemed export on a percentage
-            if self.metric_fit_generation_rate > 0:
-                fit_generation_income += pv_now * self.metric_fit_generation_rate
-                fit_deemed_export_income += pv_now * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
-                metric -= pv_now * self.metric_fit_generation_rate
-                metric -= pv_now * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
 
             # Modelling reset of charge/discharge rate
             if set_charge_window or set_export_window:
@@ -1028,6 +1025,17 @@ class Prediction:
                 over_limit = abs(diff) - export_limit
                 clipped_today += over_limit
                 pv_ac = max(pv_ac - over_limit, 0)
+
+            # FIT income: pay generation tariff on PV the inverter actually delivered (forecast minus what was clipped this step)
+            # plus deemed-export tariff on the configured percentage of that delivered PV. Subtracting from metric makes the optimiser
+            # treat clipped PV as lost FIT income, which encourages plans that absorb mid-day excess into the battery.
+            if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
+                pv_delivered = max(pv_now - (clipped_today - clipped_before_step), 0)
+                fit_gen = pv_delivered * self.metric_fit_generation_rate
+                fit_deemed = pv_delivered * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
+                fit_generation_income += fit_gen
+                fit_deemed_export_income += fit_deemed
+                metric -= fit_gen + fit_deemed
 
             # Adjust battery soc
             if battery_draw > 0:
