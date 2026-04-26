@@ -345,6 +345,11 @@ class GECloudDirect(ComponentBase):
                         if new_value not in options_text:
                             self.log("GECloud: Error: Invalid option {} for setting {} {}, valid values are {}".format(new_value, device, key, options_text))
                             return
+                        # Map text label back to its numeric API value
+                        if options_values is not None:
+                            idx = options_text.index(new_value)
+                            if idx < len(options_values):
+                                new_value = options_values[idx]
                     elif options_values is not None:
                         if new_value not in options_values:
                             self.log("GECloud: Error: Invalid option {} for setting {} {}, valid values are {}".format(new_value, device, key, options_values))
@@ -702,7 +707,15 @@ class GECloudDirect(ComponentBase):
                 pre, post = validation.split("(")
                 post = post.replace(")", "")
                 post = post.replace(", ", ",")
+                options_values_from_in = options_text if is_select_options else None
                 options_text = post.split(",")
+                # Map current numeric value to its human-readable text label for display
+                if options_values_from_in and value is not None:
+                    str_value = str(value)
+                    if str_value in options_values_from_in:
+                        idx = options_values_from_in.index(str_value)
+                        if idx < len(options_text):
+                            value = options_text[idx]
 
             if is_select_time or is_select_options:
                 entity_name = f"select.{self.prefix}_gecloud_{device}"
