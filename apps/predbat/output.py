@@ -2993,9 +2993,9 @@ class Output:
             final_carbon_g,
         ) = self.run_prediction(charge_limit_best, charge_window_best, [], [], False, end_record=end_record, save="yesterday")
 
-        # Extract FIT income from the baseline prediction
-        fit_generation_income_baseline = self.prediction.final_fit_generation_income
-        fit_deemed_export_income_baseline = self.prediction.final_fit_deemed_export_income
+        # Extract FIT income from the baseline prediction (defaults to 0 when the prediction did not compute FIT income)
+        fit_generation_income_baseline = getattr(self.prediction, "final_fit_generation_income", 0)
+        fit_deemed_export_income_baseline = getattr(self.prediction, "final_fit_deemed_export_income", 0)
 
         # Add back in battery value
         overall_metric, battery_value_baseline = self.compute_metric(

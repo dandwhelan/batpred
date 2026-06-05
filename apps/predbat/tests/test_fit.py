@@ -125,6 +125,7 @@ def run_fit_tests(my_predbat):
         assert_final_soc=24,
         with_battery=True,
         export_limit=0.5,
+        assert_clipped=36,
         return_prediction_handle=True,
     )
     failed |= fail
@@ -144,6 +145,7 @@ def run_fit_tests(my_predbat):
         assert_final_soc=24,
         with_battery=True,
         export_limit=0.5,
+        assert_clipped=36,
         return_prediction_handle=True,
     )
     failed |= fail
