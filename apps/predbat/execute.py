@@ -354,7 +354,7 @@ class Execute:
 
                         self.log("Exporting now - current SoC {}kWh and target {}kWh and power adjust {}".format(self.soc_kw, dp2(discharge_soc), export_rate_adjust))
 
-                        inverter.adjust_discharge_rate(inverter.battery_rate_max_discharge * export_rate_adjust * MINUTE_WATT)
+                        inverter.adjust_discharge_rate(inverter.battery_rate_max_export * export_rate_adjust * MINUTE_WATT)
                         resetDischarge = False
                         inverter.adjust_force_export(True, discharge_start_time, discharge_end_time)
                         if inverter.inv_charge_discharge_with_rate:
@@ -715,6 +715,7 @@ class Execute:
         self.battery_rate_max_charge = 0.0
         self.battery_rate_max_charge_dc = 0.0
         self.battery_rate_max_discharge = 0.0
+        self.battery_rate_max_export = 0.0
         self.battery_rate_min = 0
         self.charge_rate_now = 0.0
         self.discharge_rate_now = 0.0
@@ -792,6 +793,7 @@ class Execute:
             self.battery_rate_max_charge += inverter.battery_rate_max_charge
             self.battery_rate_max_charge_dc += inverter.battery_rate_max_charge_dc
             self.battery_rate_max_discharge += inverter.battery_rate_max_discharge
+            self.battery_rate_max_export += inverter.battery_rate_max_export
             self.charge_rate_now += inverter.charge_rate_now
             self.discharge_rate_now += inverter.discharge_rate_now
             self.battery_rate_min += inverter.battery_rate_min
@@ -803,6 +805,17 @@ class Execute:
             self.grid_power += inverter.grid_power
             self.current_charge_limit = calc_percent_limit(self.current_charge_limit_kwh, self.soc_max)
             self.battery_temperature += inverter.battery_temperature
+
+        # Additional PVs without inverters
+        pv_power_sensors = self.get_arg("pv_power", [], indirect=False)
+        if pv_power_sensors and isinstance(pv_power_sensors, list):
+            for idx in range(0, len(pv_power_sensors)):
+                if idx >= self.num_inverters:
+                    pv_power = self.get_arg("pv_power", default=0.0, index=idx, required_unit="W")
+                    try:
+                        self.pv_power += pv_power
+                    except (TypeError, ValueError):
+                        self.log("Warn: Invalid PV power value for sensor {}".format(pv_power_sensors[idx]))
 
         # Work out battery temperature
         self.battery_temperature = int(dp0(self.battery_temperature / self.num_inverters))

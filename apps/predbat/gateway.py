@@ -104,6 +104,7 @@ GATEWAY_ATTRIBUTE_TABLE = {
     # Operating mode selector
     "mode_select": {"friendly_name": "Operating Mode", "icon": "mdi:cog", "options": GATEWAY_OPERATING_MODE_OPTIONS},
     # Control numbers
+    "export_limit_w": {"friendly_name": "Export Limit", "icon": "mdi:transmission-tower", "unit_of_measurement": "W", "device_class": "power"},
     "charge_rate": {"friendly_name": "Charge Rate", "icon": "mdi:battery-plus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
     "discharge_rate": {"friendly_name": "Discharge Rate", "icon": "mdi:battery-minus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
     "reserve_soc": {"friendly_name": "Reserve SOC", "icon": "mdi:battery-lock", "unit_of_measurement": "%", "min": 0, "max": 100, "step": 1},
@@ -132,7 +133,7 @@ class GatewayMQTT(ComponentBase):
     Instance methods handle MQTT lifecycle and ComponentBase integration.
     """
 
-    def initialize(self, gateway_device_id=None, mqtt_host=None, mqtt_port=8883, mqtt_token=None, **kwargs):
+    def initialize(self, gateway_device_id=None, mqtt_host=None, mqtt_port=8883, mqtt_token=None, gateway_inverter_serial=None, **kwargs):
         """Initialize gateway configuration and build MQTT topic strings.
 
         Args:
@@ -140,12 +141,22 @@ class GatewayMQTT(ComponentBase):
             mqtt_host: MQTT broker hostname.
             mqtt_port: MQTT broker port (default 8883 for TLS).
             mqtt_token: JWT access token for MQTT authentication.
+            gateway_inverter_serial: Optional serial number(s) to restrict which inverters are configured.
+                If not set, all inverters are used. May be a string or a list of strings.
             **kwargs: Additional keyword arguments (ignored).
         """
         self.gateway_device_id = gateway_device_id
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_token = mqtt_token
+
+        # Normalise serial filter to a list (or None if not set)
+        if gateway_inverter_serial is None:
+            self.gateway_inverter_serial = []
+        elif isinstance(gateway_inverter_serial, list):
+            self.gateway_inverter_serial = gateway_inverter_serial
+        else:
+            self.gateway_inverter_serial = [gateway_inverter_serial]
         self.mqtt_token_expires_at = 0
 
         # MQTT topic strings
@@ -547,6 +558,10 @@ class GatewayMQTT(ComponentBase):
         control = inv.control
         self.dashboard_item(f"switch.{pfx}_charge_enabled", "on" if control.charge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_enabled", {}), app="gateway")
         self.dashboard_item(f"switch.{pfx}_discharge_enabled", "on" if control.discharge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_enabled", {}), app="gateway")
+        # Proto sentinel: 0=undefined→publish 99999 (unlimited), 1=zero limit→publish 0, otherwise use value as-is
+        _raw_export_limit = control.export_limit_w
+        export_limit_publish = 99999 if _raw_export_limit == 0 else (0 if _raw_export_limit == 1 else _raw_export_limit)
+        self.dashboard_item(f"sensor.{pfx}_export_limit_w", export_limit_publish, attributes=GATEWAY_ATTRIBUTE_TABLE.get("export_limit_w", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_charge_rate", control.charge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_discharge_rate", control.discharge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_reserve_soc", control.reserve_soc, attributes=GATEWAY_ATTRIBUTE_TABLE.get("reserve_soc", {}), app="gateway")
@@ -627,6 +642,16 @@ class GatewayMQTT(ComponentBase):
         if not inverters:
             inverters = all_inverters  # last resort
 
+        # Apply serial filter if configured
+        if self.gateway_inverter_serial:
+            serial_set = set(s.upper() for s in self.gateway_inverter_serial)
+            filtered = [inv for inv in inverters if inv.serial.upper() in serial_set]
+            if filtered:
+                inverters = filtered
+            else:
+                self.log(f"Warn: GatewayMQTT: gateway_inverter_serial filter {self.gateway_inverter_serial} matched no inverters")
+                return
+
         num_inverters = len(inverters)
         self.log(f"Info: GatewayMQTT: auto-config: {num_inverters} primary inverter(s) of {len(all_inverters)} total")
 
@@ -652,6 +677,7 @@ class GatewayMQTT(ComponentBase):
         discharge_end_entities = []
         charge_enable_entities = []
         discharge_enable_entities = []
+        export_limit_entities = []
 
         for inv in inverters:
             suffix = inv.serial[-6:].lower()
@@ -674,13 +700,14 @@ class GatewayMQTT(ComponentBase):
             discharge_end_entities.append(f"select.{base}_discharge_slot1_end")
             charge_enable_entities.append(f"switch.{base}_charge_enabled")
             discharge_enable_entities.append(f"switch.{base}_discharge_enabled")
+            export_limit_entities.append(f"sensor.{base}_export_limit_w")
 
             # soc_max: from battery capacity entity
             if inv.battery.capacity_wh > 0:
                 soc_max_entities.append(f"sensor.{base}_battery_capacity")
             else:
-                self.log(f"Warn: GatewayMQTT: inverter {inv.serial} has no battery capacity, using fallback")
                 soc_max_entities.append(None)
+                self.log(f"Warn: GatewayMQTT: inverter {inv.serial} has no battery capacity, setting to None for automatic discovery")
 
         # Map entity lists to PredBat args
         self.set_arg("soc_percent", soc_entities)
@@ -700,6 +727,7 @@ class GatewayMQTT(ComponentBase):
         self.set_arg("discharge_end_time", discharge_end_entities)
         self.set_arg("scheduled_charge_enable", charge_enable_entities)
         self.set_arg("scheduled_discharge_enable", discharge_enable_entities)
+        self.set_arg("export_limit", export_limit_entities)
 
         # Energy counters (first inverter)
         suffix0 = inverters[0].serial[-6:].lower()
@@ -761,6 +789,7 @@ class GatewayMQTT(ComponentBase):
 
         self._auto_configured = True
         self.log(f"Info: GatewayMQTT: auto-config complete: {num_inverters} inverter(s) registered")
+        return num_inverters
 
     async def _publish_predbat_data(self):
         """Publish price/timeline data to the gateway device for display.
@@ -856,6 +885,48 @@ class GatewayMQTT(ComponentBase):
                     pass
             saving_month_average = round(float(saving_total) * 365 / 12 / total_days_of_savings, 2)
 
+            # Marginal cost matrix — "what does an extra 1/2/4/8 kWh of load cost
+            # me right now and in each of the next 6 two-hour windows?". Computed
+            # by the Marginal mixin via what-if prediction runs. Used by the
+            # gateway's appliance RAG to pick a colour that actually reflects the
+            # cost of running the dryer/EV/etc, rather than inferring from slot
+            # categories alone.
+            marginal_costs = []
+            marginal_time_labels = []
+            try:
+                matrix = self.get_state_wrapper("sensor." + self.prefix + "_marginal_energy_costs", attribute="matrix")
+                if isinstance(matrix, dict) and matrix:
+                    # Canonical level order matches MARGINAL_EXTRA_KWH_LEVELS in marginal.py.
+                    # Keys are integers when the HA state cache holds the dict directly;
+                    # defensive fallback to the string form covers any JSON-round-tripped path.
+                    levels = [1, 2, 4, 8]
+                    # Determine the column shape first from the first non-empty row, then
+                    # build all rows against that fixed set of labels so the matrix stays
+                    # rectangular even when lower levels are missing.
+                    time_labels = []
+                    for lvl in levels:
+                        row = matrix.get(lvl) or matrix.get(str(lvl)) or {}
+                        if isinstance(row, dict) and row:
+                            time_labels = list(row.keys())
+                            break
+
+                    # Only publish once we have something meaningful.
+                    if time_labels:
+                        tmp_costs = []
+                        for lvl in levels:
+                            row = matrix.get(lvl) or matrix.get(str(lvl)) or {}
+                            if not isinstance(row, dict):
+                                row = {}
+                            # Missing rows or columns are padded with 0 rather than dropped.
+                            tmp_costs.append([round(float(row.get(tl, 0) or 0), 2) for tl in time_labels])
+
+                        marginal_time_labels = time_labels
+                        marginal_costs = tmp_costs
+            except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                self.log(f"Warn: GatewayMQTT: failed to read marginal costs: {exc}")
+                marginal_costs = []
+                marginal_time_labels = []
+
             payload = {
                 "current_price": round(float(current_price), 1),
                 "avg_price": round(float(avg_price or 0), 1),
@@ -869,6 +940,8 @@ class GatewayMQTT(ComponentBase):
                 "savings_month_average": saving_month_average,
                 "predbat_status": predbat_status,
                 "predbat_status_detail": predbat_status_detail,
+                "marginal_costs": marginal_costs,
+                "marginal_time_labels": marginal_time_labels,
             }
 
             # Only publish if data changed

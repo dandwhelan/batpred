@@ -1587,7 +1587,6 @@ Add the following automations to `automations.yaml` (or configure via the UI):
           {% elif is_state('input_select.predbat_requested_mode', "Discharging") %}Command Discharging (PV First)
           {% elif is_state('input_select.predbat_requested_mode', "Freeze Discharging") %}Maximum Self Consumption
           {% endif %}
-
     - choose:
         # Freeze Charging
         # Docs:
@@ -1601,19 +1600,21 @@ Add the following automations to `automations.yaml` (or configure via the UI):
               entity_id: input_select.predbat_requested_mode
               state: "Freeze Charging"
           sequence:
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_charge_cut_off_state_of_charge
+              data:
                 value: 100
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_discharge_cut_off_state_of_charge
+              data:
                 value: 100
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_grid_import_limitation
+              data:
                 value: 0
-
         # Freeze Discharging
         # Docs:
         #  Freeze exporting (mapped to Freeze Discharging in sigenergy_sigenstor.yaml) - The battery is in demand mode,
@@ -1626,19 +1627,21 @@ Add the following automations to `automations.yaml` (or configure via the UI):
               entity_id: input_select.predbat_requested_mode
               state: "Freeze Discharging"
           sequence:
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_charge_cut_off_state_of_charge
+              data:
                 value: 0
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_discharge_cut_off_state_of_charge
+              data:
                 value: 0
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_grid_import_limitation
+              data:
                 value: 0
-
         # If neither of the above conditions are met, set the limits to the input numbers
         - conditions:
           - condition: not
@@ -1650,17 +1653,20 @@ Add the following automations to `automations.yaml` (or configure via the UI):
                 entity_id: input_select.predbat_requested_mode
                 state: "Freeze Discharging"
           sequence:
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_charge_cut_off_state_of_charge
+              data:
                 value: 100
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_ess_discharge_cut_off_state_of_charge
+              data:
                 value: 0
-            - service: number.set_value
-              data_template:
+            - action: number.set_value
+              target:
                 entity_id: number.sigen_plant_grid_import_limitation
+              data:
                 value: 100
 
   - id: automation_sigen_ess_max_charging_limit_input_number_action
@@ -2427,15 +2433,78 @@ input_text:
     max: 255
     mode: password
 
+  tesla_access_token_part5:
+    name: "Tesla Access Token - Part 5"
+    max: 255
+    mode: password
+
   tesla_energy_site_id:
     name: "Tesla Energy Site ID"
     unit_of_measurement: ""
     icon: mdi:lightning-bolt-outline
 ```
 
-- Use the [Access Token Generator for Tesla](https://chromewebstore.google.com/detail/access-token-generator-fo/djpjpanpjaimfjalnpkppkjiedmgpjpe?hl=en) to create a token
+You then need to obtain an access token for the API. There are two ways - either use the existing Fleet Integration if you have that setup, or manually obtain them.
 
-- This token needs to be copied, and then split into 4 parts (up to 255 characters long), so each part can be copied into the "refresh" input helpers
+### Option 1: Tesla Fleet Integration (recommended)
+
+The Tesla Fleet integration already handles token exchanges for you. You can simply use this token for the REST API calls.
+
+Create a shell command to access the Tesla Fleet token:
+
+```yaml
+shell_command:
+  get_tesla_fleet_token: >-
+    jq -r 'first(.data.entries[] | select(.domain == "tesla_fleet")) | .data.token.access_token' /config/.storage/core.config_entries
+```
+
+Now create an automation to populate the access token:
+
+```yaml
+- id: refresh_tesla_access_token
+  alias: Refresh Tesla Access Token
+  description: Sync Tesla Fleet token from HA integration every hour
+  triggers:
+    - hours: /1
+      trigger: time_pattern
+    - event: start
+      trigger: homeassistant
+  actions:
+    - action: shell_command.get_tesla_fleet_token
+      response_variable: token_response
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part1
+      data:
+        value: "{{ token_response.stdout[0:220] }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part2
+      data:
+        value: "{{ token_response.stdout[220:440] }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part3
+      data:
+        value: "{{ token_response.stdout[440:660] }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part4
+      data:
+        value: "{{ token_response.stdout[660:880] }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part5
+      data:
+        value: "{{ token_response.stdout[880:] }}"
+  mode: single
+  ```
+
+### Option 2: Another integration
+
+- Consult either the [Tesla Fleet API Documentation](https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens) or use the [Easy Tesla API Token Generator](https://www.myteslamate.com/tesla-token) to generate an access + refresh token.
+
+- This token needs to be copied, and then split into 4-5 parts (up to 255 characters long), so each part can be copied into the input helpers
 
 - An automation then uses the refresh token to generate an access token valid for 8 hours, and a new refresh token than is valid for ~30 days.<BR>
   Create the following automation using the HA UI or by adding to `configuration.yaml`, the automation triggers an automatic refresh of the access token every 8 hours:
@@ -2469,7 +2538,12 @@ automation:
       target:
         entity_id: input_text.tesla_access_token_part4
       data:
-        value: "{{ tesla_response.content.access_token[750:] }}"
+        value: "{{ tesla_response.content.access_token[750:1000] }}"
+    - service: input_text.set_value
+      target:
+        entity_id: input_text.tesla_access_token_part5
+      data:
+        value: "{{ tesla_response.content.access_token[1000:] }}"
     - service: input_text.set_value
       target:
         entity_id: input_text.tesla_refresh_token_part1
@@ -2502,8 +2576,11 @@ automation:
       notification_id: "tesla_token_update"
 ```
 
-- An automation executes every time HA starts and every midnight to populate the Tesla site id input_helper.
-  Create the following automation using the HA UI or by adding to `configuration.yaml`:
+### Automations
+
+Whether using Fleet or another method, you will need to create a site ID automation.
+
+Create the following automation using the HA UI or by adding to `configuration.yaml`:
 
 ```yaml
 automation:
@@ -2548,34 +2625,37 @@ rest_command:
         (states('input_text.tesla_refresh_token_part5') or '') }}&scope=openid%20email%20offline_access"
 
   tesla_api_get_products:
-    url: "https://owner-api.teslamotors.com/api/1/products"
+    url: "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/products"
     method: GET
     headers:
       Authorization: >-
         Bearer {{ (states('input_text.tesla_access_token_part1') or '') +
           (states('input_text.tesla_access_token_part2') or '') +
           (states('input_text.tesla_access_token_part3') or '') +
-          (states('input_text.tesla_access_token_part4') or '') }}
+          (states('input_text.tesla_access_token_part4') or '') +
+          (states('input_text.tesla_access_token_part5') or '') }}
 
   tesla_api_get_current_tariff:
-    url: "https://owner-api.teslamotors.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/tariff_rate"
+    url: "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/tariff_rate"
     method: GET
     headers:
       Authorization: >-
         Bearer {{ (states('input_text.tesla_access_token_part1') or '') +
           (states('input_text.tesla_access_token_part2') or '') +
           (states('input_text.tesla_access_token_part3') or '') +
-          (states('input_text.tesla_access_token_part4') or '') }}
+          (states('input_text.tesla_access_token_part4') or '') +
+          (states('input_text.tesla_access_token_part5') or '') }}
 
   tesla_api_set_export_now_tariff:
-    url: "https://owner-api.teslamotors.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/time_of_use_settings"
+    url: "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/time_of_use_settings"
     method: POST
     headers:
       Authorization: >-
         Bearer {{ (states('input_text.tesla_access_token_part1') or '') +
           (states('input_text.tesla_access_token_part2') or '') +
           (states('input_text.tesla_access_token_part3') or '') +
-          (states('input_text.tesla_access_token_part4') or '') }}
+          (states('input_text.tesla_access_token_part4') or '') +
+          (states('input_text.tesla_access_token_part5') or '') }}
       Content-Type: application/json
     payload: >
       {% set now = now() %}
@@ -2682,14 +2762,15 @@ rest_command:
       }
 
   tesla_api_set_iog_custom_tariff:
-    url: "https://owner-api.teslamotors.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/time_of_use_settings"
+    url: "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/energy_sites/{{ states('input_text.tesla_energy_site_id') }}/time_of_use_settings"
     method: POST
     headers:
       Authorization: >-
         Bearer {{ (states('input_text.tesla_access_token_part1') or '') +
           (states('input_text.tesla_access_token_part2') or '') +
           (states('input_text.tesla_access_token_part3') or '') +
-          (states('input_text.tesla_access_token_part4') or '') }}
+          (states('input_text.tesla_access_token_part4') or '') +
+          (states('input_text.tesla_access_token_part5') or '') }}
       Content-Type: application/json
     payload: >
       {
@@ -2810,6 +2891,7 @@ This is at an early stage of development, see Github discussion [#789](https://g
 - You **must** set [inverter_type in apps.yaml](apps-yaml.md#inverter_type) with a custom name ('MINE' in the example below) - if you do not do this then Predbat will assume you have a GivEnergy inverter
   and will apply inverter limits for that inverter (e.g. max charge/discharge of 2600W)
 - Configure Predbat with the appropriate Home Assistant services to start charges and discharges, etc.
+- If your inverter doesn't expose a sensor for its power limits, set them as **literal watt values** in `apps.yaml` (e.g. `inverter_limit: 5000` not `inverter_limit: 5`). Predbat's unit auto-conversion only fires for sensor references — literal values are taken as watts regardless. See [Inverter control configurations](apps-yaml.md#inverter-control-configurations) for the full list of affected keys.
 
 The following template can be used as a starting point:
 
