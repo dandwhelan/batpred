@@ -483,6 +483,44 @@ class TestInjectEntities:
         state, _ = gw._dashboard_calls["sensor.predbat_gateway_456789_battery_dod"]
         assert approx_equal(state, 0.95)
 
+    def test_export_limit_w_sensor_published(self):
+        """export_limit_w from ControlStatus is published as a sensor in watts."""
+        from gateway import GATEWAY_ATTRIBUTE_TABLE
+
+        status = self._make_status()
+        status.inverters[0].control.export_limit_w = 3600
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, attrs = gw._dashboard_calls[entity]
+        assert state == 3600
+        assert attrs == GATEWAY_ATTRIBUTE_TABLE.get("export_limit_w", {})
+
+    def test_export_limit_w_zero_undefined_publishes_99999(self):
+        """export_limit_w = 0 (undefined sentinel) is published as 99999 (unlimited)."""
+        status = self._make_status()  # control.export_limit_w defaults to 0
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 99999
+
+    def test_export_limit_w_one_zero_limit_publishes_zero(self):
+        """export_limit_w = 1 (zero-limit sentinel) is published as 0 W."""
+        status = self._make_status()
+        status.inverters[0].control.export_limit_w = 1
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 0
+
     def test_ems_aggregate_entities(self):
         """EMS aggregate and sub-inverter entities are published with table attributes."""
         from gateway import GATEWAY_ATTRIBUTE_TABLE
@@ -783,6 +821,7 @@ class TestAutomaticConfig:
         gw._suffix_to_serial = {}
         gw.args = {}
         gw._args = {}
+        gw.gateway_inverter_serial = []  # default: no serial filter
 
         def capture_set_arg(key, value):
             gw._args[key] = value
@@ -993,6 +1032,156 @@ class TestAutomaticConfig:
 
         assert "ems_total_soc" not in gw._args
         assert "idle_start_time" not in gw._args
+
+    def test_export_limit_nonzero_maps_to_sensor_entity(self):
+        """export_limit_w is always mapped to the sensor entity regardless of value."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 5000
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_zero_maps_to_sensor_entity(self):
+        """export_limit_w = 0 (block all export) maps to the sensor entity."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 0
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_99999_maps_to_sensor_entity(self):
+        """export_limit_w = 99999 (firmware not-configured sentinel) also maps to the sensor entity."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 99999
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_multi_inverter(self):
+        """Each inverter in a multi-inverter setup gets its own export_limit sensor entity."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"][0] == "sensor.predbat_gateway_000aa1_export_limit_w"
+        assert gw._args["export_limit"][1] == "sensor.predbat_gateway_000bb2_export_limit_w"
+
+    # ------------------------------------------------------------------
+    # Serial filter (gateway_inverter_serial)
+    # ------------------------------------------------------------------
+
+    def test_no_serial_filter_uses_all_inverters(self):
+        """When gateway_inverter_serial is empty, all inverters are registered."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = []  # no filter
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 2
+
+    def test_serial_filter_single_match_restricts_to_one(self):
+        """Providing a matching serial restricts auto-config to only that inverter."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["CE000000AA1"]
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 1
+        assert any("000aa1" in e for e in gw._args["soc_percent"])
+        assert not any("000bb2" in e for e in gw._args["soc_percent"])
+
+    def test_serial_filter_no_match_fails_auto_config(self):
+        """When the serial filter matches no inverters, auto-config returns early without completing."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_test"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["NON_EXISTENT"]
+        gw.automatic_config()
+
+        assert not gw._auto_configured
+        assert "num_inverters" not in gw._args
+        gw.log.assert_called()
+        assert any("Warn" in str(c) for c in gw.log.call_args_list)
+
+    def test_serial_filter_case_insensitive(self):
+        """Serial filter matching is case-insensitive."""
+        gw = self._make_gateway()
+        gw._last_status = self._basic_status(serial="CE123456789", primary=True)
+        gw.gateway_inverter_serial = ["ce123456789"]  # lowercase filter against uppercase serial
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 1
+
+    def test_serial_filter_string_normalised_to_list(self):
+        """A bare string (not a list) passed as gateway_inverter_serial is treated as a single-entry filter."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(gateway_device_id="pbgw_test", mqtt_host="mqtt.example.com", mqtt_token="tok", gateway_inverter_serial="CE123456789")
+        assert gw.gateway_inverter_serial == ["CE123456789"]
+
+    def test_serial_filter_none_becomes_empty_list(self):
+        """None gateway_inverter_serial becomes an empty list (no filtering)."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(gateway_device_id="pbgw_test", mqtt_host="mqtt.example.com", mqtt_token="tok", gateway_inverter_serial=None)
+        assert gw.gateway_inverter_serial == []
+
+    def test_serial_filter_partial_match_excludes_unmatched(self):
+        """With three inverters and a two-serial filter, only the two matched are registered."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_tri"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        self._make_inverter(status, serial="CE000000CC3", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["CE000000AA1", "CE000000CC3"]
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 2
+        assert any("000aa1" in e for e in gw._args["soc_percent"])
+        assert not any("000bb2" in e for e in gw._args["soc_percent"])
+        assert any("000cc3" in e for e in gw._args["soc_percent"])
 
 
 class TestSelectEvent:
@@ -1714,6 +1903,142 @@ class TestPublishPredbatData:
         topic, _, retain = gw._published[0]
         assert topic == "predbat/devices/pbgw_test/predbat_data"
         assert retain is True
+
+    # ------------------------------------------------------------------
+    # Marginal cost matrix
+    # ------------------------------------------------------------------
+
+    def test_marginal_costs_nominal_matrix(self):
+        """Marginal matrix with int keys is flattened in canonical 1/2/4/8 level order."""
+        matrix = {
+            1: {"14:00": 5.2, "16:00": 4.1, "18:00": 3.8},
+            2: {"14:00": 5.8, "16:00": 4.3, "18:00": 3.9},
+            4: {"14:00": 8.1, "16:00": 7.5, "18:00": 6.8},
+            8: {"14:00": 12.3, "16:00": 11.5, "18:00": 10.8},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_time_labels"] == ["14:00", "16:00", "18:00"]
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [5.2, 4.1, 3.8]
+        assert payload["marginal_costs"][3] == [12.3, 11.5, 10.8]
+
+    def test_marginal_costs_string_keys_work(self):
+        """A JSON-round-tripped matrix with string keys is handled identically."""
+        matrix = {
+            "1": {"14:00": 5.0},
+            "2": {"14:00": 6.0},
+            "4": {"14:00": 7.0},
+            "8": {"14:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == [[5.0], [6.0], [7.0], [8.0]]
+
+    def test_marginal_costs_missing_sensor_empty_lists(self):
+        """When the marginal sensor isn't populated the payload still publishes empty lists."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
+
+    def test_marginal_costs_missing_row_padded_with_zeros(self):
+        """A row missing from the matrix is padded with 0 rather than dropping the whole structure.
+
+        Prevents one absent level collapsing the gateway's view of the matrix.
+        """
+        matrix = {
+            1: {"14:00": 5.0, "16:00": 4.0},
+            # 2 intentionally missing
+            4: {"14:00": 7.0, "16:00": 6.0},
+            8: {"14:00": 9.0, "16:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [5.0, 4.0]
+        assert payload["marginal_costs"][1] == [0, 0]  # padded
+        assert payload["marginal_costs"][2] == [7.0, 6.0]
+
+    def test_marginal_costs_leading_missing_rows_padded_with_zeros(self):
+        """Leading missing rows are zero-padded once later levels define the matrix width."""
+        matrix = {
+            # 1 and 2 intentionally missing
+            4: {"14:00": 7.0, "16:00": 6.0},
+            8: {"14:00": 9.0, "16:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [0, 0]
+        assert payload["marginal_costs"][1] == [0, 0]
+        assert payload["marginal_costs"][2] == [7.0, 6.0]
+        assert payload["marginal_costs"][3] == [9.0, 8.0]
+        assert payload["marginal_time_labels"] == ["14:00", "16:00"]
+
+    def test_marginal_costs_non_numeric_value_caught(self):
+        """Non-numeric cells (e.g. 'N/A') don't blow up the publish — graceful empty fallback."""
+        matrix = {1: {"14:00": "N/A"}, 2: {"14:00": 0}, 4: {"14:00": 0}, 8: {"14:00": 0}}
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
+
+    def test_marginal_costs_non_dict_matrix_ignored(self):
+        """Matrix that isn't a dict (e.g. published as a list by mistake) falls back to empty."""
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": [1, 2, 3],
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
 
 
 class TestIanaToPosixTz:
