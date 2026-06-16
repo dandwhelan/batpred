@@ -12,8 +12,21 @@ import pytz
 import aiohttp
 import json
 from unittest.mock import MagicMock, patch, AsyncMock
-from fox import validate_schedule, minutes_to_schedule_time, end_minute_inclusive_to_exclusive, FoxAPI, schedules_are_equal
+from fox import validate_schedule, minutes_to_schedule_time, end_minute_inclusive_to_exclusive, FoxAPI, schedules_are_equal, FOX_CACHE_KEYS, FOX_REFRESH_SETTINGS, FOX_REFRESH_REALTIME
 from tests.test_infra import run_async, create_aiohttp_mock_response, create_aiohttp_mock_session
+
+
+class MockBase:
+    """Mock base object for ComponentBase properties in Fox API tests."""
+
+    def __init__(self):
+        """Initialise MockBase with default config."""
+        self.midnight_utc = datetime.now(pytz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        self.config = {}
+
+    def get_arg(self, key, default=None, **kwargs):
+        """Return config value or default."""
+        return self.config.get(key, default)
 
 
 class MockFoxAPI:
@@ -22,11 +35,11 @@ class MockFoxAPI:
     def __init__(self):
         self.device_battery_charging_time = {}
         self.device_scheduler = {}
-        self.device_settings = {}
         self.local_schedule = {}
-        self.device_current_schedule = {}
+        self.device_settings = {}
         self.fdpwr_max = {}
         self.fdsoc_min = {}
+        self.device_scheduler_count = {}
         self.inverter_sn_filter = []
 
     def getMinSocOnGrid(self, deviceSN):
@@ -44,6 +57,7 @@ class MockFoxAPIWithRequests(FoxAPI):
         # Don't call parent __init__ since we're not using ComponentBase properly
         self.key = "test_api_key"
         self.automatic = False
+        self.automatic_ignore_pv = False
         self.failures_total = 0
         self.prefix = "predbat"  # Add default prefix
         self.device_list = []
@@ -56,10 +70,11 @@ class MockFoxAPIWithRequests(FoxAPI):
         self.device_production_year = {}
         self.device_battery_charging_time = {}
         self.device_scheduler = {}
-        self.device_current_schedule = {}
         self.local_schedule = {}
         self.fdpwr_max = {}
         self.fdsoc_min = {}
+        self.device_scheduler_count = {}
+        self.data_age = {}
         self.local_tz = pytz.timezone("Europe/London")
         self.inverter_sn_filter = []
 
@@ -90,7 +105,7 @@ class MockFoxAPIWithRequests(FoxAPI):
         self.last_midnight_utc = None
 
         # Mock base object for ComponentBase properties
-        self.base = type("obj", (object,), {"midnight_utc": datetime.now(pytz.utc).replace(hour=0, minute=0, second=0, microsecond=0)})()
+        self.base = MockBase()
 
     def log(self, message):
         """Mock log method"""
@@ -642,6 +657,86 @@ def test_validate_schedule_discharge_ending_at_midnight(my_predbat):
     assert result[1]["endMinute"] == 59
     assert result[1]["fdSoc"] == 10
     assert result[1]["fdPwr"] == 5000
+
+    return False
+
+
+def test_validate_schedule_padding_normal(my_predbat):
+    """
+    Test validate_schedule pads to target_count with disabled SelfUse entries when result is shorter
+    """
+    print("  - test_validate_schedule_padding_normal")
+
+    # Single ForceCharge window 02:30 - 05:30 with target_count=8
+    new_schedule = [{"enable": 1, "startHour": 2, "startMinute": 30, "endHour": 5, "endMinute": 30, "workMode": "ForceCharge", "fdSoc": 100, "maxSoc": 100, "fdPwr": 8000, "minSocOnGrid": 10}]
+    reserve = 10
+    fdPwr_max = 8000
+
+    result = validate_schedule(new_schedule, reserve, fdPwr_max, target_count=8)
+
+    # Should be padded to 8 entries
+    assert len(result) == 8, f"Expected 8 entries after padding, got {len(result)}"
+
+    # All padding entries should be disabled SelfUse with zero start/end
+    for entry in result[3:]:
+        assert entry["enable"] == 0, f"Padding entry should be disabled: {entry}"
+        assert entry["workMode"] == "SelfUse", f"Padding entry should be SelfUse: {entry}"
+        assert entry["startHour"] == 0
+        assert entry["startMinute"] == 0
+        assert entry["endHour"] == 0
+        assert entry["endMinute"] == 0
+
+    return False
+
+
+def test_validate_schedule_padding_empty(my_predbat):
+    """
+    Test validate_schedule pads even when input is empty (early-return path)
+    """
+    print("  - test_validate_schedule_padding_empty")
+
+    reserve = 15
+    fdPwr_max = 7000
+
+    result = validate_schedule([], reserve, fdPwr_max, target_count=8)
+
+    # Should be padded to 8 entries
+    assert len(result) == 8, f"Expected 8 entries after padding, got {len(result)}"
+
+    # First entry should be the default full-day SelfUse
+    assert result[0]["enable"] == 1
+    assert result[0]["workMode"] == "SelfUse"
+    assert result[0]["startHour"] == 0
+    assert result[0]["endHour"] == 23
+    assert result[0]["endMinute"] == 59
+
+    # Remaining entries should be disabled padding
+    for entry in result[1:]:
+        assert entry["enable"] == 0, f"Padding entry should be disabled: {entry}"
+        assert entry["workMode"] == "SelfUse"
+        assert entry["startHour"] == 0
+        assert entry["startMinute"] == 0
+        assert entry["endHour"] == 0
+        assert entry["endMinute"] == 0
+
+    return False
+
+
+def test_validate_schedule_padding_no_target(my_predbat):
+    """
+    Test validate_schedule does not pad when target_count=0 (default)
+    """
+    print("  - test_validate_schedule_padding_no_target")
+
+    new_schedule = [{"enable": 1, "startHour": 2, "startMinute": 0, "endHour": 5, "endMinute": 0, "workMode": "ForceCharge", "fdSoc": 100, "maxSoc": 100, "fdPwr": 8000, "minSocOnGrid": 10}]
+    reserve = 10
+    fdPwr_max = 8000
+
+    result = validate_schedule(new_schedule, reserve, fdPwr_max)
+
+    # No padding: all entries should be enabled (natural gap-fill entries)
+    for entry in result:
+        assert entry["enable"] == 1, f"Unexpected disabled entry without target_count: {entry}"
 
     return False
 
@@ -1743,12 +1838,12 @@ def test_api_get_device_settings(my_predbat):
 
     run_async(fox.get_device_settings(deviceSN))
 
-    # Should have made requests for all 7 FOX_SETTINGS
-    assert len(fox.request_log) == 7
+    # Should have made requests for all 6 FOX_SETTINGS
+    assert len(fox.request_log) == 6
 
     # Verify each setting was requested
     requested_keys = [req["datain"]["key"] for req in fox.request_log]
-    expected_keys = ["ExportLimit", "MaxSoc", "GridCode", "WorkMode", "ExportLimitPower", "MinSoc", "MinSocOnGrid"]
+    expected_keys = ["ExportLimit", "MaxSoc", "GridCode", "WorkMode", "MinSoc", "MinSocOnGrid"]
     for key in expected_keys:
         assert key in requested_keys, f"Expected key {key} in requests"
 
@@ -1905,6 +2000,7 @@ def test_api_get_scheduler(my_predbat):
 
     assert fox.fdpwr_max[deviceSN] == 8000
     assert fox.fdsoc_min[deviceSN] == 10
+    assert fox.device_scheduler_count[deviceSN] == 2
 
     return False
 
@@ -3012,7 +3108,7 @@ class MockFoxAPIForRequestTesting(FoxAPI):
         self.last_midnight_utc = None
 
         # Mock base object for ComponentBase properties
-        self.base = type("obj", (object,), {"midnight_utc": datetime.now(pytz.utc).replace(hour=0, minute=0, second=0, microsecond=0)})()
+        self.base = MockBase()
 
     def log(self, message):
         """Mock log method - captures messages"""
@@ -3410,31 +3506,39 @@ class MockFoxAPIWithRunTracking(MockFoxAPIWithRequests):
         return self.device_list
 
     async def get_device_detail(self, deviceSN):
+        # Return a truthy result to mirror a successful poll (real method returns the data)
         self.method_calls.append(f"get_device_detail:{deviceSN}")
+        return {"deviceSN": deviceSN}
 
     async def get_device_history(self, deviceSN):
         self.method_calls.append(f"get_device_history:{deviceSN}")
 
     async def get_battery_charging_time(self, deviceSN):
         self.method_calls.append(f"get_battery_charging_time:{deviceSN}")
-        return {}
+        return {"enable1": True}
 
     async def get_device_settings(self, deviceSN):
         self.method_calls.append(f"get_device_settings:{deviceSN}")
+        return {"WorkMode": {}}
 
     async def get_schedule_settings_ha(self, deviceSN):
         self.method_calls.append(f"get_schedule_settings_ha:{deviceSN}")
 
     async def get_scheduler(self, deviceSN):
         self.method_calls.append(f"get_scheduler:{deviceSN}")
-        return {}
+        return {"enable": 0}
 
     async def compute_schedule(self, deviceSN):
         self.method_calls.append(f"compute_schedule:{deviceSN}")
         return {}
 
+    async def get_device_production_month(self, deviceSN):
+        self.method_calls.append(f"get_device_production_month:{deviceSN}")
+        return [{"variable": "generation"}]
+
     async def get_real_time_data(self, deviceSN):
         self.method_calls.append(f"get_real_time_data:{deviceSN}")
+        return [{"datas": []}]
 
     async def publish_data(self):
         self.method_calls.append("publish_data")
@@ -3488,50 +3592,231 @@ def test_run_first_call_no_devices(my_predbat):
 
 def test_run_subsequent_call(my_predbat):
     """
-    Test run() with first=False only updates real-time data (not at hourly boundary)
+    Test run() only refreshes data that has aged out, leaving fresh data alone
     """
     print("  - test_run_subsequent_call")
+
+    from datetime import datetime, timezone
 
     fox = MockFoxAPIWithRunTracking()
     fox.device_list = [{"deviceSN": "TEST123"}]
 
-    # seconds=300 (5 minutes), not an hourly boundary, first=False
+    # Mark all cached data as freshly updated except the real-time values, which are absent
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
+    del fox.data_age["device_values"]  # Force a real-time refresh only
+
     result = run_async(fox.run(300, first=False))
 
     assert result == True
-    # Should NOT call initialisation methods
+    # Fresh data should NOT be re-fetched
     assert "get_device_list" not in fox.method_calls
     assert "get_device_detail:TEST123" not in fox.method_calls
-    # Should call real-time data update
+    assert "get_device_settings:TEST123" not in fox.method_calls
+    # Aged-out real-time data should be refreshed and published
     assert "get_real_time_data:TEST123" in fox.method_calls
     assert "publish_data" in fox.method_calls
-    # Should NOT call hourly methods (since 300 % 3600 != 0)
+
+    return False
+
+
+def test_run_settings_refresh_on_age(my_predbat):
+    """
+    Test run() refreshes settings and scheduler once that cached data has aged out
+    """
+    print("  - test_run_settings_refresh_on_age")
+
+    from datetime import datetime, timedelta, timezone
+
+    fox = MockFoxAPIWithRunTracking()
+    fox.device_list = [{"deviceSN": "TEST123"}]
+
+    # All data fresh except the device settings, which are older than FOX_REFRESH_SETTINGS
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
+    fox.data_age["device_settings"] = now - timedelta(minutes=FOX_REFRESH_SETTINGS + 1)
+
+    result = run_async(fox.run(120, first=False))
+
+    assert result == True
+    # Should refresh settings and scheduler
+    assert "get_device_settings:TEST123" in fox.method_calls
+    assert "get_schedule_settings_ha:TEST123" in fox.method_calls
+    assert "get_scheduler:TEST123" in fox.method_calls
+    assert "compute_schedule:TEST123" in fox.method_calls
+    assert "publish_data" in fox.method_calls
+    # Fresh real-time data should not be re-fetched
+    assert "get_real_time_data:TEST123" not in fox.method_calls
+
+    return False
+
+
+def test_run_realtime_refresh_after_cache_expires(my_predbat):
+    """
+    Test run() leaves fresh real-time data alone but re-fetches it once the cache expires,
+    proving the age-based refresh actually fires after the staleness threshold is crossed
+    """
+    print("  - test_run_realtime_refresh_after_cache_expires")
+
+    from datetime import datetime, timedelta, timezone
+
+    fox = MockFoxAPIWithRunTracking()
+    fox.device_list = [{"deviceSN": "TEST123"}]
+
+    # All categories fresh, including real-time data updated just now
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
+
+    # First run while real-time data is fresh: it must NOT be re-fetched
+    result = run_async(fox.run(60, first=False))
+    assert result == True
+    assert "get_real_time_data:TEST123" not in fox.method_calls
+
+    # Age the real-time cache past its threshold and run again: it must be re-fetched
+    fox.method_calls = []
+    fox.data_age["device_values"] = now - timedelta(minutes=FOX_REFRESH_REALTIME + 1)
+
+    result = run_async(fox.run(120, first=False))
+    assert result == True
+    assert "get_real_time_data:TEST123" in fox.method_calls
+    assert "publish_data" in fox.method_calls
+
+    # And after refreshing, the cache age is reset so a subsequent run does not re-fetch
+    fox.method_calls = []
+    result = run_async(fox.run(180, first=False))
+    assert result == True
+    assert "get_real_time_data:TEST123" not in fox.method_calls
+
+    return False
+
+
+def test_run_device_list_failure_does_not_mark_cache_fresh(my_predbat):
+    """
+    Test that a failed device list poll does not reset the refresh timer, so the next run
+    retries instead of being suppressed for 24h by a falsely-fresh cache entry
+    """
+    print("  - test_run_device_list_failure_does_not_mark_cache_fresh")
+
+    fox = MockFoxAPIWithRequests()
+    # No mock response set for the device list path, so request_get returns None (poll fails)
+
+    # A failed poll must report None (not an empty list) and leave the device list untouched
+    result = run_async(fox.get_device_list())
+    assert result is None
+    assert fox.device_list == []
+
+    # After a failed refresh in run(), the cache age must remain unset so a retry can happen
+    fox.device_list = [{"deviceSN": "TEST123"}]  # Pretend we still have a cached list
+    run_async(fox.run(0, first=False))
+    assert "device_list" not in fox.data_age, "Failed device list poll must not mark the cache fresh"
+
+    return False
+
+
+def test_run_first_refreshes_device_list_despite_fresh_cache(my_predbat):
+    """
+    Test run() always re-fetches the device list on first start, even when the cached data
+    is still fresh, so a new inverter or changed serial number is picked up.  Device detail
+    and all other age-gated categories are skipped while the cache is fresh.
+    """
+    print("  - test_run_first_refreshes_device_list_despite_fresh_cache")
+
+    from datetime import datetime, timezone
+
+    fox = MockFoxAPIWithRunTracking()
+    fox.device_list = [{"deviceSN": "TEST123"}]
+
+    # Mark every cache category as freshly updated
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
+
+    result = run_async(fox.run(0, first=True))
+
+    assert result == True
+    # Device list must always refresh on first start regardless of cache age
+    assert "get_device_list" in fox.method_calls
+    # Age-based categories with fresh data should NOT be re-fetched on first start
+    assert "get_device_detail:TEST123" not in fox.method_calls
+    assert "get_real_time_data:TEST123" not in fox.method_calls
     assert "get_device_settings:TEST123" not in fox.method_calls
 
     return False
 
 
-def test_run_hourly_update(my_predbat):
+def test_run_new_device_invalidates_detail_cache(my_predbat):
     """
-    Test run() with first=False at hourly boundary updates settings and scheduler
+    Test that when the device list changes (new inverter added), the device_detail cache is
+    invalidated so the new device's detail is fetched immediately rather than waiting 24 hours.
     """
-    print("  - test_run_hourly_update")
+    print("  - test_run_new_device_invalidates_detail_cache")
+
+    from datetime import datetime, timezone
+
+    fox = MockFoxAPIWithRunTracking()
+    # Start with one device and a fully fresh cache
+    fox.device_list = [{"deviceSN": "TEST123"}]
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
+
+    # Simulate get_device_list returning a second, new device
+    async def get_device_list_with_new_device():
+        fox.method_calls.append("get_device_list")
+        fox.device_list = [{"deviceSN": "TEST123"}, {"deviceSN": "NEW456"}]
+        return fox.device_list
+
+    fox.get_device_list = get_device_list_with_new_device
+
+    result = run_async(fox.run(0, first=True))
+
+    assert result == True
+    assert "get_device_list" in fox.method_calls
+    # All per-device caches must be re-fetched for both old and new devices
+    assert "get_device_detail:TEST123" in fox.method_calls
+    assert "get_device_detail:NEW456" in fox.method_calls
+    assert "get_device_settings:TEST123" in fox.method_calls
+    assert "get_device_settings:NEW456" in fox.method_calls
+    assert "get_real_time_data:TEST123" in fox.method_calls
+    assert "get_real_time_data:NEW456" in fox.method_calls
+
+    return False
+
+
+def test_run_unchanged_device_list_preserves_cache(my_predbat):
+    """
+    Test that when the device list is re-fetched but the set of serial numbers is unchanged,
+    per-device caches are not invalidated and no redundant API calls are made.
+    """
+    print("  - test_run_unchanged_device_list_preserves_cache")
+
+    from datetime import datetime, timezone
 
     fox = MockFoxAPIWithRunTracking()
     fox.device_list = [{"deviceSN": "TEST123"}]
+    now = datetime.now(timezone.utc)
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = now
 
-    # seconds=3600 (1 hour), first=False
-    result = run_async(fox.run(3600, first=False))
+    # get_device_list returns the same device SN as before
+    async def get_device_list_same():
+        fox.method_calls.append("get_device_list")
+        fox.device_list = [{"deviceSN": "TEST123"}]
+        return fox.device_list
+
+    fox.get_device_list = get_device_list_same
+
+    result = run_async(fox.run(0, first=True))
 
     assert result == True
-    # Should call hourly methods
-    assert "get_device_settings:TEST123" in fox.method_calls
-    assert "get_schedule_settings_ha:TEST123" in fox.method_calls
-    assert "get_scheduler:TEST123" in fox.method_calls
-    assert "compute_schedule:TEST123" in fox.method_calls
-    # Should call real-time data update
-    assert "get_real_time_data:TEST123" in fox.method_calls
-    assert "publish_data" in fox.method_calls
+    assert "get_device_list" in fox.method_calls
+    # Cache is still fresh and device set unchanged — no per-device fetches should happen
+    assert "get_device_detail:TEST123" not in fox.method_calls
+    assert "get_device_settings:TEST123" not in fox.method_calls
+    assert "get_real_time_data:TEST123" not in fox.method_calls
 
     return False
 
@@ -3809,7 +4094,6 @@ def test_write_battery_schedule_event_reserve(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10}
     fox.device_scheduler[deviceSN] = {"enable": False, "groups": []}
 
@@ -3835,7 +4119,6 @@ def test_write_battery_schedule_event_charge_enable(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"enable": 0}}
 
     run_async(fox.write_battery_schedule_event("switch.predbat_fox_test123456_battery_schedule_charge_enable", "turn_on"))
@@ -3860,7 +4143,6 @@ def test_write_battery_schedule_event_time_change(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"start_time": "00:00:00", "end_time": "00:00:00"}}
 
     run_async(fox.write_battery_schedule_event("select.predbat_fox_test123456_battery_schedule_charge_start_time", "02:30:00"))
@@ -3885,7 +4167,6 @@ def test_write_battery_schedule_event_soc_change(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "discharge": {"soc": 10}}
 
     run_async(fox.write_battery_schedule_event("number.predbat_fox_test123456_battery_schedule_discharge_soc", "20"))
@@ -3910,7 +4191,6 @@ def test_write_battery_schedule_event_power_change(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "discharge": {"power": 8000}}
 
     run_async(fox.write_battery_schedule_event("number.predbat_fox_test123456_battery_schedule_discharge_power", "5000"))
@@ -3923,14 +4203,13 @@ def test_write_battery_schedule_event_power_change(my_predbat):
 
 def test_write_battery_schedule_event_unknown_serial(my_predbat):
     """
-    Test write_battery_schedule_event with unknown serial number (not in device_current_schedule)
+    Test write_battery_schedule_event with unknown serial number (not in device_detail)
     """
     print("  - test_write_battery_schedule_event_unknown_serial")
 
     fox = MockFoxAPIWithRequests()
 
-    # Setup empty device_current_schedule
-    fox.device_current_schedule = {}
+    # device_detail is empty by default (no known devices)
 
     # Try to write with unknown serial
     run_async(fox.write_battery_schedule_event("number.predbat_fox_unknown123_battery_schedule_reserve", "20"))
@@ -3955,7 +4234,6 @@ def test_write_battery_schedule_event_reserve_invalid_value(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 15
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 20}
     fox.device_scheduler[deviceSN] = {"enable": False, "groups": []}
 
@@ -3982,7 +4260,6 @@ def test_write_battery_schedule_event_unknown_direction(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10}
 
     # Entity ID without _charge_ or _discharge_ in it (not reserve either)
@@ -4010,7 +4287,6 @@ def test_write_battery_schedule_event_initialize_direction_dict(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     # local_schedule exists but no charge/discharge dict
     fox.local_schedule[deviceSN] = {"reserve": 10}
 
@@ -4037,7 +4313,6 @@ def test_write_battery_schedule_event_soc_invalid_value(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"soc": 80}, "discharge": {"soc": 20}}
 
     # Test charge with invalid value - should default to 100
@@ -4065,7 +4340,6 @@ def test_write_battery_schedule_event_power_invalid_value(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"power": 5000}}
 
     # Try to set power to invalid value - should default to fdpwr_max (8000)
@@ -4089,7 +4363,6 @@ def test_write_battery_schedule_event_start_time_invalid(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"start_time": "02:30:00"}}
 
     # Try to set start_time to invalid value - should default to "00:00:00"
@@ -4113,7 +4386,6 @@ def test_write_battery_schedule_event_end_time_invalid(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "discharge": {"end_time": "19:00:00"}}
 
     # Try to set end_time to invalid value - should default to "00:00:00"
@@ -4137,7 +4409,6 @@ def test_write_battery_schedule_event_write_trigger(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {
         "reserve": 10,
         "charge": {"enable": 1, "start_time": "02:30:00", "end_time": "05:30:00", "soc": 100, "power": 8000},
@@ -4182,7 +4453,6 @@ def test_write_battery_schedule_event_unknown_attribute(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {}}
 
     # Try with unknown attribute
@@ -4208,7 +4478,6 @@ def test_write_battery_schedule_event_initialize_local_schedule(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 15
-    fox.device_current_schedule[deviceSN] = []
     # local_schedule doesn't have deviceSN key
     fox.local_schedule = {}
     fox.device_scheduler[deviceSN] = {"enable": False, "groups": []}
@@ -4258,7 +4527,6 @@ def test_select_event_battery_schedule(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"start_time": "00:00:00"}}
 
     run_async(fox.select_event("select.predbat_fox_test123456_battery_schedule_charge_start_time", "02:30:00"))
@@ -4304,7 +4572,6 @@ def test_number_event_battery_schedule(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"soc": 80}}
 
     run_async(fox.number_event("number.predbat_fox_test123456_battery_schedule_charge_soc", "100"))
@@ -4329,7 +4596,6 @@ def test_switch_event_battery_schedule(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "charge": {"enable": 0}}
 
     run_async(fox.switch_event("switch.predbat_fox_test123456_battery_schedule_charge_enable", "turn_on"))
@@ -4354,7 +4620,6 @@ def test_switch_event_toggle(my_predbat):
     fox.device_settings[deviceSN] = {"MinSocOnGrid": {"value": 10}}
     fox.fdpwr_max[deviceSN] = 8000
     fox.fdsoc_min[deviceSN] = 10
-    fox.device_current_schedule[deviceSN] = []
     fox.local_schedule[deviceSN] = {"reserve": 10, "discharge": {"enable": 1}}
 
     run_async(fox.switch_event("switch.predbat_fox_test123456_battery_schedule_discharge_enable", "turn_off"))
@@ -4412,6 +4677,52 @@ def test_publish_data_device_info(my_predbat):
     battery_capacity_entity = f"sensor.predbat_fox_{deviceSN.lower()}_battery_capacity"
     assert battery_capacity_entity in fox.dashboard_items
     assert fox.dashboard_items[battery_capacity_entity]["state"] == 10.36  # 10360 / 1000
+
+    return False
+
+
+def test_publish_data_battery_soh(my_predbat):
+    """
+    Test publish_data creates battery_soh sensor with correct value and attributes
+    """
+    print("  - test_publish_data_battery_soh")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "TEST123456"
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {"hasPV": True, "hasBattery": True, "capacity": 8, "function": {"scheduler": True}, "deviceType": "KH8", "stationName": "Test Home", "batteryList": [{"capacity": 10360}]}
+    fox.fdpwr_max[deviceSN] = 8000
+    fox.fdsoc_min[deviceSN] = 10
+    fox.device_values[deviceSN] = {"SOH": {"value": 95.0, "name": "SOH", "unit": "%"}}
+    fox.device_settings[deviceSN] = {}
+    fox.local_schedule[deviceSN] = {}
+
+    run_async(fox.publish_data())
+
+    soh_entity = f"sensor.predbat_fox_{deviceSN.lower()}_battery_soh"
+    assert soh_entity in fox.dashboard_items, f"battery_soh entity not found in {list(fox.dashboard_items.keys())}"
+    assert fox.dashboard_items[soh_entity]["state"] == 0.95, f"Expected 0.95, got {fox.dashboard_items[soh_entity]['state']}"
+    assert fox.dashboard_items[soh_entity]["attributes"]["unit_of_measurement"] == "*"
+    assert fox.dashboard_items[soh_entity]["attributes"]["device_class"] == "battery"
+    assert fox.dashboard_items[soh_entity]["attributes"]["state_class"] == "measurement"
+    assert fox.dashboard_items[soh_entity]["attributes"]["icon"] == "mdi:battery-heart"
+
+    # Test with SOH not yet available (no real-time data fetched)
+    fox2 = MockFoxAPIWithRequests()
+    fox2.device_list = [{"deviceSN": deviceSN}]
+    fox2.device_detail[deviceSN] = {"hasPV": True, "hasBattery": True, "capacity": 8, "function": {}, "deviceType": "KH8", "stationName": "Test Home", "batteryList": []}
+    fox2.fdpwr_max[deviceSN] = 8000
+    fox2.fdsoc_min[deviceSN] = 10
+    fox2.device_values[deviceSN] = {}  # No SOH data yet
+    fox2.device_settings[deviceSN] = {}
+    fox2.local_schedule[deviceSN] = {}
+
+    run_async(fox2.publish_data())
+
+    soh_entity2 = f"sensor.predbat_fox_{deviceSN.lower()}_battery_soh"
+    assert soh_entity2 in fox2.dashboard_items
+    assert fox2.dashboard_items[soh_entity2]["state"] == 1.0
 
     return False
 
@@ -4770,6 +5081,7 @@ def test_automatic_config_single_battery(my_predbat):
     assert fox.args_set.get("soc_percent") == [f"sensor.predbat_fox_{sn_lower}_soc"]
     assert fox.args_set.get("battery_power") == [f"sensor.predbat_fox_{sn_lower}_invbatpower"]
     assert fox.args_set.get("charge_start_time") == [f"select.predbat_fox_{sn_lower}_battery_schedule_charge_start_time"]
+    assert fox.args_set.get("battery_scaling") == [f"sensor.predbat_fox_{sn_lower}_battery_soh"]
 
     return False
 
@@ -4994,6 +5306,157 @@ def test_automatic_config_export_limit_case_insensitive(my_predbat):
     return False
 
 
+def test_automatic_config_pv_ignore_enabled(my_predbat):
+    """
+    Test automatic_config skips pv_today and pv_power when fox_pv_ignore=True
+    """
+    print("  - test_automatic_config_pv_ignore_enabled")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "TEST123456"
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {"hasPV": True, "hasBattery": True, "capacity": 8, "function": {"scheduler": True}}
+    fox.automatic_ignore_pv = True  # Enable PV ignoring
+    run_async(fox.automatic_config())
+
+    # pv_today and pv_power must NOT be set when fox_pv_ignore is enabled
+    assert fox.args_set.get("pv_today") is None, f"pv_today should not be set when fox_pv_ignore=True, got {fox.args_set.get('pv_today')}"
+    assert fox.args_set.get("pv_power") is None, f"pv_power should not be set when fox_pv_ignore=True, got {fox.args_set.get('pv_power')}"
+    # Other args should still be set
+    assert fox.args_set.get("soc_percent") is not None
+    assert fox.args_set.get("battery_power") is not None
+    fox.automatic_ignore_pv = False
+
+    return False
+
+
+def test_automatic_config_pv_ignore_disabled(my_predbat):
+    """
+    Test automatic_config sets pv_today and pv_power when fox_pv_ignore=False (default)
+    """
+    print("  - test_automatic_config_pv_ignore_disabled")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "TEST123456"
+    sn_lower = deviceSN.lower()
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {"hasPV": True, "hasBattery": True, "capacity": 8, "function": {"scheduler": True}}
+    # fox_pv_ignore defaults to False when not set
+
+    run_async(fox.automatic_config())
+
+    # pv_today and pv_power MUST be set when fox_pv_ignore is False
+    assert fox.args_set.get("pv_today") == [f"sensor.predbat_fox_{sn_lower}_pvenergytotal_today"], f"pv_today should be set, got {fox.args_set.get('pv_today')}"
+    assert fox.args_set.get("pv_power") == [f"sensor.predbat_fox_{sn_lower}_pvpower"], f"pv_power should be set, got {fox.args_set.get('pv_power')}"
+
+    return False
+
+
+def test_automatic_config_third_party_gen(my_predbat):
+    """
+    Test automatic_config with thirdPartyGen=True and hasPV=False uses meterpower2/feedin2.
+    This covers the case of a Fox AC-coupled battery inverter with a separate Solis PV inverter
+    whose output is measured via CT2 (meterPower2/feedin2).
+    """
+    print("  - test_automatic_config_third_party_gen")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "60WC50205AYA038"
+    sn_lower = deviceSN.lower()
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {
+        "hasPV": False,
+        "thirdPartyGen": True,
+        "hasBattery": True,
+        "capacity": 5,
+        "function": {"scheduler": True},
+    }
+
+    run_async(fox.automatic_config())
+
+    assert fox.args_set.get("num_inverters") == 1
+
+    pv_power = fox.args_set.get("pv_power", [])
+    assert f"sensor.predbat_fox_{sn_lower}_meterpower2" in pv_power, f"Expected meterpower2 in pv_power, got {pv_power}"
+
+    pv_today = fox.args_set.get("pv_today", [])
+    assert f"sensor.predbat_fox_{sn_lower}_feedin2" in pv_today, f"Expected feedin2 in pv_today, got {pv_today}"
+
+    # pvpower/pvenergytotal_today must NOT appear — there is no DC PV on the Fox inverter
+    assert f"sensor.predbat_fox_{sn_lower}_pvpower" not in pv_power, f"pvpower should not be in pv_power, got {pv_power}"
+    assert f"sensor.predbat_fox_{sn_lower}_pvenergytotal_today" not in pv_today, f"pvenergytotal_today should not be in pv_today, got {pv_today}"
+
+    return False
+
+
+def test_automatic_config_battery_only_no_third_party(my_predbat):
+    """
+    Test automatic_config with hasPV=False and thirdPartyGen=False sets no PV sensors.
+    A battery-only system must not pick up meterpower2/feedin2 as phantom PV.
+    """
+    print("  - test_automatic_config_battery_only_no_third_party")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "BATT0000001"
+    sn_lower = deviceSN.lower()
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {
+        "hasPV": False,
+        "thirdPartyGen": False,
+        "hasBattery": True,
+        "capacity": 5,
+        "function": {"scheduler": True},
+    }
+
+    run_async(fox.automatic_config())
+
+    pv_power = fox.args_set.get("pv_power", [])
+    pv_today = fox.args_set.get("pv_today", [])
+
+    assert f"sensor.predbat_fox_{sn_lower}_meterpower2" not in pv_power, f"meterpower2 must not appear for battery-only, got {pv_power}"
+    assert f"sensor.predbat_fox_{sn_lower}_feedin2" not in pv_today, f"feedin2 must not appear for battery-only, got {pv_today}"
+
+    return False
+
+
+def test_automatic_config_third_party_gen_with_own_pv(my_predbat):
+    """
+    Test automatic_config when hasPV=True AND thirdPartyGen=True.
+    Both the Fox's own DC PV (pvpower/pvenergytotal_today) and the third-party
+    AC-coupled generator (meterpower2/feedin2) must appear so neither source is lost.
+    """
+    print("  - test_automatic_config_third_party_gen_with_own_pv")
+
+    fox = MockFoxAPIWithRequests()
+    deviceSN = "HYBRID123456"
+    sn_lower = deviceSN.lower()
+
+    fox.device_list = [{"deviceSN": deviceSN}]
+    fox.device_detail[deviceSN] = {
+        "hasPV": True,
+        "thirdPartyGen": True,
+        "hasBattery": True,
+        "capacity": 8,
+        "function": {"scheduler": True},
+    }
+
+    run_async(fox.automatic_config())
+
+    pv_power = fox.args_set.get("pv_power", [])
+    pv_today = fox.args_set.get("pv_today", [])
+
+    assert f"sensor.predbat_fox_{sn_lower}_pvpower" in pv_power, f"pvpower must be in pv_power, got {pv_power}"
+    assert f"sensor.predbat_fox_{sn_lower}_meterpower2" in pv_power, f"meterpower2 must be in pv_power, got {pv_power}"
+    assert f"sensor.predbat_fox_{sn_lower}_pvenergytotal_today" in pv_today, f"pvenergytotal_today must be in pv_today, got {pv_today}"
+    assert f"sensor.predbat_fox_{sn_lower}_feedin2" in pv_today, f"feedin2 must be in pv_today, got {pv_today}"
+
+    return False
+
+
 def test_fox_rate_limiting_normal_operation(my_predbat):
     """Test that normal operation under 60/hour allows retries"""
     print("  - test_fox_rate_limiting_normal_operation")
@@ -5130,6 +5593,11 @@ def test_fox_rate_limiting_midnight_reset(my_predbat):
 
     # Update the base object's midnight_utc to simulate day change
     my_predbat.midnight_utc = day2_midnight
+
+    # Mark all cached data as fresh so the age-based refresh does not trigger any API polling
+    fox.device_list = [{"deviceSN": "TEST"}]
+    for key in FOX_CACHE_KEYS:
+        fox.data_age[key] = day2_time
 
     with patch("fox.datetime") as mock_datetime, patch.object(fox, "log") as mock_log, patch.object(fox, "should_allow_retry", return_value=True):
         # Mock datetime.now() to return day2_time
@@ -5380,6 +5848,9 @@ def run_fox_api_tests(my_predbat):
         failed |= test_validate_schedule_multiple_windows(my_predbat)
         failed |= test_validate_schedule_both_charge_and_discharge(my_predbat)
         failed |= test_validate_schedule_discharge_ending_at_midnight(my_predbat)
+        failed |= test_validate_schedule_padding_normal(my_predbat)
+        failed |= test_validate_schedule_padding_empty(my_predbat)
+        failed |= test_validate_schedule_padding_no_target(my_predbat)
         if failed:
             return failed
 
@@ -5470,7 +5941,12 @@ def run_fox_api_tests(my_predbat):
         failed |= test_run_first_call_with_devices(my_predbat)
         failed |= test_run_first_call_no_devices(my_predbat)
         failed |= test_run_subsequent_call(my_predbat)
-        failed |= test_run_hourly_update(my_predbat)
+        failed |= test_run_settings_refresh_on_age(my_predbat)
+        failed |= test_run_realtime_refresh_after_cache_expires(my_predbat)
+        failed |= test_run_device_list_failure_does_not_mark_cache_fresh(my_predbat)
+        failed |= test_run_first_refreshes_device_list_despite_fresh_cache(my_predbat)
+        failed |= test_run_new_device_invalidates_detail_cache(my_predbat)
+        failed |= test_run_unchanged_device_list_preserves_cache(my_predbat)
         failed |= test_run_with_automatic_config(my_predbat)
         failed |= test_run_without_automatic_config(my_predbat)
         failed |= test_run_midnight_reset(my_predbat)
@@ -5509,6 +5985,7 @@ def run_fox_api_tests(my_predbat):
 
         # publish_data tests
         failed |= test_publish_data_device_info(my_predbat)
+        failed |= test_publish_data_battery_soh(my_predbat)
         failed |= test_publish_data_device_values(my_predbat)
         failed |= test_publish_data_device_values_dual_soc(my_predbat)
         failed |= test_publish_data_device_settings(my_predbat)
@@ -5535,6 +6012,11 @@ def run_fox_api_tests(my_predbat):
         failed |= test_automatic_config_export_limit_some_devices(my_predbat)
         failed |= test_automatic_config_export_limit_no_devices(my_predbat)
         failed |= test_automatic_config_export_limit_case_insensitive(my_predbat)
+        failed |= test_automatic_config_pv_ignore_enabled(my_predbat)
+        failed |= test_automatic_config_pv_ignore_disabled(my_predbat)
+        failed |= test_automatic_config_third_party_gen(my_predbat)
+        failed |= test_automatic_config_battery_only_no_third_party(my_predbat)
+        failed |= test_automatic_config_third_party_gen_with_own_pv(my_predbat)
 
         # Rate limiting tests
         failed |= test_fox_rate_limiting_normal_operation(my_predbat)

@@ -483,6 +483,44 @@ class TestInjectEntities:
         state, _ = gw._dashboard_calls["sensor.predbat_gateway_456789_battery_dod"]
         assert approx_equal(state, 0.95)
 
+    def test_export_limit_w_sensor_published(self):
+        """export_limit_w from ControlStatus is published as a sensor in watts."""
+        from gateway import GATEWAY_ATTRIBUTE_TABLE
+
+        status = self._make_status()
+        status.inverters[0].control.export_limit_w = 3600
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, attrs = gw._dashboard_calls[entity]
+        assert state == 3600
+        assert attrs == GATEWAY_ATTRIBUTE_TABLE.get("export_limit_w", {})
+
+    def test_export_limit_w_zero_undefined_publishes_99999(self):
+        """export_limit_w = 0 (undefined sentinel) is published as 99999 (unlimited)."""
+        status = self._make_status()  # control.export_limit_w defaults to 0
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 99999
+
+    def test_export_limit_w_one_zero_limit_publishes_zero(self):
+        """export_limit_w = 1 (zero-limit sentinel) is published as 0 W."""
+        status = self._make_status()
+        status.inverters[0].control.export_limit_w = 1
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_export_limit_w"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 0
+
     def test_ems_aggregate_entities(self):
         """EMS aggregate and sub-inverter entities are published with table attributes."""
         from gateway import GATEWAY_ATTRIBUTE_TABLE
@@ -529,7 +567,7 @@ class TestInjectEntities:
 
         # Sub-inverter entities
         assert gw._dashboard_calls[f"sensor.{pfx}_sub0_soc"][0] == 65
-        assert gw._dashboard_calls[f"sensor.{pfx}_sub0_battery_power"][0] == 2000
+        assert gw._dashboard_calls[f"sensor.{pfx}_sub0_battery_power"][0] == -2000
         assert gw._dashboard_calls[f"sensor.{pfx}_sub0_pv_power"][0] == 3000
         assert gw._dashboard_calls[f"sensor.{pfx}_sub1_soc"][0] == 75
 
@@ -538,6 +576,47 @@ class TestInjectEntities:
         assert attrs == GATEWAY_ATTRIBUTE_TABLE.get("ems_total_soc", {})
         _, attrs = gw._dashboard_calls[f"sensor.{pfx}_sub0_temp"]
         assert attrs == GATEWAY_ATTRIBUTE_TABLE.get("temp", {})
+
+    def test_inverter_rate_max_published_from_inverter(self):
+        """inverter_rate_max sensor uses InverterData.rate_max_w when non-zero."""
+        from gateway import GATEWAY_ATTRIBUTE_TABLE
+
+        status = self._make_status()
+        status.inverters[0].inverter.rate_max_w = 6000
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_inverter_rate_max"
+        assert entity in gw._dashboard_calls
+        state, attrs = gw._dashboard_calls[entity]
+        assert state == 6000
+        assert attrs == GATEWAY_ATTRIBUTE_TABLE.get("inverter_rate_max", {})
+
+    def test_inverter_rate_max_falls_back_to_battery(self):
+        """inverter_rate_max sensor uses BatteryStatus.rate_max_w when InverterData.rate_max_w is zero."""
+        status = self._make_status()
+        status.inverters[0].inverter.rate_max_w = 0
+        status.inverters[0].battery.rate_max_w = 5000
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_inverter_rate_max"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 5000
+
+    def test_inverter_rate_max_uses_6000_when_both_zero(self):
+        """inverter_rate_max sensor is still published with the 6000 W default when both InverterData and BatteryStatus report zero."""
+        status = self._make_status()
+        status.inverters[0].inverter.rate_max_w = 0
+        status.inverters[0].battery.rate_max_w = 0
+        gw = self._make_gateway()
+        gw._inject_entities(status)
+
+        entity = "sensor.predbat_gateway_456789_inverter_rate_max"
+        assert entity in gw._dashboard_calls
+        state, _ = gw._dashboard_calls[entity]
+        assert state == 6000
 
 
 class TestTokenRefresh:
@@ -783,6 +862,7 @@ class TestAutomaticConfig:
         gw._suffix_to_serial = {}
         gw.args = {}
         gw._args = {}
+        gw.gateway_inverter_serial = []  # default: no serial filter
 
         def capture_set_arg(key, value):
             gw._args[key] = value
@@ -888,12 +968,46 @@ class TestAutomaticConfig:
         assert gw._args["inverter_time"] == [f"sensor.{base}_inverter_time"]
 
     def test_no_rate_max_falls_back_to_6000(self):
-        """When firmware reports no battery_rate_max, a 6000 W default is used."""
+        """When firmware reports no battery_rate_max, the sensor is still published with a 6000 W default."""
         gw = self._make_gateway()
         gw._last_status = self._basic_status(serial="CE123456789", primary=False, rate_max_w=0)
         gw.automatic_config()
 
-        assert gw._args["battery_rate_max"] == [6000]
+        base = f"{gw.prefix}_gateway_456789"
+        assert gw._args["battery_rate_max"] == [f"sensor.{base}_battery_rate_max"]
+
+    def test_inverter_limit_set_from_inverter_rate_max(self):
+        """inverter_limit points to inverter_rate_max sensor when InverterData.rate_max_w is non-zero."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789", primary=False)
+        status.inverters[0].inverter.rate_max_w = 6000
+        gw._last_status = status
+        gw.automatic_config()
+
+        base = f"{gw.prefix}_gateway_456789"
+        assert gw._args["inverter_limit"] == [f"sensor.{base}_inverter_rate_max"]
+
+    def test_inverter_limit_set_when_only_battery_rate_max(self):
+        """inverter_limit points to inverter_rate_max sensor even when only BatteryStatus.rate_max_w is set (sensor value is the battery fallback)."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789", primary=False, rate_max_w=5000)
+        status.inverters[0].inverter.rate_max_w = 0
+        gw._last_status = status
+        gw.automatic_config()
+
+        base = f"{gw.prefix}_gateway_456789"
+        assert gw._args["inverter_limit"] == [f"sensor.{base}_inverter_rate_max"]
+
+    def test_inverter_limit_set_when_both_rate_max_zero(self):
+        """inverter_limit still points to inverter_rate_max sensor when both rates are zero (sensor falls back to 6000)."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789", primary=False, rate_max_w=0)
+        status.inverters[0].inverter.rate_max_w = 0
+        gw._last_status = status
+        gw.automatic_config()
+
+        base = f"{gw.prefix}_gateway_456789"
+        assert gw._args["inverter_limit"] == [f"sensor.{base}_inverter_rate_max"]
 
     # ------------------------------------------------------------------
     # Primary-flag filtering
@@ -993,6 +1107,232 @@ class TestAutomaticConfig:
 
         assert "ems_total_soc" not in gw._args
         assert "idle_start_time" not in gw._args
+
+    def test_export_limit_nonzero_maps_to_sensor_entity(self):
+        """export_limit_w is always mapped to the sensor entity regardless of value."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 5000
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_zero_maps_to_sensor_entity(self):
+        """export_limit_w = 0 (block all export) maps to the sensor entity."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 0
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_99999_maps_to_sensor_entity(self):
+        """export_limit_w = 99999 (firmware not-configured sentinel) also maps to the sensor entity."""
+        gw = self._make_gateway()
+        status = self._basic_status(serial="CE123456789")
+        status.inverters[0].control.export_limit_w = 99999
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"] == ["sensor.predbat_gateway_456789_export_limit_w"]
+
+    def test_export_limit_multi_inverter(self):
+        """Each inverter in a multi-inverter setup gets its own export_limit sensor entity."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.automatic_config()
+
+        assert gw._args["export_limit"][0] == "sensor.predbat_gateway_000aa1_export_limit_w"
+        assert gw._args["export_limit"][1] == "sensor.predbat_gateway_000bb2_export_limit_w"
+
+    # ------------------------------------------------------------------
+    # Serial filter (gateway_inverter_serial)
+    # ------------------------------------------------------------------
+
+    def test_no_serial_filter_uses_all_inverters(self):
+        """When gateway_inverter_serial is empty, all inverters are registered."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = []  # no filter
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 2
+
+    def test_serial_filter_single_match_restricts_to_one(self):
+        """Providing a matching serial restricts auto-config to only that inverter."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["CE000000AA1"]
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 1
+        assert any("000aa1" in e for e in gw._args["soc_percent"])
+        assert not any("000bb2" in e for e in gw._args["soc_percent"])
+
+    def test_serial_filter_no_match_aborts_config(self):
+        """A serial filter matching nothing logs an error and aborts auto-config.
+
+        Configuring the wrong inverter set is worse than not configuring at all, so
+        a no-match clears _auto_configured and returns early. The run loop is blocked
+        until a subsequent telemetry succeeds with a matching serial.
+        """
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_test"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["NON_EXISTENT"]
+        gw.automatic_config()
+
+        assert not gw._auto_configured
+        assert "num_inverters" not in gw._args
+        gw.log.assert_called()
+        assert any("Error" in str(c) and "matched no inverters" in str(c) for c in gw.log.call_args_list)
+
+    def test_serial_filter_no_match_clears_previously_good_config(self):
+        """A no-match filter during reconfigure clears _auto_configured even if it was True.
+
+        Without this, a stale successful config (e.g. from a prior run with different
+        inverters) would remain active, causing PredBat to keep controlling the wrong set.
+        """
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_test"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        gw._last_status = status
+
+        # First pass: matching filter — succeeds
+        gw.gateway_inverter_serial = ["CE000000AA1"]
+        gw.automatic_config()
+        assert gw._auto_configured
+
+        # Second pass (reconfigure): filter no longer matches anything
+        gw.gateway_inverter_serial = ["NON_EXISTENT"]
+        gw.automatic_config()
+        assert not gw._auto_configured
+
+    def test_serial_filter_case_insensitive(self):
+        """Serial filter matching is case-insensitive."""
+        gw = self._make_gateway()
+        gw._last_status = self._basic_status(serial="CE123456789", primary=True)
+        gw.gateway_inverter_serial = ["ce123456789"]  # lowercase filter against uppercase serial
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 1
+
+    def test_serial_filter_string_normalised_to_list(self):
+        """A bare string (not a list) passed as gateway_inverter_serial is treated as a single-entry filter."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(gateway_device_id="pbgw_test", mqtt_host="mqtt.example.com", mqtt_token="tok", gateway_inverter_serial="CE123456789")
+        assert gw.gateway_inverter_serial == ["CE123456789"]
+
+    def test_serial_filter_none_becomes_empty_list(self):
+        """None gateway_inverter_serial becomes an empty list (no filtering)."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(gateway_device_id="pbgw_test", mqtt_host="mqtt.example.com", mqtt_token="tok", gateway_inverter_serial=None)
+        assert gw.gateway_inverter_serial == []
+
+    def test_serial_filter_json_array_string_expanded_to_list(self):
+        """A JSON-encoded array string is parsed and expanded into a list of serials."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(
+            gateway_device_id="pbgw_test",
+            mqtt_host="mqtt.example.com",
+            mqtt_token="tok",
+            gateway_inverter_serial='["CE000000AA1", "CE000000BB2"]',
+        )
+        assert gw.gateway_inverter_serial == ["CE000000AA1", "CE000000BB2"]
+
+    def test_serial_filter_json_object_string_becomes_single_entry(self):
+        """A JSON-encoded object (not an array) is str-converted and wrapped in a list."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(
+            gateway_device_id="pbgw_test",
+            mqtt_host="mqtt.example.com",
+            mqtt_token="tok",
+            gateway_inverter_serial='{"serial": "CE123456789"}',
+        )
+        assert len(gw.gateway_inverter_serial) == 1
+        assert isinstance(gw.gateway_inverter_serial[0], str)
+
+    def test_serial_filter_invalid_json_falls_back_to_raw_string(self):
+        """A string starting with '[' that is not valid JSON is kept as a single-entry list."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        raw = "[not valid json"
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.initialize(
+            gateway_device_id="pbgw_test",
+            mqtt_host="mqtt.example.com",
+            mqtt_token="tok",
+            gateway_inverter_serial=raw,
+        )
+        assert gw.gateway_inverter_serial == [raw]
+
+    def test_serial_filter_partial_match_excludes_unmatched(self):
+        """With three inverters and a two-serial filter, only the two matched are registered."""
+        gw = self._make_gateway()
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_tri"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        self._make_inverter(status, serial="CE000000AA1", primary=True)
+        self._make_inverter(status, serial="CE000000BB2", primary=True)
+        self._make_inverter(status, serial="CE000000CC3", primary=True)
+        gw._last_status = status
+        gw.gateway_inverter_serial = ["CE000000AA1", "CE000000CC3"]
+        gw.automatic_config()
+
+        assert gw._auto_configured
+        assert gw._args["num_inverters"] == 2
+        assert any("000aa1" in e for e in gw._args["soc_percent"])
+        assert not any("000bb2" in e for e in gw._args["soc_percent"])
+        assert any("000cc3" in e for e in gw._args["soc_percent"])
 
 
 class TestSelectEvent:
@@ -1715,6 +2055,142 @@ class TestPublishPredbatData:
         assert topic == "predbat/devices/pbgw_test/predbat_data"
         assert retain is True
 
+    # ------------------------------------------------------------------
+    # Marginal cost matrix
+    # ------------------------------------------------------------------
+
+    def test_marginal_costs_nominal_matrix(self):
+        """Marginal matrix with int keys is flattened in canonical 1/2/4/8 level order."""
+        matrix = {
+            1: {"14:00": 5.2, "16:00": 4.1, "18:00": 3.8},
+            2: {"14:00": 5.8, "16:00": 4.3, "18:00": 3.9},
+            4: {"14:00": 8.1, "16:00": 7.5, "18:00": 6.8},
+            8: {"14:00": 12.3, "16:00": 11.5, "18:00": 10.8},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_time_labels"] == ["14:00", "16:00", "18:00"]
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [5.2, 4.1, 3.8]
+        assert payload["marginal_costs"][3] == [12.3, 11.5, 10.8]
+
+    def test_marginal_costs_string_keys_work(self):
+        """A JSON-round-tripped matrix with string keys is handled identically."""
+        matrix = {
+            "1": {"14:00": 5.0},
+            "2": {"14:00": 6.0},
+            "4": {"14:00": 7.0},
+            "8": {"14:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == [[5.0], [6.0], [7.0], [8.0]]
+
+    def test_marginal_costs_missing_sensor_empty_lists(self):
+        """When the marginal sensor isn't populated the payload still publishes empty lists."""
+        gw = self._make_gateway({"predbat.rates": "10.0", "predbat.cost_today": "0", "predbat.ppkwh_today": "10.0"})
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
+
+    def test_marginal_costs_missing_row_padded_with_zeros(self):
+        """A row missing from the matrix is padded with 0 rather than dropping the whole structure.
+
+        Prevents one absent level collapsing the gateway's view of the matrix.
+        """
+        matrix = {
+            1: {"14:00": 5.0, "16:00": 4.0},
+            # 2 intentionally missing
+            4: {"14:00": 7.0, "16:00": 6.0},
+            8: {"14:00": 9.0, "16:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [5.0, 4.0]
+        assert payload["marginal_costs"][1] == [0, 0]  # padded
+        assert payload["marginal_costs"][2] == [7.0, 6.0]
+
+    def test_marginal_costs_leading_missing_rows_padded_with_zeros(self):
+        """Leading missing rows are zero-padded once later levels define the matrix width."""
+        matrix = {
+            # 1 and 2 intentionally missing
+            4: {"14:00": 7.0, "16:00": 6.0},
+            8: {"14:00": 9.0, "16:00": 8.0},
+        }
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert len(payload["marginal_costs"]) == 4
+        assert payload["marginal_costs"][0] == [0, 0]
+        assert payload["marginal_costs"][1] == [0, 0]
+        assert payload["marginal_costs"][2] == [7.0, 6.0]
+        assert payload["marginal_costs"][3] == [9.0, 8.0]
+        assert payload["marginal_time_labels"] == ["14:00", "16:00"]
+
+    def test_marginal_costs_non_numeric_value_caught(self):
+        """Non-numeric cells (e.g. 'N/A') don't blow up the publish — graceful empty fallback."""
+        matrix = {1: {"14:00": "N/A"}, 2: {"14:00": 0}, 4: {"14:00": 0}, 8: {"14:00": 0}}
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": matrix,
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
+
+    def test_marginal_costs_non_dict_matrix_ignored(self):
+        """Matrix that isn't a dict (e.g. published as a list by mistake) falls back to empty."""
+        gw = self._make_gateway(
+            {
+                "predbat.rates": "10.0",
+                "predbat.cost_today": "0",
+                "predbat.ppkwh_today": "10.0",
+                "sensor.predbat_marginal_energy_costs#matrix": [1, 2, 3],
+            }
+        )
+        self._run(gw._publish_predbat_data())
+        payload = self._get_published_payload(gw)
+        assert payload["marginal_costs"] == []
+        assert payload["marginal_time_labels"] == []
+
 
 class TestIanaToPosixTz:
     """Tests for GatewayMQTT.iana_to_posix_tz() — IANA to POSIX TZ string conversion."""
@@ -1844,8 +2320,560 @@ class TestIanaToPosixTz:
         assert plan.timezone == "GMT0BST,M3.5.0/1,M10.5.0", f"Got {plan.timezone!r}"  # cspell:disable-line
 
 
+class TestGatewayUnitControlBinding:
+    """Regression tests for the 2026-06-04 incident (GW + single AIO).
+
+    A GivEnergy *Gateway* (proto type INVERTER_TYPE_GIVENERGY_GATEWAY) is not a
+    battery inverter. The old ``automatic_config`` filtered plan inverters only on
+    ``primary + battery`` (never on type) and assigned the inverter *index* from the
+    raw discovery array order, so a re-discovery (e.g. an NVS wipe) could move the
+    Gateway to index 0 — and PredBat then read its empty charge window and raised
+    "Inverter 0 unable to read charge window time".
+
+    The fix: exclude the Gateway type from the controllable set and bind slots to a
+    stable key (serial) instead of discovery order. These tests assert that fixed
+    behaviour and guard against regression.
+    """
+
+    def _make_gateway(self):
+        """Build a GatewayMQTT with set_arg captured into ``_args`` (mirrors TestAutomaticConfig)."""
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.base = MagicMock()
+        gw.log = MagicMock()
+        gw.prefix = "predbat"
+        gw._last_status = None
+        gw._auto_configured = False
+        gw._configured_inverter_serials = frozenset()
+        gw._suffix_to_serial = {}
+        gw.args = {}
+        gw._args = {}
+        gw.gateway_inverter_serial = []
+
+        def capture_set_arg(key, value):
+            gw._args[key] = value
+
+        gw.set_arg = capture_set_arg
+        gw.dashboard_item = MagicMock()
+        return gw
+
+    def _two_unit_status(self, order):
+        """Build a status mirroring the live site: AIO CH2414G318 + Gateway GW2347G077.
+
+        ``order`` is a list of "aio"/"gateway" deciding the discovery array order.
+        """
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_3c0f02ddf2d8"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        for kind in order:
+            inv = status.inverters.add()
+            if kind == "gateway":
+                # GivEnergy Gateway: not a battery inverter, but reports primary
+                # and a degenerate battery submessage (rate_max set) so it passes
+                # the primary+battery filter. capacity_wh stays 0 (no real battery).
+                inv.type = pb.INVERTER_TYPE_GIVENERGY_GATEWAY
+                inv.serial = "GW2347G077"
+                inv.primary = True
+                inv.battery.rate_max_w = 38
+            else:
+                inv.type = pb.INVERTER_TYPE_GIVENERGY
+                inv.serial = "CH2414G318"
+                inv.primary = True
+                inv.battery.soc_percent = 100
+                inv.battery.capacity_wh = 12680
+                inv.battery.rate_max_w = 6000
+        return status
+
+    def _two_aio_status(self, serials):
+        """Build a status with two real AIO battery inverters in *serials* order."""
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_multi_aio"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        for serial in serials:
+            inv = status.inverters.add()
+            inv.type = pb.INVERTER_TYPE_GIVENERGY
+            inv.serial = serial
+            inv.primary = True
+            inv.battery.soc_percent = 50
+            inv.battery.capacity_wh = 10000
+            inv.battery.rate_max_w = 6000
+        return status
+
+    def test_gateway_unit_excluded_from_control_both_orders(self):
+        """The Gateway is excluded from the control set regardless of discovery order."""
+        for order in (["aio", "gateway"], ["gateway", "aio"]):
+            gw = self._make_gateway()
+            gw._last_status = self._two_unit_status(order)
+            gw.automatic_config()
+
+            assert gw._auto_configured, f"order={order}"
+            assert gw._args["num_inverters"] == 1, f"order={order}"
+            # No control arg points at the Gateway's serial suffix (47g077):
+            assert all("47g077" not in e for e in gw._args["discharge_rate"]), f"order={order}"
+            assert all("47g077" not in e for e in gw._args["charge_start_time"]), f"order={order}"
+
+    def test_aio_is_inverter0_regardless_of_discovery_order(self):
+        """The AIO is always PredBat inverter 0, whichever way discovery reports the units."""
+        for order in (["aio", "gateway"], ["gateway", "aio"]):
+            gw = self._make_gateway()
+            gw._last_status = self._two_unit_status(order)
+            gw.automatic_config()
+            assert gw._args["charge_start_time"][0] == "select.predbat_gateway_14g318_charge_slot1_start", f"order={order}"
+
+    def test_multi_aio_slots_are_serial_stable_across_discovery_order(self):
+        """Two AIOs map to the same slot by serial regardless of discovery array order."""
+        for serials in (["CH1111A111", "CH2222B222"], ["CH2222B222", "CH1111A111"]):
+            gw = self._make_gateway()
+            gw._last_status = self._two_aio_status(serials)
+            gw.automatic_config()
+            assert gw._args["num_inverters"] == 2, f"serials={serials}"
+            # Sorted by serial: CH1111A111 (suffix 11a111) is always slot 0.
+            assert gw._args["charge_start_time"][0] == "select.predbat_gateway_11a111_charge_slot1_start", f"serials={serials}"
+            assert gw._args["charge_start_time"][1] == "select.predbat_gateway_22b222_charge_slot1_start", f"serials={serials}"
+
+    def _gateway_plus_aios_status(self, aio_serials, gateway_first=True):
+        """Build a status: one GivEnergy Gateway plus the AIO battery inverters in *aio_serials*."""
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_3c0f02ddf2d8"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+
+        def add_gateway():
+            inv = status.inverters.add()
+            inv.type = pb.INVERTER_TYPE_GIVENERGY_GATEWAY
+            inv.serial = "GW2347G077"
+            inv.primary = True
+            inv.battery.rate_max_w = 38
+
+        def add_aio(serial):
+            inv = status.inverters.add()
+            inv.type = pb.INVERTER_TYPE_GIVENERGY
+            inv.serial = serial
+            inv.primary = True
+            inv.battery.soc_percent = 100
+            inv.battery.capacity_wh = 12680
+            inv.battery.rate_max_w = 6000
+
+        if gateway_first:
+            add_gateway()
+        for serial in aio_serials:
+            add_aio(serial)
+        if not gateway_first:
+            add_gateway()
+        return status
+
+    def test_gateway_is_control_point_when_two_aios_present(self):
+        """GivTCP: a Gateway behind >=2 AIOs becomes the single control point (control routes via the GW).
+
+        Mirrors the dynamic case: a site starts as Gateway + 1 AIO (control the AIO) and a
+        second AIO is later discovered, at which point control must move to the Gateway.
+        """
+        for gateway_first in (True, False):
+            gw = self._make_gateway()
+            gw._last_status = self._gateway_plus_aios_status(["CH2414G318", "CH9999G999"], gateway_first=gateway_first)
+            gw.automatic_config()
+            assert gw._args["num_inverters"] == 1, f"gateway_first={gateway_first}"
+            # The single control unit is the GATEWAY (47g077), not either AIO:
+            assert gw._args["charge_start_time"][0] == "select.predbat_gateway_47g077_charge_slot1_start", f"gateway_first={gateway_first}"
+
+    def test_gateway_with_single_aio_controls_the_aio(self):
+        """A Gateway with exactly one AIO controls the AIO directly (Gateway is not the control point)."""
+        gw = self._make_gateway()
+        gw._last_status = self._gateway_plus_aios_status(["CH2414G318"])
+        gw.automatic_config()
+        assert gw._args["num_inverters"] == 1
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_14g318_charge_slot1_start"
+        assert all("47g077" not in e for e in gw._args["charge_start_time"])
+
+    # ------------------------------------------------------------------
+    # Re-init trigger: a new inverter discovered later re-selects the control target
+    # ------------------------------------------------------------------
+
+    def test_reconfigure_triggers_when_new_aio_discovered(self):
+        """A second AIO discovered later re-runs auto-config and moves control to the Gateway."""
+        gw = self._make_gateway()
+        # Initial: Gateway + 1 AIO -> control the AIO directly.
+        gw._last_status = self._gateway_plus_aios_status(["CH2414G318"])
+        gw.automatic_config()
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_14g318_charge_slot1_start"
+
+        # Five minutes later a second AIO appears -> a re-config is required.
+        new_status = self._gateway_plus_aios_status(["CH2414G318", "CH9999G999"])
+        assert gw._needs_reconfigure(new_status) is True
+        gw._last_status = new_status
+        gw.automatic_config()
+        # Control point is now the Gateway (GivTCP rule for >=2 AIOs behind a Gateway).
+        assert gw._args["num_inverters"] == 1
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_47g077_charge_slot1_start"
+
+    def test_no_reconfigure_when_inverter_set_unchanged(self):
+        """Repeated telemetry with the same inverter set does not re-run auto-config."""
+        gw = self._make_gateway()
+        gw._last_status = self._gateway_plus_aios_status(["CH2414G318"])
+        gw.automatic_config()
+        assert gw._needs_reconfigure(self._gateway_plus_aios_status(["CH2414G318"])) is False
+
+    def test_transient_inverter_drop_does_not_reconfigure(self):
+        """An inverter transiently dropping out of a scan does not trigger a re-config (sticky)."""
+        gw = self._make_gateway()
+        gw._last_status = self._gateway_plus_aios_status(["CH2414G318", "CH9999G999"])
+        gw.automatic_config()
+        # CH9999G999 missing from one scan -> no *new* serials -> no re-config.
+        assert gw._needs_reconfigure(self._gateway_plus_aios_status(["CH2414G318"])) is False
+
+    def _make_handler_gateway(self):
+        """A gateway wired enough to drive _process_telemetry end-to-end (decode -> inject -> reconfigure)."""
+        from unittest.mock import MagicMock
+
+        gw = self._make_gateway()
+        gw.local_tz = pytz.timezone("Europe/London")
+        gw._error_count = 0
+        gw.api_started = False
+        gw._last_telemetry_time = 0
+        gw.update_success_timestamp = MagicMock()
+        return gw
+
+    def test_scenario_second_aio_via_telemetry_moves_control_to_gateway(self):
+        """End-to-end through the telemetry handler (_process_telemetry).
+
+        A site comes up as Gateway + 1 AIO and PredBat controls the AIO; a later
+        telemetry frame that adds a second AIO re-runs auto-config and moves the
+        control point to the Gateway — the exact "discover another AIO 5 minutes
+        later" scenario, exercised through the real status path.
+        """
+        gw = self._make_handler_gateway()
+
+        gw._process_telemetry(self._gateway_plus_aios_status(["CH2414G318"]).SerializeToString())
+        assert gw._auto_configured
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_14g318_charge_slot1_start"
+
+        gw._process_telemetry(self._gateway_plus_aios_status(["CH2414G318", "CH9999G999"]).SerializeToString())
+        assert gw._args["num_inverters"] == 1
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_47g077_charge_slot1_start"
+
+    # ------------------------------------------------------------------
+    # EMS and AC3 topologies
+    # ------------------------------------------------------------------
+
+    def _status_with_ems(self, aio_serials, ems_serial="EM2347E077"):
+        """Build a status with a Plant EMS plus the AIO battery inverters in *aio_serials*."""
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_ems"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        ems = status.inverters.add()
+        ems.type = pb.INVERTER_TYPE_GIVENERGY_EMS
+        ems.serial = ems_serial
+        ems.primary = True
+        ems.battery.rate_max_w = 38
+        for serial in aio_serials:
+            inv = status.inverters.add()
+            inv.type = pb.INVERTER_TYPE_GIVENERGY
+            inv.serial = serial
+            inv.primary = True
+            inv.battery.soc_percent = 100
+            inv.battery.capacity_wh = 12680
+            inv.battery.rate_max_w = 6000
+        return status
+
+    def test_ems_is_control_point_when_present(self):
+        """A Plant EMS is the single control point, taking priority over the AIOs (GivTCP)."""
+        gw = self._make_gateway()
+        gw._last_status = self._status_with_ems(["CH2414G318", "CH9999G999"])
+        gw.automatic_config()
+        assert gw._args["num_inverters"] == 1
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_47e077_charge_slot1_start"
+        # Neither AIO is bound as a control slot:
+        assert all("14g318" not in e and "99g999" not in e for e in gw._args["charge_start_time"])
+
+    def test_ac3_units_routed_like_aios(self):
+        """AC3 inverters report as INVERTER_TYPE_GIVENERGY; two behind a Gateway -> control the Gateway."""
+        gw = self._make_gateway()
+        # Two "AC3" units (proto type GIVENERGY, like any battery inverter) plus a Gateway.
+        gw._last_status = self._gateway_plus_aios_status(["AC3001A001", "AC3002A002"])
+        gw.automatic_config()
+        assert gw._args["num_inverters"] == 1
+        assert gw._args["charge_start_time"][0] == "select.predbat_gateway_47g077_charge_slot1_start"
+
+    # ------------------------------------------------------------------
+    # AC-coupled vs hybrid switch (from inv.model)
+    # ------------------------------------------------------------------
+
+    def _aio_status_with_model(self, model, serial="CH2414G318"):
+        """Single-AIO status reporting a given GivEnergy model string."""
+        status = pb.GatewayStatus()
+        status.device_id = "pbgw_model"
+        status.firmware = "1.0.0"
+        status.schema_version = 1
+        inv = status.inverters.add()
+        inv.type = pb.INVERTER_TYPE_GIVENERGY
+        inv.serial = serial
+        inv.primary = True
+        inv.model = model
+        inv.battery.soc_percent = 100
+        inv.battery.capacity_wh = 12680
+        inv.battery.rate_max_w = 6000
+        return status
+
+    def _hybrid_switch_calls(self, gw):
+        """The set_state_wrapper calls that targeted the inverter_hybrid switch."""
+        return [c for c in gw.base.set_state_wrapper.call_args_list if c.args and c.args[0] == "switch.predbat_inverter_hybrid"]
+
+    def test_hybrid_switch_off_for_ac_coupled_model(self):
+        """An AC / AIO / All-in-One model turns the hybrid switch off (AC-coupled)."""
+        for model in ("All-in-One", "AC 3ph"):
+            gw = self._make_gateway()
+            gw._last_status = self._aio_status_with_model(model)
+            gw.automatic_config()
+            gw.base.set_state_wrapper.assert_any_call("switch.predbat_inverter_hybrid", "off", attributes={}, required_unit=None)
+
+    def test_hybrid_switch_on_for_hybrid_model(self):
+        """A Hybrid / HV model turns the hybrid switch on (DC-coupled)."""
+        gw = self._make_gateway()
+        gw._last_status = self._aio_status_with_model("Hybrid HV Gen3")
+        gw.automatic_config()
+        gw.base.set_state_wrapper.assert_any_call("switch.predbat_inverter_hybrid", "on", attributes={}, required_unit=None)
+
+    def test_hybrid_switch_untouched_when_model_absent(self):
+        """Older firmware that omits the model leaves the hybrid switch alone."""
+        gw = self._make_gateway()
+        gw._last_status = self._aio_status_with_model("")  # no model reported
+        gw.automatic_config()
+        assert self._hybrid_switch_calls(gw) == []
+
+
+class TestCheckInverterResets:
+    """Tests for GatewayMQTT._check_inverter_resets()."""
+
+    def _make_gateway(self, read_only=False, alive=True, auto_configured=True):
+        """Build a minimal GatewayMQTT stub for _check_inverter_resets() tests.
+
+        Sets _mqtt_connected and _gateway_online so is_alive() returns *alive*
+        without needing to mock the method itself.  When alive=True the gateway
+        is connected to the broker but its LWT reports offline — is_alive()
+        returns True in that state without requiring fresh telemetry.
+        """
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.log = MagicMock()
+        gw._suffix_to_serial = {}
+        gw._inverter_reset_done = set()
+        gw._mqtt_connected = alive
+        gw._gateway_online = False  # broker-connected but LWT-offline → is_alive() True when _mqtt_connected
+        gw._last_telemetry_time = 0
+        gw._auto_configured = auto_configured
+        gw._published = []
+
+        def fake_get_arg(key, default=None):
+            if key == "set_read_only":
+                return read_only
+            return default
+
+        gw.get_arg = fake_get_arg
+
+        async def fake_publish_command(command, **kwargs):
+            gw._published.append((command, kwargs))
+
+        gw.publish_command = fake_publish_command
+        return gw
+
+    def _run(self, coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    def test_sends_reset_for_un_reset_inverter(self):
+        """inverter_reset is published for a serial not yet in _inverter_reset_done."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        assert len(gw._published) == 1
+        cmd, kwargs = gw._published[0]
+        assert cmd == "inverter_reset"
+        assert kwargs["serial"] == "CE123456789"
+
+    def test_serial_added_to_done_set_after_reset(self):
+        """After reset the serial is recorded in _inverter_reset_done."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        assert "CE123456789" in gw._inverter_reset_done
+
+    def test_no_duplicate_reset_on_second_call(self):
+        """A second call does not re-send inverter_reset for an already-reset serial."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        self._run(gw._check_inverter_resets())
+        assert len(gw._published) == 1
+
+    def test_read_only_skips_reset(self):
+        """No reset is sent when set_read_only is True."""
+        gw = self._make_gateway(read_only=True)
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        assert gw._published == []
+        assert "CE123456789" not in gw._inverter_reset_done
+
+    def test_not_alive_skips_reset(self):
+        """No reset is sent when is_alive() returns False (MQTT disconnected)."""
+        gw = self._make_gateway(alive=False)
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        assert gw._published == []
+
+    def test_not_auto_configured_skips_reset(self):
+        """No reset is sent before auto-config has completed."""
+        gw = self._make_gateway(auto_configured=False)
+        gw._suffix_to_serial["456789"] = "CE123456789"
+        self._run(gw._check_inverter_resets())
+        assert gw._published == []
+
+    def test_multi_inverter_each_gets_reset(self):
+        """Each inverter in a multi-inverter setup receives its own inverter_reset."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["000aa1"] = "CE000000AA1"
+        gw._suffix_to_serial["000bb2"] = "CE000000BB2"
+        self._run(gw._check_inverter_resets())
+        sent_serials = {kwargs["serial"] for _, kwargs in gw._published}
+        assert sent_serials == {"CE000000AA1", "CE000000BB2"}
+        assert len(gw._published) == 2
+
+    def test_multi_inverter_partial_done_resets_only_new(self):
+        """Only inverters not in _inverter_reset_done are reset; already-reset ones are skipped."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["000aa1"] = "CE000000AA1"
+        gw._suffix_to_serial["000bb2"] = "CE000000BB2"
+        gw._inverter_reset_done.add("CE000000AA1")
+        self._run(gw._check_inverter_resets())
+        assert len(gw._published) == 1
+        assert gw._published[0][1]["serial"] == "CE000000BB2"
+
+    def test_no_inverters_sends_nothing(self):
+        """No commands are sent when _suffix_to_serial is empty."""
+        gw = self._make_gateway()
+        self._run(gw._check_inverter_resets())
+        assert gw._published == []
+
+    def test_log_emitted_per_inverter(self):
+        """An Info log is emitted for each inverter that is reset."""
+        gw = self._make_gateway()
+        gw._suffix_to_serial["000aa1"] = "CE000000AA1"
+        gw._suffix_to_serial["000bb2"] = "CE000000BB2"
+        self._run(gw._check_inverter_resets())
+        logged = [str(c) for c in gw.log.call_args_list]
+        assert any("CE000000AA1" in s for s in logged)
+        assert any("CE000000BB2" in s for s in logged)
+        assert gw.log.call_count == 2
+
+
+class TestRunStartupWait:
+    """Tests for run(first=True) — verifies it waits for the first MQTT connection attempt."""
+
+    def _make_gateway(self):
+        from gateway import GatewayMQTT
+        from unittest.mock import MagicMock
+
+        gw = GatewayMQTT.__new__(GatewayMQTT)
+        gw.log = MagicMock()
+        gw.gateway_device_id = "pbgw_test"
+        gw.mqtt_host = "mqtt.test.local"
+        gw.api_stop = False
+        gw._first_connection_attempted = False
+        gw._mqtt_task = None
+        return gw
+
+    def _run(self, coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    def test_returns_true_without_sleeping_when_flag_already_set(self):
+        """When _first_connection_attempted is pre-set, run() returns True without sleeping."""
+        if not HAS_AIOMQTT:
+            return
+        from unittest.mock import patch, AsyncMock
+
+        gw = self._make_gateway()
+        gw._first_connection_attempted = True
+
+        async def run_test():
+            async def fake_mqtt_loop():
+                pass
+
+            gw._mqtt_loop = fake_mqtt_loop
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                result = await gw.run(0, True)
+            return result, mock_sleep.call_count
+
+        result, sleep_count = self._run(run_test())
+        assert result is True
+        assert sleep_count == 0
+
+    def test_returns_true_after_flag_set_on_first_sleep(self):
+        """run() exits the wait loop as soon as the flag is set, after a single sleep."""
+        if not HAS_AIOMQTT:
+            return
+        from unittest.mock import patch
+
+        gw = self._make_gateway()
+        sleep_count = [0]
+
+        async def run_test():
+            async def fake_sleep(t):
+                sleep_count[0] += 1
+                gw._first_connection_attempted = True  # Simulates MQTT loop completing first attempt
+
+            async def fake_mqtt_loop():
+                pass
+
+            gw._mqtt_loop = fake_mqtt_loop
+            with patch("asyncio.sleep", side_effect=fake_sleep):
+                result = await gw.run(0, True)
+            return result
+
+        result = self._run(run_test())
+        assert result is True
+        assert sleep_count[0] == 1
+
+    def test_returns_true_with_warning_when_timeout_expires(self):
+        """run() returns True and logs a Warn when the flag is never set within the timeout."""
+        if not HAS_AIOMQTT:
+            return
+        from unittest.mock import patch
+
+        gw = self._make_gateway()
+        sleep_count = [0]
+
+        async def run_test():
+            async def fast_sleep(t):
+                sleep_count[0] += 1
+
+            async def fake_mqtt_loop():
+                pass  # Never sets _first_connection_attempted
+
+            gw._mqtt_loop = fake_mqtt_loop
+            with patch("asyncio.sleep", side_effect=fast_sleep):
+                result = await gw.run(0, True)
+            return result
+
+        result = self._run(run_test())
+        assert result is True
+        assert sleep_count[0] == 120  # 60 * 2 iterations of 0.5s each = 60s total
+        warn_logged = any("Warn" in str(c) and "not yet complete" in str(c) for c in gw.log.call_args_list)
+        assert warn_logged, "Expected a Warn log when the first connection attempt times out"
+
+
 def run_gateway_tests(my_predbat=None):
     """Run all GatewayMQTT tests. Returns True on failure, False on success."""
+    from tests.test_gateway_token_refresh import TestIsAuthFailure, TestApplyRefreshResponse, TestMaybeRefreshOnAuthError
+
     test_classes = [
         TestProtobufDecode,
         TestPlanSerialization,
@@ -1861,6 +2889,11 @@ def run_gateway_tests(my_predbat=None):
         TestMQTTIntegration,
         TestPublishPredbatData,
         TestIanaToPosixTz,
+        TestCheckInverterResets,
+        TestRunStartupWait,
+        TestIsAuthFailure,
+        TestApplyRefreshResponse,
+        TestMaybeRefreshOnAuthError,
     ]
     for cls in test_classes:
         instance = cls()

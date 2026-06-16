@@ -101,8 +101,8 @@ If you are on the Octopus Intelligent Tariff set the following entries in `apps.
 - **octopus_slot_low_rate** - Default is `true`, meaning any Octopus Intelligent Slot reported will be at the lowest rate if at home. If `false` the existing rates only will be used which is only suitable for tariffs other than IOG.
 
 - **octopus_slot_max** - Default is 48 (disabled). Sets the maximum number of 30-minute cheap rate slots per 24-hour period.
-Octopus Intelligent users maybe from March 2026 limited to 6 hours of cheap charging per day. Slots beyond this limit will use standard rates.
-Its recommended you set this to 12 (for 6 hours) once Octopus enforce this Octopus Intelligent limit.
+Octopus Intelligent users may be from March 2026 limited to 6 hours of cheap charging per day. Slots beyond this limit will use standard rates.
+It's recommended you set this to 12 (for 6 hours) once Octopus enforce this Octopus Intelligent limit.
 
 If you are using Octopus-led charging with the [Octopus Energy integration](energy-rates.md#octopus-energy-home-assistant-integration):
 
@@ -556,79 +556,79 @@ Predbat will plan and charge the car with the kW that are needed to reach the ta
 
 Predbat provides **predbat.cost_today_car** and **predbat.cost_total_car** which give the cost today and total accumulated cost for all car charging.
 
-If you have multiple cars with a single EV charger then its not possible to segregate the cost per car.
+If you have multiple cars with a single EV charger then it's not possible to segregate the cost per car.
 
 The following solution will accumulate individual charging costs for each car.
 
 - Create two helper entities of type number to collect the cost per car:
 
-    ```yaml
-    input_number.car_car1_cost_today
-    input_number.car_car2_cost_today
-    Min = 0
-    Max = 10000
-    Step = 0.01
-    ```
+```yaml
+input_number.car_car1_cost_today
+input_number.car_car2_cost_today
+Min = 0
+Max = 10000
+Step = 0.01
+```
 
   Predbat accumulates cost in pence/cents, etc so the Max value should be big enough to hold the maximum car charging cost per day (e.g. £10/$10/€10).
 
 - Create an automation that triggers when **predbat.cost_today_car** changes value. Then, based upon which car is connected (sensor.car1_connected or sensor.car2_connected in this case), delta of predbat_cost to the appropriate car cost today sensor:
 
-    ```yaml
-    alias: Allocate EV Charging Cost
-    description: ""
-    triggers:
-      - entity_id:
-          - predbat.cost_today_car
-        trigger: state
-    actions:
-      - variables:
-          new_cost: "{{ trigger.to_state.state | float }}"
-          old_cost: "{{ trigger.from_state.state | float }}"
-          delta: "{{ new_cost - old_cost }}"
-      - condition: template
-        value_template: "{{ delta > 0 }}"
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: "{{ is_state('sensor.car1_connected', 'on') }}"
-            sequence:
-              - target:
-                  entity_id: input_number.car_car1_cost_today
-                data:
-                  value: >
-                    {{ (states('input_number.car_car1_cost_today') | float) + delta
-                    }}
-                action: input_number.set_value
-          - conditions:
-              - condition: template
-                value_template: "{{ is_state('sensor.car2_connected', 'on') }}"
-            sequence:
-              - target:
-                  entity_id: input_number.car_car2_cost_today
-                data:
-                  value: >
-                    {{ (states('input_number.car_car2_cost_today') | float) + delta
-                    }}
-                action: input_number.set_value
-    mode: single
-    ```
+```yaml
+alias: Allocate EV Charging Cost
+description: ""
+triggers:
+  - entity_id:
+   - predbat.cost_today_car
+ trigger: state
+actions:
+  - variables:
+   new_cost: "{{ trigger.to_state.state | float }}"
+   old_cost: "{{ trigger.from_state.state | float }}"
+   delta: "{{ new_cost - old_cost }}"
+  - condition: template
+ value_template: "{{ delta > 0 }}"
+  - choose:
+   - conditions:
+    - condition: template
+   value_template: "{{ is_state('sensor.car1_connected', 'on') }}"
+  sequence:
+    - target:
+     entity_id: input_number.car_car1_cost_today
+   data:
+     value: >
+    {{ (states('input_number.car_car1_cost_today') | float) + delta
+    }}
+   action: input_number.set_value
+   - conditions:
+    - condition: template
+   value_template: "{{ is_state('sensor.car2_connected', 'on') }}"
+  sequence:
+    - target:
+     entity_id: input_number.car_car2_cost_today
+   data:
+     value: >
+    {{ (states('input_number.car_car2_cost_today') | float) + delta
+    }}
+   action: input_number.set_value
+mode: single
+```
 
 - Finally, create an automation that will reset the cost to 0 at midnight every day:
 
-    ```yaml
-    alias: Reset Daily EV Car Costs
-    description: ""
-    triggers:
-      - at: "00:00:00"
-        trigger: time
-    actions:
-      - target:
-          entity_id:
-            - input_number.car_car1_cost_today
-            - input_number.car_car2_cost_today
-        data:
-          value: 0
-        action: input_number.set_value
-    mode: single
-    ```
+```yaml
+alias: Reset Daily EV Car Costs
+description: ""
+triggers:
+  - at: "00:00:00"
+ trigger: time
+actions:
+  - target:
+   entity_id:
+  - input_number.car_car1_cost_today
+  - input_number.car_car2_cost_today
+ data:
+   value: 0
+ action: input_number.set_value
+mode: single
+```

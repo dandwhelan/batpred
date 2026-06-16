@@ -8,6 +8,7 @@ import os
 # Add the apps/predbat directory to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "apps", "predbat"))
 
+from datetime import datetime, timezone
 from fetch import Fetch
 from utils import dp4
 
@@ -20,6 +21,7 @@ class TestFetch(Fetch):
         self.log_messages = []
         self.forecast_minutes = 24 * 60  # 24 hours
         self.plan_interval_minutes = 30
+        self.now_utc = datetime.now(timezone.utc)
 
     def log(self, message):
         """Capture log messages"""
@@ -348,6 +350,63 @@ def test_fill_load_from_power_data_extends_beyond_load():
     print("Test 7 PASSED")
 
 
+def test_fill_load_from_power_negative_power_corrupts_load_total():
+    """
+    Regression test: negative power values in a zero-load period corrupt the day total.
+
+    Phase 1 (zero-period fill) does not clamp negative power values to zero before
+    accumulating amount_to_fill.  When the power sensor reports negative readings
+    (e.g. net solar export exceeds house load), amount_to_fill becomes negative and
+    is added to all recent cumulative-load entries via the "fill to start" loop,
+    reducing result[0] below its true value.
+
+    Phase 2 has the same mismatch: integrated_energy clamps negatives to 0 (line
+    with max(..., 0)), inflating scale_factor, but the running_total update uses the
+    raw negative power, so the period subtotal no longer matches the original load data.
+
+    Expected: result[0] - result[max_minute] should match the original load data
+    total regardless of whether power sensor values are positive or negative.
+    """
+    print("\n=== Test 9: Negative power corrupts load total (regression) ===")
+
+    fetch = TestFetch()
+
+    # 60 minutes of load data.
+    # Minutes 0-30: all 10.0 kWh (sensor stuck for ~30 min, triggers Phase 1 zero-period fill).
+    # Minutes 31-60: linear decrease from ~9.93 down to 8.0 (normal cumulative data).
+    load_minutes = {}
+    for minute in range(0, 31):
+        load_minutes[minute] = 10.0
+    for minute in range(31, 61):
+        load_minutes[minute] = 10.0 - (minute - 30) * (2.0 / 30)  # 9.933 → 8.0
+
+    expected_total = load_minutes[0] - load_minutes[60]  # 10.0 - 8.0 = 2.0 kWh
+
+    # Power sensor with mostly negative values (net solar export dominating).
+    # One small positive value every 10 minutes so Phase 1's has_power check passes.
+    load_power_data = {}
+    for minute in range(0, 61):
+        if minute % 10 == 0:
+            load_power_data[minute] = 500.0  # Small positive (ensures has_power is True)
+        else:
+            load_power_data[minute] = -3000.0  # Negative (solar export exceeds house load)
+
+    result = fetch.fill_load_from_power(load_minutes, load_power_data)
+
+    actual_total = result[0] - result[60]
+
+    print(f"  Expected total: {expected_total:.4f} kWh")
+    print(f"  Actual total:   {actual_total:.4f} kWh")
+    print(f"  result[0]:      {result[0]:.4f} kWh  (should be ~10.0)")
+    print(f"  result[60]:     {result[60]:.4f} kWh (should be ~8.0)")
+
+    assert abs(actual_total - expected_total) < 0.5, (
+        f"Load total corrupted by negative power data: " f"expected {expected_total:.4f} kWh, got {actual_total:.4f} kWh " f"(delta {actual_total - expected_total:+.4f}). " f"Negative power values must be clamped to zero in both Phase 1 and Phase 2."
+    )
+
+    print("Test 9 PASSED")
+
+
 def run_all_tests(my_predbat=None):
     """Run all tests"""
     print("\n" + "=" * 60)
@@ -362,6 +421,8 @@ def run_all_tests(my_predbat=None):
         test_fill_load_from_power_zero_load()
         test_fill_load_from_power_backwards_time()
         test_fill_load_from_power_data_extends_beyond_load()
+        test_fill_load_from_power_distorted_power_inflation()
+        test_fill_load_from_power_negative_power_corrupts_load_total()
 
         print("\n" + "=" * 60)
         print("✅ ALL TESTS PASSED")
@@ -380,6 +441,88 @@ def run_all_tests(my_predbat=None):
         traceback.print_exc()
         print("=" * 60)
         return 1  # Return 1 for error
+
+
+def test_fill_load_from_power_distorted_power_inflation():
+    """
+    Regression test for issue #3692: ML load actual ~2x real consumption.
+
+    When load_power data is loaded via minute_data_load with clean_increment=True,
+    clean_incrementing_reverse treats the fluctuating instantaneous power (W) values
+    as a cumulative sensor and accumulates all positive increments into an ever-growing
+    series.  fill_load_from_power Phase 1 (zero-period filling) then integrates these
+    inflated values, bumping all more-recent cumulative entries by the total inflated
+    fill.  Phase 2 preserves these bumped endpoints, so the overall energy
+    (data[0] - data[max]) is inflated even though per-window redistribution is correct.
+
+    This test verifies that:
+    1. clean_incrementing_reverse grossly distorts non-cumulative power data
+    2. fill_load_from_power with distorted power inflates the total cumulative energy
+    3. fill_load_from_power with correct power produces a reasonable total
+    """
+    print("\n=== Test 8: Power data distortion causes load inflation (issue #3692) ===")
+
+    from utils import clean_incrementing_reverse
+
+    fetch = TestFetch()
+
+    # Simulate 240 minutes (4 hours) of load data with a 60-minute flat (zero) period
+    # from minute 60 to minute 120. Backwards format: minute 0 is now (highest value).
+    load_minutes = {}
+    # Minute 0-59: smooth ramp (0.05 kWh/min consumed)
+    for minute in range(0, 60):
+        load_minutes[minute] = 15.0 - minute * 0.05
+    # Minute 60-120: flat at 12.0 kWh (sensor didn't increment - zero period)
+    for minute in range(60, 121):
+        load_minutes[minute] = 12.0
+    # Minute 121-240: smooth ramp
+    for minute in range(121, 241):
+        load_minutes[minute] = 12.0 - (minute - 120) * 0.05
+
+    total_original = load_minutes[0] - load_minutes[240]
+
+    # Realistic fluctuating power data (~600W, varying 300-900W) -
+    # this is what minute_data_load should return when clean_increment=False
+    correct_power_data = {}
+    for minute in range(241):
+        correct_power_data[minute] = 600.0 + 100.0 * ((minute % 7) - 3)
+
+    # Simulate the bug: clean_incrementing_reverse on non-cumulative power data
+    distorted_power_data = clean_incrementing_reverse(correct_power_data)
+
+    # Verify distortion magnitude
+    max_correct = max(correct_power_data.values())
+    max_distorted = max(distorted_power_data.values())
+    print(f"  Max correct power: {max_correct:.0f}W, Max distorted: {max_distorted:.0f}W")
+    assert max_distorted > max_correct * 10, f"Distorted power should be >>10x correct; got {max_distorted:.0f} vs {max_correct:.0f}"
+
+    # Run fill_load_from_power with CORRECT power data
+    result_correct = fetch.fill_load_from_power(load_minutes.copy(), correct_power_data)
+
+    # Run fill_load_from_power with DISTORTED power data (the bug)
+    result_distorted = fetch.fill_load_from_power(load_minutes.copy(), distorted_power_data)
+
+    # Check total energy (data[0] - data[max]): the Phase 1 bump inflates data[0]
+    total_correct = result_correct[0] - result_correct.get(240, result_correct.get(239, 0))
+    total_distorted = result_distorted[0] - result_distorted.get(240, result_distorted.get(239, 0))
+
+    print(f"  Total energy original:           {total_original:.2f} kWh")
+    print(f"  Total energy (correct power):    {total_correct:.2f} kWh")
+    print(f"  Total energy (distorted power):  {total_distorted:.2f} kWh")
+    print(f"  Inflation ratio (distorted/orig): {total_distorted / total_original:.2f}x")
+
+    # Correct power fill should add a reasonable amount (60 min at ~600W = ~0.6 kWh)
+    correct_fill_excess = total_correct - total_original
+    assert correct_fill_excess < 2.0, f"Correct fill should add <2 kWh over original; added {correct_fill_excess:.2f}"
+
+    # Distorted power fill should cause significant inflation (the bug)
+    distorted_fill_excess = total_distorted - total_original
+    assert distorted_fill_excess > 2.0, f"Distorted fill should inflate by >2 kWh; only added {distorted_fill_excess:.2f}. " "If this assertion fails, Phase 2 may be fully correcting Phase 1 and the bug " "mechanism is different than expected."
+
+    # The distorted total should be noticeably larger than the correct total
+    assert total_distorted > total_correct * 1.2, f"Distorted total ({total_distorted:.2f}) should be >1.2x correct ({total_correct:.2f})"
+
+    print("  PASS: Distorted power data causes measurable cumulative inflation")
 
 
 if __name__ == "__main__":
