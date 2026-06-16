@@ -155,6 +155,7 @@ class LoadMLComponent(ComponentBase):
                     self.model_valid = True
                     self.model_status = "active"
                     self.initial_training_done = True
+                    self.last_train_time = self.predictor.training_timestamp
                 else:
                     self.log("ML Component: Loaded model is invalid ({}), will retrain".format(reason))
                     self.model_status = "fallback_" + reason
@@ -315,7 +316,10 @@ class LoadMLComponent(ComponentBase):
 
             load_power_data = None
             if self.get_arg("load_power", default=None, indirect=False) and self.get_arg("load_power_fill_enable", True):
-                load_power_data, load_minutes_age = self.base.minute_data_load(self.now_utc, "load_power", days_to_fetch, required_unit="W", load_scaling=1.0, interpolate=True, pad=False)
+                # clean_increment=False: power sensors report instantaneous W, not cumulative kWh.
+                # clean_incrementing_reverse would distort fluctuating power readings into an
+                # ever-growing cumulative series, inflating fill_load_from_power gap-fills.
+                load_power_data, load_minutes_age = self.base.minute_data_load(self.now_utc, "load_power", days_to_fetch, required_unit="W", load_scaling=1.0, interpolate=True, pad=False, clean_increment=False)
                 load_minutes = self.base.fill_load_from_power(load_minutes, load_power_data)
 
             # Re-read car charging settings dynamically so switch changes are picked up without a restart.

@@ -98,12 +98,14 @@ GATEWAY_ATTRIBUTE_TABLE = {
     # Inverter
     "inverter_power": {"friendly_name": "Inverter Power", "icon": "mdi:flash", "unit_of_measurement": "W", "device_class": "power", "state_class": "measurement"},
     "inverter_temperature": {"friendly_name": "Inverter Temperature", "icon": "mdi:thermometer", "unit_of_measurement": "°C", "device_class": "temperature", "state_class": "measurement"},
+    "inverter_rate_max": {"friendly_name": "Inverter Max Rate", "icon": "mdi:flash", "unit_of_measurement": "W", "device_class": "power"},
     # Control switches
     "charge_enabled": {"friendly_name": "Charge Enabled", "icon": "mdi:battery-plus"},
     "discharge_enabled": {"friendly_name": "Discharge Enabled", "icon": "mdi:battery-minus"},
     # Operating mode selector
     "mode_select": {"friendly_name": "Operating Mode", "icon": "mdi:cog", "options": GATEWAY_OPERATING_MODE_OPTIONS},
     # Control numbers
+    "export_limit_w": {"friendly_name": "Export Limit", "icon": "mdi:transmission-tower", "unit_of_measurement": "W", "device_class": "power"},
     "charge_rate": {"friendly_name": "Charge Rate", "icon": "mdi:battery-plus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
     "discharge_rate": {"friendly_name": "Discharge Rate", "icon": "mdi:battery-minus", "unit_of_measurement": "W", "min": 0, "max": 10000, "step": 10},
     "reserve_soc": {"friendly_name": "Reserve SOC", "icon": "mdi:battery-lock", "unit_of_measurement": "%", "min": 0, "max": 100, "step": 1},
@@ -132,7 +134,7 @@ class GatewayMQTT(ComponentBase):
     Instance methods handle MQTT lifecycle and ComponentBase integration.
     """
 
-    def initialize(self, gateway_device_id=None, mqtt_host=None, mqtt_port=8883, mqtt_token=None, **kwargs):
+    def initialize(self, gateway_device_id=None, mqtt_host=None, mqtt_port=8883, mqtt_token=None, gateway_inverter_serial=None, **kwargs):
         """Initialize gateway configuration and build MQTT topic strings.
 
         Args:
@@ -140,12 +142,32 @@ class GatewayMQTT(ComponentBase):
             mqtt_host: MQTT broker hostname.
             mqtt_port: MQTT broker port (default 8883 for TLS).
             mqtt_token: JWT access token for MQTT authentication.
+            gateway_inverter_serial: Optional serial number(s) to restrict which inverters are configured.
+                If not set, all inverters are used. May be a string or a list of strings.
             **kwargs: Additional keyword arguments (ignored).
         """
         self.gateway_device_id = gateway_device_id
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_token = mqtt_token
+
+        # Normalise serial filter to a list (or None if not set)
+        if gateway_inverter_serial is None:
+            self.gateway_inverter_serial = []
+        elif isinstance(gateway_inverter_serial, list):
+            self.gateway_inverter_serial = gateway_inverter_serial
+        else:
+            if isinstance(gateway_inverter_serial, str) and (gateway_inverter_serial.startswith("{") or gateway_inverter_serial.startswith("[")):
+                try:
+                    parsed = json.loads(gateway_inverter_serial)
+                    if isinstance(parsed, list):
+                        self.gateway_inverter_serial = [str(s) for s in parsed]
+                    else:
+                        self.gateway_inverter_serial = [str(parsed)]
+                except json.JSONDecodeError:
+                    self.gateway_inverter_serial = [str(gateway_inverter_serial)]
+            else:
+                self.gateway_inverter_serial = [gateway_inverter_serial]
         self.mqtt_token_expires_at = 0
 
         # MQTT topic strings
@@ -173,12 +195,19 @@ class GatewayMQTT(ComponentBase):
         # Auto-config state
         self._last_status = None
         self._auto_configured = False
+        self._configured_inverter_serials = frozenset()  # serials discovered at the last auto-config
         self._last_published_plan = None
         self._pending_plan = None
         self._suffix_to_serial = {}  # maps entity suffix (last 6 chars of serial) -> full serial string
 
         # Predbat data publish state (price/timeline for device display)
         self._last_predbat_data = None
+
+        # Track which inverter serials have received an inverter_reset command
+        self._inverter_reset_done = set()
+
+        # Set once the first MQTT connection attempt has completed (success or failure)
+        self._first_connection_attempted = False
 
         # Register for plan execution hook so we receive plan updates generically
         if hasattr(self.base, "register_hook"):
@@ -295,6 +324,13 @@ class GatewayMQTT(ComponentBase):
             # Start MQTT listener as a background task
             self._mqtt_task = asyncio.ensure_future(self._mqtt_loop())
             self.log("Info: GatewayMQTT: MQTT listener task started")
+            # Wait up to a minute for first connection attempt before declaring started
+            for _ in range(60 * 2):
+                if self._first_connection_attempted or self.api_stop:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                self.log("Warn: GatewayMQTT: First connection attempt not yet complete, continuing startup")
             return True
 
         # Housekeeping on subsequent runs
@@ -312,6 +348,9 @@ class GatewayMQTT(ComponentBase):
                 plan_entries, tz = self._pending_plan
                 self._pending_plan = None
                 await self.publish_plan(plan_entries, tz)
+
+            # Send inverter_reset for any inverter not yet reset when not in read-only mode
+            await self._check_inverter_resets()
 
             # Publish predbat data (price, timeline) to device display
             if self._mqtt_connected and self._auto_configured:
@@ -363,6 +402,7 @@ class GatewayMQTT(ComponentBase):
                 ) as client:
                     self._mqtt_client = client
                     self._mqtt_connected = True
+                    self._first_connection_attempted = True
                     backoff = 5  # Reset backoff on successful connection
                     self.log(f"Info: GatewayMQTT: Connected to {self.mqtt_host}:{self.mqtt_port}")
 
@@ -384,9 +424,15 @@ class GatewayMQTT(ComponentBase):
                 self.log(f"Warn: GatewayMQTT: MQTT connection error: {e}")
                 self._mqtt_connected = False
                 self._mqtt_client = None
+                self._first_connection_attempted = True
 
                 if self.api_stop:
                     break
+
+                # If the broker rejected our credentials (e.g. the MQTT JWT expired),
+                # refresh the token before reconnecting — otherwise we would retry the
+                # same rejected token forever and lose all gateway control.
+                await self._maybe_refresh_on_auth_error(e)
 
                 self.log(f"Info: GatewayMQTT: Reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
@@ -450,7 +496,7 @@ class GatewayMQTT(ComponentBase):
 
         self._inject_entities(status)
 
-        if not self._auto_configured:
+        if self._needs_reconfigure(status):
             self.automatic_config()
 
     def _inject_entities(self, status):
@@ -503,7 +549,7 @@ class GatewayMQTT(ComponentBase):
             for idx, sub in enumerate(inv0.ems.sub_inverters):
                 sp = f"sensor.{pfx}_sub{idx}"
                 self.dashboard_item(f"{sp}_soc", sub.soc, attributes=GATEWAY_ATTRIBUTE_TABLE.get("soc", {}), app="gateway")
-                self.dashboard_item(f"{sp}_battery_power", sub.battery_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_power", {}), app="gateway")
+                self.dashboard_item(f"{sp}_battery_power", -sub.battery_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_power", {}), app="gateway")
                 self.dashboard_item(f"{sp}_pv_power", sub.pv_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("pv_power", {}), app="gateway")
                 self.dashboard_item(f"{sp}_grid_power", sub.grid_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("grid_power", {}), app="gateway")
                 self.dashboard_item(f"{sp}_temp", sub.temp_c, attributes=GATEWAY_ATTRIBUTE_TABLE.get("temp", {}), app="gateway")
@@ -524,10 +570,10 @@ class GatewayMQTT(ComponentBase):
         self.dashboard_item(f"sensor.{pfx}_battery_temperature", bat.temperature_c, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_temperature", {}), app="gateway")
         if bat.capacity_wh:
             self.dashboard_item(f"sensor.{pfx}_battery_capacity", round(bat.capacity_wh / 1000.0, 2), attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_capacity", {}), app="gateway")
-        if bat.soh_percent > 0:
+        if bat.soh_percent:
             self.dashboard_item(f"sensor.{pfx}_battery_soh", bat.soh_percent, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_soh", {}), app="gateway")
-        if bat.rate_max_w > 0:
-            self.dashboard_item(f"sensor.{pfx}_battery_rate_max", bat.rate_max_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_rate_max", {}), app="gateway")
+        battery_rate_max = bat.rate_max_w or 6000
+        self.dashboard_item(f"sensor.{pfx}_battery_rate_max", battery_rate_max, attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_rate_max", {}), app="gateway")
 
         self.dashboard_item(f"sensor.{pfx}_pv_power", inv.pv.power_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("pv_power", {}), app="gateway")
 
@@ -543,10 +589,17 @@ class GatewayMQTT(ComponentBase):
         self.dashboard_item(f"sensor.{pfx}_inverter_power", inv.inverter.active_power_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_power", {}), app="gateway")
         if inv.inverter.temperature_c:
             self.dashboard_item(f"sensor.{pfx}_inverter_temperature", inv.inverter.temperature_c, attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_temperature", {}), app="gateway")
+        inverter_rate_max = inv.inverter.rate_max_w or battery_rate_max
+        if inverter_rate_max:
+            self.dashboard_item(f"sensor.{pfx}_inverter_rate_max", inverter_rate_max, attributes=GATEWAY_ATTRIBUTE_TABLE.get("inverter_rate_max", {}), app="gateway")
 
         control = inv.control
         self.dashboard_item(f"switch.{pfx}_charge_enabled", "on" if control.charge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_enabled", {}), app="gateway")
         self.dashboard_item(f"switch.{pfx}_discharge_enabled", "on" if control.discharge_enabled else "off", attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_enabled", {}), app="gateway")
+        # Proto sentinel: 0=undefined→publish 99999 (unlimited), 1=zero limit→publish 0, otherwise use value as-is
+        _raw_export_limit = control.export_limit_w
+        export_limit_publish = 99999 if _raw_export_limit == 0 else (0 if _raw_export_limit == 1 else _raw_export_limit)
+        self.dashboard_item(f"sensor.{pfx}_export_limit_w", export_limit_publish, attributes=GATEWAY_ATTRIBUTE_TABLE.get("export_limit_w", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_charge_rate", control.charge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("charge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_discharge_rate", control.discharge_rate_w, attributes=GATEWAY_ATTRIBUTE_TABLE.get("discharge_rate", {}), app="gateway")
         self.dashboard_item(f"number.{pfx}_reserve_soc", control.reserve_soc, attributes=GATEWAY_ATTRIBUTE_TABLE.get("reserve_soc", {}), app="gateway")
@@ -595,11 +648,31 @@ class GatewayMQTT(ComponentBase):
             self.dashboard_item(f"sensor.{pfx}_battery_charge_today", round(energy.battery_charge_today_wh / 1000.0, 2), attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_charge_today", {}), app="gateway")
             self.dashboard_item(f"sensor.{pfx}_battery_discharge_today", round(energy.battery_discharge_today_wh / 1000.0, 2), attributes=GATEWAY_ATTRIBUTE_TABLE.get("battery_discharge_today", {}), app="gateway")
 
+    def _needs_reconfigure(self, status):
+        """Whether automatic_config should (re-)run for this status.
+
+        Runs on first telemetry, and again when a *new* inverter serial appears — e.g.
+        a second AIO is discovered later, which (per GivTCP) moves the control point
+        from the AIO to the Gateway. Removals are deliberately ignored so a transient
+        drop-out does not thrash the config; a permanent removal is handled by the
+        onboarding/restart path. (NOTE: re-running re-selects the control target and
+        rewrites the inverter args; whether PredBat core re-reads ``num_inverters`` at
+        runtime vs. needing a component restart is tracked separately.)
+        """
+        if not self._auto_configured:
+            return True
+        new_serials = frozenset(inv.serial for inv in status.inverters) - self._configured_inverter_serials
+        if new_serials:
+            self.log(f"Info: GatewayMQTT: new inverter(s) discovered {sorted(new_serials)} — re-running auto-config")
+            return True
+        return False
+
     def automatic_config(self):
         """Register gateway entities with PredBat's inverter model.
 
-        Called once after first telemetry is received. Maps proto fields
-        to PredBat args so the plan engine has data to work with.
+        Called on first telemetry and re-run when a new inverter serial appears
+        (see ``_needs_reconfigure``). Maps proto fields to PredBat args so the plan
+        engine has data to work with.
         """
         if not self._last_status:
             self.log("Error: GatewayMQTT: automatic_config called with no status data")
@@ -612,20 +685,67 @@ class GatewayMQTT(ComponentBase):
             self.log("Error: GatewayMQTT: no inverters in gateway status")
             return
 
-        # Filter to primary inverters with battery data for planning.
-        # EMS/gateway units may be primary but lack battery — they provide
-        # monitoring entities but shouldn't be registered as plan inverters.
-        any_primary = any(inv.primary for inv in all_inverters)
+        # Classify discovered units and route control per GivTCP / GE-Cloud. Neither a
+        # GivEnergy Gateway (INVERTER_TYPE_GIVENERGY_GATEWAY) nor a Plant EMS
+        # (INVERTER_TYPE_GIVENERGY_EMS) is itself a battery inverter — they are
+        # coordinators with no usable charge window of their own. The battery inverters
+        # (AIO / AC / AC3 / hybrid / HV — all reported as INVERTER_TYPE_GIVENERGY) are
+        # the controllable units. Control-target priority mirrors GivTCP:
+        #   * Plant EMS present     -> control the EMS (it manages all inverters)
+        #   * Gateway + >=2 AIOs    -> control the Gateway (it coordinates the parallel AIOs)
+        #   * Gateway + 1 AIO / none-> control the AIO(s) directly
+        # Selection is by type/count and slots are bound by serial below, so a
+        # re-discovery that reorders the units never changes which unit is controlled.
+        # (The 2026-06-04 incident bound the Gateway as "inverter 0" — which has no
+        # charge window — and broke control after an NVS wipe re-ordered discovery.)
+        ems_units = [inv for inv in all_inverters if inv.type == pb.INVERTER_TYPE_GIVENERGY_EMS]
+        gateway_units = [inv for inv in all_inverters if inv.type == pb.INVERTER_TYPE_GIVENERGY_GATEWAY]
+        coordinator_types = (pb.INVERTER_TYPE_GIVENERGY_EMS, pb.INVERTER_TYPE_GIVENERGY_GATEWAY)
+        candidate_aios = [inv for inv in all_inverters if inv.type not in coordinator_types]
+
+        # Filter AIOs to primary units with battery data for planning.
+        any_primary = any(inv.primary for inv in candidate_aios)
         if any_primary:
-            inverters = [inv for inv in all_inverters if inv.primary and inv.battery.ByteSize() > 0]
-            if not inverters:
-                # All primary inverters lack battery — fall back to any with battery
-                inverters = [inv for inv in all_inverters if inv.battery.capacity_wh > 0]
+            aios = [inv for inv in candidate_aios if inv.primary and inv.battery.ByteSize() > 0]
+            if not aios:
+                # All primary AIOs lack battery — fall back to any with battery
+                aios = [inv for inv in candidate_aios if inv.battery.capacity_wh > 0]
         else:
             # Old firmware: no primary flags, use all with battery data
-            inverters = [inv for inv in all_inverters if inv.battery.ByteSize() > 0]
+            aios = [inv for inv in candidate_aios if inv.battery.ByteSize() > 0]
+
+        if ems_units:
+            # A Plant EMS is the single control point for the whole system.
+            inverters = ems_units[:1]
+        elif gateway_units and len(aios) > 1:
+            # Multiple AIOs behind a Gateway: the Gateway is the single control point.
+            # NOTE: control commands are addressed to the Gateway/EMS serial — the firmware
+            # must fan these out to the AIOs (tracked separately in command_handler.cpp).
+            inverters = gateway_units[:1]
+        else:
+            inverters = aios
         if not inverters:
-            inverters = all_inverters  # last resort
+            inverters = candidate_aios or list(all_inverters)  # last resort
+
+        # Apply serial filter if configured. A no-match is an error — configuring the
+        # wrong inverter set is worse than not configuring at all. Leave _auto_configured
+        # False so the run loop stays blocked and we retry on the next telemetry.
+        if self.gateway_inverter_serial:
+            serial_set = set(s.upper() for s in self.gateway_inverter_serial)
+            filtered = [inv for inv in inverters if inv.serial.upper() in serial_set]
+            if filtered:
+                inverters = filtered
+            else:
+                available = [inv.serial for inv in inverters]
+                self.log(f"Error: GatewayMQTT: gateway_inverter_serial filter {self.gateway_inverter_serial} matched no inverters" f" (available serials: {available}); auto-config aborted — will retry on next telemetry")
+                self._auto_configured = False
+                return
+
+        # Bind PredBat inverter slots to a stable key (serial), not discovery order, so
+        # a given physical inverter always maps to the same slot/entities across a
+        # re-discovery (NVS wipe, gateway reboot, repair). PredBat core is positional;
+        # sorting by serial makes the slot index a deterministic function of identity.
+        inverters = sorted(inverters, key=lambda inv: inv.serial)
 
         num_inverters = len(inverters)
         self.log(f"Info: GatewayMQTT: auto-config: {num_inverters} primary inverter(s) of {len(all_inverters)} total")
@@ -652,6 +772,8 @@ class GatewayMQTT(ComponentBase):
         discharge_end_entities = []
         charge_enable_entities = []
         discharge_enable_entities = []
+        export_limit_entities = []
+        inverter_limit_entities = []
 
         for inv in inverters:
             suffix = inv.serial[-6:].lower()
@@ -674,13 +796,16 @@ class GatewayMQTT(ComponentBase):
             discharge_end_entities.append(f"select.{base}_discharge_slot1_end")
             charge_enable_entities.append(f"switch.{base}_charge_enabled")
             discharge_enable_entities.append(f"switch.{base}_discharge_enabled")
+            export_limit_entities.append(f"sensor.{base}_export_limit_w")
 
             # soc_max: from battery capacity entity
             if inv.battery.capacity_wh > 0:
                 soc_max_entities.append(f"sensor.{base}_battery_capacity")
             else:
-                self.log(f"Warn: GatewayMQTT: inverter {inv.serial} has no battery capacity, using fallback")
                 soc_max_entities.append(None)
+                self.log(f"Warn: GatewayMQTT: inverter {inv.serial} has no battery capacity, setting to None for automatic discovery")
+
+            inverter_limit_entities.append(f"sensor.{base}_inverter_rate_max")
 
         # Map entity lists to PredBat args
         self.set_arg("soc_percent", soc_entities)
@@ -700,6 +825,8 @@ class GatewayMQTT(ComponentBase):
         self.set_arg("discharge_end_time", discharge_end_entities)
         self.set_arg("scheduled_charge_enable", charge_enable_entities)
         self.set_arg("scheduled_discharge_enable", discharge_enable_entities)
+        self.set_arg("export_limit", export_limit_entities)
+        self.set_arg("inverter_limit", inverter_limit_entities)
 
         # Energy counters (first inverter)
         suffix0 = inverters[0].serial[-6:].lower()
@@ -714,12 +841,7 @@ class GatewayMQTT(ComponentBase):
         self.set_arg("battery_scaling", [f"sensor.{base0}_battery_dod"])
 
         # Battery rate max
-        rate_max = inverters[0].battery.rate_max_w
-        if rate_max > 0:
-            self.set_arg("battery_rate_max", [f"sensor.{base0}_battery_rate_max"])
-        else:
-            self.log("Warn: GatewayMQTT: no battery_rate_max from gateway, using default 6000W")
-            self.set_arg("battery_rate_max", [6000])
+        self.set_arg("battery_rate_max", [f"sensor.{base0}_battery_rate_max"])
 
         # Inverter time (clock drift detection — uses GatewayStatus.timestamp)
         self.set_arg("inverter_time", [f"sensor.{base0}_inverter_time"])
@@ -759,8 +881,28 @@ class GatewayMQTT(ComponentBase):
         self.set_arg("ge_cloud_data", False)
         self.set_arg("ge_cloud_direct", False)
 
+        # AC-coupled vs hybrid: mirror gecloud — if any battery inverter reports an
+        # AC / AIO / All-in-One model, the system is AC-coupled, so turn the PredBat
+        # hybrid switch off; a Hybrid/HV unit turns it on. Needs the gateway firmware
+        # to report inv.model; left untouched on older firmware that omits it (empty).
+        ac_coupled = False
+        model_name = ""
+        for inv in candidate_aios:
+            model = (inv.model or "").lower()
+            if model:
+                model_name = inv.model
+                if ("ac" in model) or ("aio" in model) or ("all-in-one" in model):
+                    ac_coupled = True
+                    break
+        if model_name:
+            hybrid_entity = f"switch.{self.prefix}_inverter_hybrid"
+            self.set_state_wrapper(hybrid_entity, "off" if ac_coupled else "on")
+            self.log(f"Info: GatewayMQTT: model '{model_name}' -> ac_coupled={ac_coupled}, set {hybrid_entity} {'off' if ac_coupled else 'on'}")
+
         self._auto_configured = True
+        self._configured_inverter_serials = frozenset(inv.serial for inv in all_inverters)
         self.log(f"Info: GatewayMQTT: auto-config complete: {num_inverters} inverter(s) registered")
+        return num_inverters
 
     async def _publish_predbat_data(self):
         """Publish price/timeline data to the gateway device for display.
@@ -856,6 +998,48 @@ class GatewayMQTT(ComponentBase):
                     pass
             saving_month_average = round(float(saving_total) * 365 / 12 / total_days_of_savings, 2)
 
+            # Marginal cost matrix — "what does an extra 1/2/4/8 kWh of load cost
+            # me right now and in each of the next 6 two-hour windows?". Computed
+            # by the Marginal mixin via what-if prediction runs. Used by the
+            # gateway's appliance RAG to pick a colour that actually reflects the
+            # cost of running the dryer/EV/etc, rather than inferring from slot
+            # categories alone.
+            marginal_costs = []
+            marginal_time_labels = []
+            try:
+                matrix = self.get_state_wrapper("sensor." + self.prefix + "_marginal_energy_costs", attribute="matrix")
+                if isinstance(matrix, dict) and matrix:
+                    # Canonical level order matches MARGINAL_EXTRA_KWH_LEVELS in marginal.py.
+                    # Keys are integers when the HA state cache holds the dict directly;
+                    # defensive fallback to the string form covers any JSON-round-tripped path.
+                    levels = [1, 2, 4, 8]
+                    # Determine the column shape first from the first non-empty row, then
+                    # build all rows against that fixed set of labels so the matrix stays
+                    # rectangular even when lower levels are missing.
+                    time_labels = []
+                    for lvl in levels:
+                        row = matrix.get(lvl) or matrix.get(str(lvl)) or {}
+                        if isinstance(row, dict) and row:
+                            time_labels = list(row.keys())
+                            break
+
+                    # Only publish once we have something meaningful.
+                    if time_labels:
+                        tmp_costs = []
+                        for lvl in levels:
+                            row = matrix.get(lvl) or matrix.get(str(lvl)) or {}
+                            if not isinstance(row, dict):
+                                row = {}
+                            # Missing rows or columns are padded with 0 rather than dropped.
+                            tmp_costs.append([round(float(row.get(tl, 0) or 0), 2) for tl in time_labels])
+
+                        marginal_time_labels = time_labels
+                        marginal_costs = tmp_costs
+            except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                self.log(f"Warn: GatewayMQTT: failed to read marginal costs: {exc}")
+                marginal_costs = []
+                marginal_time_labels = []
+
             payload = {
                 "current_price": round(float(current_price), 1),
                 "avg_price": round(float(avg_price or 0), 1),
@@ -869,6 +1053,8 @@ class GatewayMQTT(ComponentBase):
                 "savings_month_average": saving_month_average,
                 "predbat_status": predbat_status,
                 "predbat_status_detail": predbat_status_detail,
+                "marginal_costs": marginal_costs,
+                "marginal_time_labels": marginal_time_labels,
             }
 
             # Only publish if data changed
@@ -885,6 +1071,21 @@ class GatewayMQTT(ComponentBase):
 
         except Exception as e:
             self.log(f"Warn: Failed to publish predbat_data: {e}")
+
+    async def _check_inverter_resets(self):
+        """Send inverter_reset for each configured inverter not yet reset in control mode.
+
+        Called on every run() cycle. Skips when is_alive() is False, auto-config has
+        not yet run, or set_read_only is active. Each serial is reset at most once per
+        process lifetime (tracked in _inverter_reset_done).
+        """
+        if not self.is_alive() or not self._auto_configured or self.get_arg("set_read_only", False):
+            return
+        for suffix, serial in self._suffix_to_serial.items():
+            if serial not in self._inverter_reset_done:
+                await self.publish_command("inverter_reset", serial=serial)
+                self._inverter_reset_done.add(serial)
+                self.log(f"Info: GatewayMQTT: inverter_reset sent for inverter {serial}")
 
     def _plan_changed(self, plan_entries):
         """Check if the plan differs from the last published plan."""
@@ -1110,11 +1311,11 @@ class GatewayMQTT(ComponentBase):
         self.log("Info: GatewayMQTT: Finalized")
 
     async def _check_token_refresh(self):
-        """Check if the MQTT JWT token needs refreshing and refresh if needed.
+        """Proactively refresh the MQTT JWT when it nears expiry (housekeeping path).
 
-        Uses the oauth-refresh edge function (same pattern as OAuthMixin) to
-        obtain a new access token before the current one expires. The refresh
-        token is held server-side in instance secrets.
+        Runs every cycle from run(); only triggers a refresh once the token is
+        within token_needs_refresh() of expiry. The reconnect loop additionally
+        forces a refresh on broker auth-failure via _maybe_refresh_on_auth_error().
         """
         if not HAS_AIOHTTP:
             return
@@ -1130,14 +1331,69 @@ class GatewayMQTT(ComponentBase):
                 self.log("Warn: GatewayMQTT: could not extract JWT expiry, token refresh disabled")
                 return
 
-        if self.mqtt_token_expires_at and self.mqtt_token_expires_at > 0 and not self.token_needs_refresh(self.mqtt_token_expires_at):
-            return
-
         if self.mqtt_token_expires_at == -1:
             return
 
-        if self._refresh_in_progress:
+        if self.mqtt_token_expires_at and self.mqtt_token_expires_at > 0 and not self.token_needs_refresh(self.mqtt_token_expires_at):
             return
+
+        await self._do_token_refresh()
+
+    @staticmethod
+    def _is_auth_failure(error):
+        """True if a broker error means our MQTT credentials were rejected.
+
+        Matches MQTT CONNACK auth reason codes 134 (bad user name or password) and
+        135 (not authorized) plus their text. An expired MQTT JWT shows up as code
+        134, so the reconnect loop uses this to decide it must refresh the token
+        rather than retry the same rejected one forever.
+        """
+        text = str(error).lower()
+        return "bad user name or password" in text or "not authorized" in text or "not authorised" in text or "unauthorized" in text or "code:134" in text or "code:135" in text
+
+    async def _maybe_refresh_on_auth_error(self, error):
+        """Force an MQTT token refresh when the broker rejected authentication.
+
+        Returns True if a refresh was attempted and succeeded. Non-auth errors
+        (network drops, "Disconnected during message iteration") are ignored so we
+        don't hammer the refresh endpoint for problems a new token cannot fix.
+        """
+        if not self._is_auth_failure(error):
+            return False
+        self.log("Info: GatewayMQTT: Broker rejected auth — refreshing MQTT token before reconnect")
+        return await self._do_token_refresh()
+
+    def _apply_refresh_response(self, data):
+        """Apply an oauth-refresh JSON reply to the in-memory token. Returns success."""
+        if not data.get("success"):
+            self.log(f"Warn: GatewayMQTT: Token refresh failed: {data.get('error', 'unknown')}")
+            return False
+
+        self.mqtt_token = data["access_token"]
+        if data.get("expires_at"):
+            try:
+                if isinstance(data["expires_at"], (int, float)):
+                    self.mqtt_token_expires_at = float(data["expires_at"])
+                else:
+                    dt = datetime.datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
+                    self.mqtt_token_expires_at = dt.timestamp()
+            except (ValueError, AttributeError):
+                self.mqtt_token_expires_at = 0
+        self.log("Info: GatewayMQTT: MQTT token refreshed")
+        return True
+
+    async def _do_token_refresh(self):
+        """Refresh the MQTT JWT via the oauth-refresh edge function, unconditionally.
+
+        Shared by the proactive near-expiry check and the auth-failure reconnect
+        path. The refresh token is held server-side in instance secrets. Returns
+        True if a new access token was obtained and applied.
+        """
+        if not HAS_AIOHTTP:
+            return False
+
+        if self._refresh_in_progress:
+            return False
 
         self._refresh_in_progress = True
         try:
@@ -1147,7 +1403,7 @@ class GatewayMQTT(ComponentBase):
 
             if not supabase_url or not supabase_key or not instance_id:
                 self.log("Warn: GatewayMQTT: Token refresh skipped — missing env vars or instance_id")
-                return
+                return False
 
             url = f"{supabase_url}/functions/v1/oauth-refresh"
             headers = {
@@ -1166,29 +1422,18 @@ class GatewayMQTT(ComponentBase):
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         self.log(f"Warn: GatewayMQTT: Token refresh HTTP {response.status}")
-                        return
+                        return False
 
                     data = await response.json()
 
-            if data.get("success"):
-                self.mqtt_token = data["access_token"]
-                if data.get("expires_at"):
-                    try:
-                        if isinstance(data["expires_at"], (int, float)):
-                            self.mqtt_token_expires_at = float(data["expires_at"])
-                        else:
-                            dt = datetime.datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
-                            self.mqtt_token_expires_at = dt.timestamp()
-                    except (ValueError, AttributeError):
-                        self.mqtt_token_expires_at = 0
-                self.log("Info: GatewayMQTT: MQTT token refreshed")
-            else:
-                self.log(f"Warn: GatewayMQTT: Token refresh failed: {data.get('error', 'unknown')}")
+            return self._apply_refresh_response(data)
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             self.log(f"Warn: GatewayMQTT: Token refresh network error: {e}")
+            return False
         except Exception as e:
             self.log(f"Warn: GatewayMQTT: Token refresh error: {e}")
+            return False
         finally:
             self._refresh_in_progress = False
 
