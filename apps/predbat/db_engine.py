@@ -235,6 +235,22 @@ class DatabaseEngine:
             ),
         )
         res = self.db_cursor.fetchall()
+
+        # Rarely-changing entities (e.g. input_number sliders) may have no state
+        # change inside the window; inject the most recent prior state clamped to
+        # the window start, matching the HA history API behaviour
+        if not res:
+            self.db_cursor.execute(
+                "SELECT datetime, state, attributes FROM states WHERE entity_index = ? AND datetime < ? ORDER BY datetime DESC LIMIT 1",
+                (
+                    entity_index,
+                    start.strftime(TIME_FORMAT_DB),
+                ),
+            )
+            prior = self.db_cursor.fetchone()
+            if prior:
+                res = [(start.strftime(TIME_FORMAT_DB), prior[1], prior[2])]
+
         history = []
         for item in res:
             state = item[1]
