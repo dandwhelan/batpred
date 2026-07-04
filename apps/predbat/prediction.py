@@ -20,6 +20,7 @@ plans and select the one with the lowest cost metric.
 from datetime import timedelta
 from const import PREDICT_STEP, RUN_EVERY, TIME_FORMAT
 from utils import remove_intersecting_windows, get_charge_rate_curve_cached, get_discharge_rate_curve_cached, find_charge_rate, calc_percent_limit, in_iboost_slot, in_car_slot, charge_curve_to_tuple
+from prediction_kernel import create_kernel_context, kernel_supported, run_prediction_kernel
 
 
 # Only assign globals once to avoid re-creating them with processes are forked
@@ -198,6 +199,12 @@ class Prediction:
             self.metric_fit_generation_rate = base.metric_fit_generation_rate
             self.metric_fit_deemed_export_rate = base.metric_fit_deemed_export_rate
             self.metric_fit_deemed_export_percentage = base.metric_fit_deemed_export_percentage
+
+            # C++ prediction kernel context (0 = kernel unavailable, Python engine is used)
+            self.prediction_kernel_enable = getattr(base, "prediction_kernel_enable", False)
+            self.kernel_handle = 0
+            if self.prediction_kernel_enable:
+                self.kernel_handle = create_kernel_context(self)
 
             # Store this dictionary in global so we can reconstruct it in the thread without passing the data
             PRED_GLOBAL["dict"] = self.__dict__.copy()
@@ -388,6 +395,11 @@ class Prediction:
     def run_prediction(self, charge_limit, charge_window, export_window, export_limits, pv10, end_record, save=None, step=PREDICT_STEP, cache=False):
         """
         Run a prediction scenario given a charge limit, return the results
+
+        PARITY RULE: The hot loop below is mirrored by the C++ kernel in prediction_kernel.cpp
+        for the scenarios it supports. Any behavioural change here MUST be mirrored there,
+        KERNEL_PARITY_REVISION (prediction_kernel.py) and PK_PARITY_REVISION (prediction_kernel.cpp)
+        must both be bumped, and the kernel_parity test must pass (cd coverage && ./run_all --test kernel_parity).
         """
         window_hash = 0
         for window in charge_window:
@@ -400,6 +412,15 @@ class Prediction:
         if not save and cache and sim_hash in self.prediction_cache:
             # Return cached result
             return self.prediction_cache[sim_hash]
+
+        # Try the C++ prediction kernel first; unsupported scenarios fall through to the Python engine
+        if kernel_supported(self, save, step):
+            kernel_result = run_prediction_kernel(self, charge_limit, charge_window, export_window, export_limits, pv10, end_record, step, cache)
+            if kernel_result is not None:
+                if not save and cache:
+                    # Store in cache without the SoC/car data to save memory, mirroring the Python engine
+                    self.prediction_cache[sim_hash] = kernel_result[:11] + ([], []) + kernel_result[13:]
+                return kernel_result
 
         # Fetch data from globals, optimised away from class to avoid passing it between threads
         if pv10:
@@ -831,9 +852,15 @@ class Prediction:
                     over_limit = abs(diff) - export_limit
                     reduce_by = over_limit
 
-                    if reduce_by > battery_draw:
+                    # Compare the AC over-export against the battery's AC export contribution (battery_draw is DC,
+                    # so that is battery_draw * inverter_loss). If the surplus is larger then even stopping the
+                    # battery leaves PV over the limit, so we must charge to absorb it rather than clip the solar.
+                    if reduce_by > battery_draw * inverter_loss:
                         if self.inverter_can_charge_during_export:
-                            reduce_by = reduce_by - battery_draw
+                            # Stopping the battery only removes its AC export contribution (battery_draw is DC, so
+                            # that is battery_draw * inverter_loss). Whatever AC export is still over the limit has
+                            # to be absorbed by charging the battery.
+                            reduce_by = reduce_by - battery_draw * inverter_loss
 
                             if inverter_hybrid:
                                 charge_rate_now_curve_dc = (
@@ -841,13 +868,23 @@ class Prediction:
                                     * battery_rate_max_scaling
                                 )
                                 charge_rate_now_curve_dc_step = charge_rate_now_curve_dc * step
-                                battery_draw = max(-reduce_by * inverter_loss, -battery_to_min, -charge_rate_now_curve_dc_step)
+                                # Hybrid charges from PV on the DC side (see pv_dc below), so the AC surplus maps
+                                # back to DC through the loss reciprocal. Clamp by battery_to_max (remaining charge
+                                # headroom), not battery_to_min, otherwise a near-full battery is asked to absorb
+                                # more than it can hold and the surplus is mis-accounted instead of clipped.
+                                battery_draw = max(-reduce_by * inverter_loss_recp, -battery_to_max, -charge_rate_now_curve_dc_step)
                             else:
-                                battery_draw = max(-reduce_by * inverter_loss, -battery_to_min, -charge_rate_now_curve_step)
+                                # Non-hybrid charges from the grid (AC), so the DC charge is the AC surplus * loss.
+                                battery_draw = max(-reduce_by * inverter_loss, -battery_to_max, -charge_rate_now_curve_step)
                         else:
                             battery_draw = 0
                     else:
-                        battery_draw = battery_draw - reduce_by
+                        # reduce_by is an AC over-export figure but battery_draw is DC and exports through
+                        # the inverter, so scale by the loss reciprocal to remove the right amount of grid
+                        # export. Subtracting the raw AC figure under-reduces the battery and leaves a small
+                        # residual that gets clipped off the solar later. Clamp at zero so we never flip to
+                        # charging here (that case is handled by the inverter_can_charge_during_export branch).
+                        battery_draw = max(battery_draw - reduce_by * inverter_loss_recp, 0)
 
                     if inverter_hybrid and battery_draw < 0:
                         pv_dc = min(abs(battery_draw), pv_now)
@@ -868,7 +905,14 @@ class Prediction:
                                     * battery_rate_max_scaling
                                 )
                                 charge_rate_now_curve_dc_step = charge_rate_now_curve_dc * step
-                                battery_draw = max(-reduce_by * inverter_loss, -battery_to_min, -charge_rate_now_curve_dc_step)
+                                # reduce_by here is in the same DC-equivalent throughput units as total_inverted
+                                # (get_total_inverted counts the battery and the PV diverted to DC 1:1), so the
+                                # battery must charge by reduce_by directly to bring total_inverted onto the
+                                # inverter limit - no inverter_loss factor. Multiplying by inverter_loss under-
+                                # charges and leaves PV to be clipped that the battery could have absorbed. Clamp
+                                # by battery_to_max (remaining charge headroom) so a near-full battery is not
+                                # asked to absorb more than it can hold.
+                                battery_draw = max(-reduce_by, -battery_to_max, -charge_rate_now_curve_dc_step)
                         else:
                             battery_draw = battery_draw - reduce_by
 

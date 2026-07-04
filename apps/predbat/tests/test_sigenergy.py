@@ -310,13 +310,14 @@ def test_sigenergy_publish_system_entities(my_predbat):
     api.devices[system_id] = [{"deviceType": "Inverter", "attrMap": {"ratedActivePower": 5.0}}]
     api.energy_flow[system_id] = {
         "batterySoc": 60.0,
-        "batteryPower": 2.0,       # kW charging
+        "batteryPower": 2.0,       # kW discharging (Predbat convention: positive=discharge)
         "pvPower": 3.5,             # kW
-        "gridPower": 1.0,           # kW export (positive=export, will be inverted to negative)
+        "gridPower": 1.0,           # kW export (Predbat convention: positive=export)
         "loadPower": 4.5,
         "evPower": 0.0,
     }
     api.daily_summary[system_id] = {"dailyPowerGeneration": 12.3}
+    api.history_totals[system_id] = {"TO_LOAD": 987.6, "FROM_GRID": 500.5, "TO_GRID": 400.4}
 
     run_async(api.publish_system_entities(system_id))
 
@@ -325,6 +326,8 @@ def test_sigenergy_publish_system_entities(my_predbat):
     grid_key = "sensor.predbat_sigenergy_{}_grid_power".format(slug)
     pv_key = "sensor.predbat_sigenergy_{}_pv_power".format(slug)
     today_key = "sensor.predbat_sigenergy_{}_pv_today".format(slug)
+    load_lifetime_key = "sensor.predbat_sigenergy_{}_load_lifetime".format(slug)
+    grid_import_lifetime_key = "sensor.predbat_sigenergy_{}_grid_import_lifetime".format(slug)
 
     assert soc_key in api.dashboard_items, "Battery SOC entity published"
     soc_kwh = api.dashboard_items[soc_key]["state"]
@@ -334,14 +337,19 @@ def test_sigenergy_publish_system_entities(my_predbat):
     assert api.dashboard_items[battery_key]["state"] == 2000, "Battery 2kW = 2000W"
 
     assert grid_key in api.dashboard_items, "Grid power entity published"
-    # API gridPower +1.0 (export) → Predbat −1000 W (import-negative)
-    assert api.dashboard_items[grid_key]["state"] == -1000, "Grid power inverted: export 1kW → -1000W"
+    # flow["gridPower"] is already in Predbat convention (positive=export) at ingestion - published as-is
+    assert api.dashboard_items[grid_key]["state"] == 1000, "Grid power published unchanged: export 1kW -> 1000W"
 
     assert pv_key in api.dashboard_items, "PV power entity published"
     assert api.dashboard_items[pv_key]["state"] == 3500, "PV 3.5kW = 3500W"
 
     assert today_key in api.dashboard_items, "PV today entity published"
     assert abs(api.dashboard_items[today_key]["state"] - 12.3) < 0.01, "PV today correct"
+
+    assert load_lifetime_key in api.dashboard_items, "Load lifetime entity published"
+    assert abs(api.dashboard_items[load_lifetime_key]["state"] - 987.6) < 0.01, "Load lifetime correct"
+    assert grid_import_lifetime_key in api.dashboard_items, "Grid import lifetime entity published"
+    assert abs(api.dashboard_items[grid_import_lifetime_key]["state"] - 500.5) < 0.01, "Grid import lifetime correct"
 
     return failed
 
@@ -365,6 +373,10 @@ def test_sigenergy_automatic_config(my_predbat):
     assert "grid_power" in api.set_args, "grid_power wired"
     assert "inverter_time" in api.set_args, "inverter_time wired"
     assert len(api.set_args["inverter_time"]) == 2, "inverter_time has one entry per system"
+    assert api.set_args.get("pv_today") == ["sensor.predbat_sigenergy_sig001_pv_lifetime", "sensor.predbat_sigenergy_sig002_pv_lifetime"], "pv_today wired to lifetime totals"
+    assert api.set_args.get("load_today") == ["sensor.predbat_sigenergy_sig001_load_lifetime", "sensor.predbat_sigenergy_sig002_load_lifetime"], "load_today wired to lifetime totals"
+    assert api.set_args.get("import_today") == ["sensor.predbat_sigenergy_sig001_grid_import_lifetime", "sensor.predbat_sigenergy_sig002_grid_import_lifetime"], "import_today wired to lifetime totals"
+    assert api.set_args.get("export_today") == ["sensor.predbat_sigenergy_sig001_grid_export_lifetime", "sensor.predbat_sigenergy_sig002_grid_export_lifetime"], "export_today wired to lifetime totals"
 
     return failed
 
@@ -636,6 +648,75 @@ def test_sigenergy_fetch_system_list_with_filter(my_predbat):
     assert ok is True, "fetch_system_list should return True with filter, got {}".format(ok)
     assert "SIG001" in api.systems, "Filtered system included"
     assert "SIG002" not in api.systems, "Non-matching system excluded"
+
+    return failed
+
+
+def test_sigenergy_fetch_history_totals(my_predbat):
+    """Test fetch_history_totals parses Sankey node totals from the /v1/history endpoint."""
+    failed = False
+    api = MockSigenergyAPI()
+    api.access_token = "fake_token"
+    api.token_expires_at = 9_999_999_999
+    api._last_request_time = 0
+
+    fake_response = {
+        "code": 0,
+        "data": {
+            "sankeyData": {
+                "nodes": [
+                    {"id": "FROM_SOLAR", "value": 1234.5},
+                    {"id": "FROM_BATTERY", "value": 111.1},
+                    {"id": "TO_BATTERY", "value": 222.2},
+                    {"id": "TO_EVDC", "value": 0.0},
+                    {"id": "FROM_EVDC", "value": 3.3},
+                    {"id": "FROM_GRID", "value": 500.5},
+                    {"id": "TO_LOAD", "value": 987.6},
+                    {"id": "TO_GRID", "value": 400.4},
+                ],
+                "links": [],
+            },
+        },
+    }
+
+    mock_response = _make_mock_response(status=200, json_data=fake_response)
+    mock_session = _make_mock_session(mock_response)
+
+    with patch("sigenergy.aiohttp.ClientSession", return_value=mock_session):
+        ok = run_async(api.fetch_history_totals("SIG001"))
+
+    assert ok is True, "fetch_history_totals should return True, got {}".format(ok)
+    totals = api.history_totals.get("SIG001", {})
+    assert totals.get("TO_LOAD") == 987.6, "TO_LOAD lifetime total captured"
+    assert totals.get("FROM_GRID") == 500.5, "FROM_GRID lifetime total captured"
+    assert totals.get("TO_GRID") == 400.4, "TO_GRID lifetime total captured"
+    assert totals.get("FROM_SOLAR") == 1234.5, "FROM_SOLAR lifetime total captured"
+
+    return failed
+
+
+def test_sigenergy_fetch_history_totals_empty_data(my_predbat):
+    """Test fetch_history_totals handles code=0 with a null/missing data field without crashing.
+
+    _request() returns the _SIGENERGY_OK sentinel (not a dict) in this case — fetch_history_totals
+    must not call .get() on it.
+    """
+    failed = False
+    api = MockSigenergyAPI()
+    api.access_token = "fake_token"
+    api.token_expires_at = 9_999_999_999
+    api._last_request_time = 0
+
+    fake_response = {"code": 0, "msg": "success"}  # no 'data' field
+
+    mock_response = _make_mock_response(status=200, json_data=fake_response)
+    mock_session = _make_mock_session(mock_response)
+
+    with patch("sigenergy.aiohttp.ClientSession", return_value=mock_session):
+        ok = run_async(api.fetch_history_totals("SIG001"))
+
+    assert ok is False, "fetch_history_totals should return False for empty data, got {}".format(ok)
+    assert "SIG001" not in api.history_totals, "history_totals not populated on failure"
 
     return failed
 
@@ -950,12 +1031,13 @@ def test_sigenergy_handle_mqtt_period(my_predbat):
     # Realtime power fields land in energy_flow
     flow = api.energy_flow.get("SYS1", {})
     assert abs(flow["batterySoc"] - 79.7) < 0.01, "batterySoc = 79.7%"
-    # storageChargeDischargePowerW -2927 W = -2.927 kW (discharging, negative = energyFlow convention)
-    assert abs(flow["batteryPower"] - (-2.927)) < 0.01, "batteryPower = -2.927 kW"
+    # storageChargeDischargePowerW -2927 W (negative=discharging), negated to positive=discharging (Predbat convention)
+    assert abs(flow["batteryPower"] - 2.927) < 0.01, "batteryPower = 2.927 kW (discharging)"
     assert abs(flow["pvPower"] - 0.0) < 0.001, "pvPower = 0.0"
-    assert abs(flow["gridPower"] - 0.003) < 0.001, "gridPower = 0.003 kW"
-    # loadPower = pv - bat - grid = 0 - (-2.927) - 0.003 = 2.924
-    assert abs(flow["loadPower"] - 2.924) < 0.01, "loadPower derived = 2.924 kW"
+    # gridActivePowerW is positive=import, negated to positive=export (Predbat convention)
+    assert abs(flow["gridPower"] - (-0.003)) < 0.001, "gridPower = -0.003 kW (3W import negated to export convention)"
+    # loadPower = pv + bat_discharge - grid_export = 0 + 2.927 - (-0.003) = 2.930
+    assert abs(flow["loadPower"] - 2.930) < 0.01, "loadPower derived = 2.930 kW"
     assert abs(flow["inverterPower"] - 2.681) < 0.001, "inverterPower = 2.681 kW"
     assert "chargeCapacityKwh" not in flow, "capacity/status fields must not be in energy_flow"
 
@@ -968,6 +1050,48 @@ def test_sigenergy_handle_mqtt_period(my_predbat):
     assert status["operationalMode"] == 6.0, "operationalMode = 6.0"
     assert status["systemStatus"] == 1.0, "systemStatus = 1.0"
     assert any("MQTT period" in m and "80" in m for m in api.log_messages), "Period data logged"
+
+    return failed
+
+
+def test_sigenergy_handle_mqtt_period_partial_update(my_predbat):
+    """Test _handle_mqtt_period merges partial (delta) messages onto previous values.
+
+    The broker only includes fields that changed since the last message. A
+    second message that omits e.g. 'PV power' must not reset pvPower to 0 -
+    it should keep reading back the last known value.
+    """
+    failed = False
+    api = MockSigenergyAPI()
+
+    full_message = {
+        "storageSOC%": "79.7",
+        "storageChargeDischargePowerW": "-2927.0",
+        "PV power": "5000.0",
+        "gridActivePowerW": "3.0",
+        "inverterActivePowerW": "2681.0",
+        "storageChargeCapacityWh": "9520.0",
+        "storageDischargeCapacityWh": "37410.0",
+        "batteryMaxChargePowerW": "22032.0",
+        "batteryMaxDischargePowerW": "36051.0",
+        "operationalMode": "6.0",
+        "systemStatus": "1.0",
+    }
+    api._handle_mqtt_period("SYS1", full_message)
+
+    # Second message only reports that the battery power changed - PV power,
+    # grid power etc. are omitted because they haven't changed.
+    partial_message = {"storageChargeDischargePowerW": "-1000.0"}
+    api._handle_mqtt_period("SYS1", partial_message)
+
+    flow = api.energy_flow.get("SYS1", {})
+    assert abs(flow["batteryPower"] - 1.0) < 0.001, "batteryPower updated from partial message = 1.0 kW (discharging)"
+    assert abs(flow["pvPower"] - 5.0) < 0.001, "pvPower retained from previous full message = 5.0 kW, not reset to 0"
+    assert abs(flow["gridPower"] - (-0.003)) < 0.001, "gridPower retained from previous full message"
+    assert abs(flow["batterySoc"] - 79.7) < 0.01, "batterySoc retained from previous full message"
+
+    status = api.system_status.get("SYS1", {})
+    assert status["operationalMode"] == 6.0, "operationalMode retained from previous full message"
 
     return failed
 
@@ -1062,6 +1186,7 @@ def test_sigenergy_mqtt_listener_loop(my_predbat):
     ]
 
     publishes = []
+    subscribed_topics = []
 
     class FakeMQTTClient:
         """Async context manager that yields two messages then exits cleanly."""
@@ -1073,7 +1198,7 @@ def test_sigenergy_mqtt_listener_loop(my_predbat):
             pass
 
         async def subscribe(self, topic):
-            pass
+            subscribed_topics.append(topic)
 
         async def publish(self, topic, payload=None, qos=0, **kwargs):
             publishes.append((topic, payload))
@@ -1107,7 +1232,8 @@ def test_sigenergy_mqtt_listener_loop(my_predbat):
     # Period message: energy_flow updated
     flow = api.energy_flow.get("XRTKQ1773829273", {})
     assert abs(flow.get("batterySoc", 0) - 55.0) < 0.01, "batterySoc from MQTT period = 55%"
-    assert abs(flow.get("batteryPower", 0) - 1.0) < 0.01, "batteryPower = 1.0 kW (charging)"
+    # storageChargeDischargePowerW +1000W (charging), negated to -1.0 kW (Predbat convention: negative=charging)
+    assert abs(flow.get("batteryPower", 0) - (-1.0)) < 0.01, "batteryPower = -1.0 kW (charging)"
 
     # Change message: controls updated
     ctrl = api.controls.get("XRTKQ1773829273", {})
@@ -1123,6 +1249,96 @@ def test_sigenergy_mqtt_listener_loop(my_predbat):
 
     # last_mqtt_update was set per system
     assert api.last_mqtt_update.get("XRTKQ1773829273", 0) > 0, "last_mqtt_update was set for system"
+
+    # MQTT topic subscriptions are scoped to the managed system, not a "#" wildcard
+    # across every system on the app_key.
+    assert len(subscribed_topics) == 3, "one topic per message type for the single managed system, got {}".format(subscribed_topics)
+    assert all("XRTKQ1773829273" in t for t in subscribed_topics), "topics scoped to the managed system_id: {}".format(subscribed_topics)
+    assert not any("#" in t for t in subscribed_topics), "no wildcard system_id in subscribed topics: {}".format(subscribed_topics)
+
+    return failed
+
+
+def test_sigenergy_mqtt_listener_loop_ignores_other_systems(my_predbat):
+    """Test _mqtt_listener_loop ignores MQTT messages for systems outside self.systems.
+
+    Subscriptions are scoped to self.systems, but this is a defensive test for
+    the belt-and-suspenders filter in case a stray message still arrives for a
+    system outside our discovered/filtered set (e.g. excluded by system_id_filter).
+    Only api.systems (the discovered/filtered set) should end up populated.
+    """
+    failed = False
+    import json as _json
+
+    api = MockSigenergyAPI()
+    api.access_token = "tok"
+    api.token_expires_at = 9_999_999_999
+    # Only one system is in scope - the account may have others.
+    api.systems["ZOO1755782498"] = {"systemName": "In scope"}
+    api.api_stop = False
+
+    period_payload_other_system = _json.dumps([{
+        "deviceType": "system",
+        "systemId": "XRTKQ1773829273",  # not in api.systems - must be ignored
+        "value": {
+            "storageSOC%": "80.0",
+            "storageChargeDischargePowerW": "1000.0",
+            "PV power": "2000.0",
+            "gridActivePowerW": "500.0",
+        },
+    }]).encode()
+
+    class FakeMessage:
+        def __init__(self, topic, payload):
+            self.topic = topic
+            self.payload = payload
+            self.qos = 0
+            self.retain = False
+
+    messages_to_deliver = [
+        FakeMessage("openapi/period/test_app_key/XRTKQ1773829273", period_payload_other_system),
+    ]
+
+    class FakeMQTTClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def subscribe(self, topic):
+            pass
+
+        async def publish(self, topic, payload=None, qos=0, **kwargs):
+            pass
+
+        class _Messages:
+            def __init__(self, msgs, api):
+                self._msgs = iter(msgs)
+                self._api = api
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._msgs)
+                except StopIteration:
+                    self._api.api_stop = True
+                    raise StopAsyncIteration
+
+        @property
+        def messages(self):
+            return FakeMQTTClient._Messages(messages_to_deliver, api)
+
+    with patch("sigenergy.aiomqtt.Client", return_value=FakeMQTTClient()):
+        with patch("sigenergy.ssl.create_default_context", return_value=MagicMock()):
+            run_async(api._mqtt_listener_loop())
+
+    assert "XRTKQ1773829273" not in api.energy_flow, "energy_flow not populated for out-of-scope system"
+    assert "XRTKQ1773829273" not in api.last_mqtt_update, "last_mqtt_update not set for out-of-scope system"
+    other_slug = api._system_slug("XRTKQ1773829273")
+    assert "sensor.predbat_sigenergy_{}_battery_soc".format(other_slug) not in api.dashboard_items, "no entities published for out-of-scope system"
 
     return failed
 
@@ -1172,8 +1388,8 @@ def test_sigenergy_fetch_inverter_realtime(my_predbat):
     flow = api.energy_flow.get("SYS1", {})
 
     assert flow.get("batterySoc") == 72.0, "batterySoc = 72.0"
-    # batPower was 3.0 (discharging) → batteryPower should be -3.0 (discharging in energyFlow convention)
-    assert flow.get("batteryPower") == -3.0, "batteryPower = -3.0 (discharging, sign negated)"
+    # batPower 3.0 (discharging) already matches Predbat convention (positive=discharge) - no negation
+    assert flow.get("batteryPower") == 3.0, "batteryPower = 3.0 (discharging, unchanged)"
     assert flow.get("pvPower") == 5.0, "pvPower = 5.0"
     assert flow.get("gridPower") == 1.5, "gridPower = 1.5 (export)"
     # loadPower = pv + battery_discharge - grid_export = 5.0 + 3.0 - 1.5 = 6.5
@@ -1183,6 +1399,50 @@ def test_sigenergy_fetch_inverter_realtime(my_predbat):
     # pvEnergyDaily should update daily_summary
     daily = api.daily_summary.get("SYS1", {})
     assert daily.get("dailyPowerGeneration") == 12.5, "daily PV yield updated from pvEnergyDaily"
+
+    return failed
+
+
+def test_sigenergy_fetch_energy_flow(my_predbat):
+    """Test fetch_energy_flow negates the raw batteryPower to Predbat convention.
+
+    The raw /energyFlow API returns batteryPower positive=charging, but Predbat
+    (and every other sigenergy.py ingestion path) expects positive=discharging.
+    gridPower/pvPower/loadPower/evPower already match Predbat's convention and
+    must pass through unchanged.
+    """
+    failed = False
+    api = MockSigenergyAPI()
+    api.access_token = "fake_token"
+    api.token_expires_at = 9_999_999_999
+    api._last_request_time = 0
+
+    fake_response = {
+        "code": 0,
+        "data": {
+            "pvPower": 10.1,
+            "gridPower": 2.5,
+            "evPower": 0.4,
+            "loadPower": 3.2,
+            "batteryPower": 4.0,  # charging (raw convention) -> should be negated to -4.0
+            "batterySoc": 88.0,
+        },
+    }
+
+    mock_response = _make_mock_response(status=200, json_data=fake_response)
+    mock_session = _make_mock_session(mock_response)
+
+    with patch("sigenergy.aiohttp.ClientSession", return_value=mock_session):
+        ok = run_async(api.fetch_energy_flow("SYS1"))
+
+    assert ok is True, "fetch_energy_flow should return True"
+    flow = api.energy_flow.get("SYS1", {})
+    assert flow.get("batterySoc") == 88.0, "batterySoc = 88.0"
+    assert flow.get("batteryPower") == -4.0, "batteryPower negated to -4.0 (charging, Predbat convention)"
+    assert flow.get("pvPower") == 10.1, "pvPower = 10.1 (unchanged)"
+    assert flow.get("gridPower") == 2.5, "gridPower = 2.5 (unchanged, already Predbat convention)"
+    assert flow.get("loadPower") == 3.2, "loadPower = 3.2 (unchanged)"
+    assert flow.get("evPower") == 0.4, "evPower = 0.4 (unchanged)"
 
     return failed
 
@@ -1661,6 +1921,148 @@ def test_sigenergy_offboard_toggle_switch_event(my_predbat):
 # ---------------------------------------------------------------------------
 
 
+def test_sigenergy_onboard_status(my_predbat):
+    """onboard_systems records the user-facing onboarding status per result code."""
+    failed = False
+    api = MockSigenergyAPI()
+    assert api.onboard_status == {}, "onboard_status starts empty"
+
+    # Pending approval (1116) → pending_approval, returns None
+    api._request = AsyncMock(return_value=None)
+    api._last_api_code = SIGENERGY_CODE_SYSTEM_PENDING_REVIEW
+    result = run_async(api.onboard_systems(["sys-1"]))
+    assert result is None, "pending review returns None"
+    assert api.onboard_status["sys-1"] == "pending_approval", "pending_approval status set"
+
+    # Registered to another VPP (1103) → in_other_vpp, returns False
+    api2 = MockSigenergyAPI()
+    api2._request = AsyncMock(return_value=None)
+    api2._last_api_code = SIGENERGY_CODE_IN_OTHER_VPP
+    result2 = run_async(api2.onboard_systems("sys-2"))
+    assert result2 is False, "in-other-vpp returns False"
+    assert api2.onboard_status["sys-2"] == "in_other_vpp", "in_other_vpp status set"
+
+    return failed
+
+
+def test_sigenergy_publish_onboard_status_sensors(my_predbat):
+    """_publish_onboard_status publishes the correct sensor state for each status value."""
+    failed = False
+
+    # active — system in VPP mode
+    api = MockSigenergyAPI()
+    api.system_id_filter = {"SIG001"}
+    api.onboard_status = {"SIG001": "active"}
+    api.current_mode = {"SIG001": SIGENERGY_MODE_VPP}
+    api._publish_onboard_status()
+    key = "sensor.predbat_sigenergy_sig001_onboard_status"
+    assert api.dashboard_items[key]["state"] == "active", "active state published"
+    assert api.dashboard_items[key]["attributes"]["in_vpp"] is True, "in_vpp True for VPP mode"
+    assert api.dashboard_items[key]["attributes"]["system_id"] == "SIG001", "system_id in attributes"
+
+    # offboarded — system present but toggled off
+    api2 = MockSigenergyAPI()
+    api2.system_id_filter = {"SIG002"}
+    api2.onboard_status = {"SIG002": "offboarded"}
+    api2.current_mode = {"SIG002": SIGENERGY_MODE_MSC}
+    api2._publish_onboard_status()
+    key2 = "sensor.predbat_sigenergy_sig002_onboard_status"
+    assert api2.dashboard_items[key2]["state"] == "offboarded", "offboarded state published"
+    assert api2.dashboard_items[key2]["attributes"]["in_vpp"] is False, "in_vpp False for MSC mode"
+
+    # pending_approval — visible system not yet in VPP
+    api3 = MockSigenergyAPI()
+    api3.system_id_filter = {"SIG003"}
+    api3.onboard_status = {"SIG003": "pending_approval"}
+    api3.current_mode = {}
+    api3._publish_onboard_status()
+    key3 = "sensor.predbat_sigenergy_sig003_onboard_status"
+    assert api3.dashboard_items[key3]["state"] == "pending_approval", "pending_approval state published"
+
+    # not_onboarded — system in filter but onboard_status not yet set
+    api4 = MockSigenergyAPI()
+    api4.system_id_filter = {"SIG004"}
+    api4.onboard_status = {}
+    api4.current_mode = {}
+    api4._publish_onboard_status()
+    key4 = "sensor.predbat_sigenergy_sig004_onboard_status"
+    assert api4.dashboard_items[key4]["state"] == "not_onboarded", "missing status defaults to not_onboarded"
+
+    return failed
+
+
+def test_sigenergy_run_derives_onboard_status(my_predbat):
+    """run() correctly derives and publishes onboard_status for visible systems on each poll cycle."""
+    failed = False
+    sid = "SIG001"
+
+    def _make_api(mode, offboard_on=False):
+        api = MockSigenergyAPI()
+        api.systems = {sid: {"deviceList": []}}
+        api.current_mode = {sid: mode}
+        api.system_id_filter = {sid}
+        # Fake a running MQTT task so run() does not try to start one
+        task = MagicMock()
+        task.done = MagicMock(return_value=False)
+        api._mqtt_task = task
+        if offboard_on:
+            slug = api._system_slug(sid)
+            api.dashboard_items["switch.predbat_sigenergy_{}_offboard".format(slug)] = {"state": "on"}
+        # Stub async helpers called by run()
+        api._manage_vpp_registration = AsyncMock(return_value=True)
+        api.fetch_inverter_realtime = AsyncMock(return_value=True)
+        api.fetch_daily_summary = AsyncMock()
+        api.fetch_history_totals = AsyncMock()
+        api.publish_system_entities = AsyncMock()
+        api.apply_controls = AsyncMock()
+        return api
+
+    # System in VPP mode → active
+    api_active = _make_api(SIGENERGY_MODE_VPP)
+    ok = run_async(api_active.run(seconds=300, first=False))
+    assert ok is True, "run() returns True on success"
+    assert api_active.onboard_status[sid] == "active", "active derived from VPP mode"
+    sensor_key = "sensor.predbat_sigenergy_sig001_onboard_status"
+    assert api_active.dashboard_items[sensor_key]["state"] == "active", "active sensor published"
+    assert api_active.dashboard_items[sensor_key]["attributes"]["in_vpp"] is True
+
+    # System in MSC mode, not offboarded → pending_approval
+    api_pending = _make_api(SIGENERGY_MODE_MSC)
+    run_async(api_pending.run(seconds=300, first=False))
+    assert api_pending.onboard_status[sid] == "pending_approval", "pending_approval derived from MSC mode"
+    assert api_pending.dashboard_items[sensor_key]["state"] == "pending_approval"
+
+    # Offboard toggle on → offboarded regardless of mode
+    api_offboard = _make_api(SIGENERGY_MODE_VPP, offboard_on=True)
+    run_async(api_offboard.run(seconds=300, first=False))
+    assert api_offboard.onboard_status[sid] == "offboarded", "offboarded when toggle is on"
+    assert api_offboard.dashboard_items[sensor_key]["state"] == "offboarded"
+
+    return failed
+
+
+def test_sigenergy_run_pending_publishes_before_early_exit(my_predbat):
+    """When onboard_systems returns None (pending approval), sensor is published before run() returns False."""
+    failed = False
+    sid = "SIG001"
+
+    api = MockSigenergyAPI()
+    api.system_id_filter = {sid}
+    api.get_access_token = AsyncMock(return_value="tok")
+    api.fetch_system_list = AsyncMock()  # leaves self.systems empty (system not yet visible)
+    api.onboard_systems = AsyncMock(return_value=None)
+
+    result = run_async(api.run(seconds=0, first=True))
+
+    assert result is False, "run() returns False when onboarding is pending"
+    sensor_key = "sensor.predbat_sigenergy_sig001_onboard_status"
+    assert sensor_key in api.dashboard_items, "sensor published before early return"
+    # Status was set to not_onboarded by the setdefault call in run() before onboard_systems
+    assert api.dashboard_items[sensor_key]["state"] in ("not_onboarded", "pending_approval"), "sensor has a known status value"
+
+    return failed
+
+
 def run_sigenergy_tests(my_predbat):
     """Run all Sigenergy API unit tests.
 
@@ -1671,6 +2073,7 @@ def run_sigenergy_tests(my_predbat):
     tests = [
         ("helper_functions", test_sigenergy_helper_functions),
         ("initialize", test_sigenergy_initialize),
+        ("onboard_status", test_sigenergy_onboard_status),
         ("system_slug", test_sigenergy_system_slug),
         ("battery_capacity", test_sigenergy_battery_capacity),
         ("publish_system_entities", test_sigenergy_publish_system_entities),
@@ -1685,6 +2088,8 @@ def run_sigenergy_tests(my_predbat):
         ("get_access_token_no_retry_on_api_error", test_sigenergy_get_access_token_no_retry_on_api_error),
         ("fetch_system_list", test_sigenergy_fetch_system_list),
         ("fetch_system_list_with_filter", test_sigenergy_fetch_system_list_with_filter),
+        ("fetch_history_totals", test_sigenergy_fetch_history_totals),
+        ("fetch_history_totals_empty_data", test_sigenergy_fetch_history_totals_empty_data),
         ("apply_controls_charge_mode", test_sigenergy_apply_controls_charge_mode),
         ("apply_controls_eco_mode", test_sigenergy_apply_controls_eco_mode),
         ("apply_controls_deduplication", test_sigenergy_apply_controls_deduplication),
@@ -1694,10 +2099,13 @@ def run_sigenergy_tests(my_predbat):
         ("send_battery_command_mqtt", test_sigenergy_send_battery_command_mqtt),
         ("send_battery_command_no_token", test_sigenergy_send_battery_command_no_token),
         ("handle_mqtt_period", test_sigenergy_handle_mqtt_period),
+        ("handle_mqtt_period_partial_update", test_sigenergy_handle_mqtt_period_partial_update),
         ("handle_mqtt_change", test_sigenergy_handle_mqtt_change),
         ("handle_mqtt_alarm", test_sigenergy_handle_mqtt_alarm),
         ("mqtt_listener_loop", test_sigenergy_mqtt_listener_loop),
+        ("mqtt_listener_loop_ignores_other_systems", test_sigenergy_mqtt_listener_loop_ignores_other_systems),
         ("fetch_inverter_realtime", test_sigenergy_fetch_inverter_realtime),
+        ("fetch_energy_flow", test_sigenergy_fetch_energy_flow),
         ("fetch_inverter_realtime_no_inverter", test_sigenergy_fetch_inverter_realtime_no_inverter),
         ("get_inverter_serial", test_sigenergy_get_inverter_serial),
         ("build_tls_context", test_sigenergy_build_tls_context),
@@ -1716,6 +2124,9 @@ def run_sigenergy_tests(my_predbat):
         ("offboard_toggle_in_vpp", test_sigenergy_offboard_toggle_in_vpp),
         ("offboard_toggle_not_in_vpp", test_sigenergy_offboard_toggle_not_in_vpp),
         ("offboard_toggle_switch_event", test_sigenergy_offboard_toggle_switch_event),
+        ("publish_onboard_status_sensors", test_sigenergy_publish_onboard_status_sensors),
+        ("run_derives_onboard_status", test_sigenergy_run_derives_onboard_status),
+        ("run_pending_publishes_before_early_exit", test_sigenergy_run_pending_publishes_before_early_exit),
     ]
 
     for name, fn in tests:

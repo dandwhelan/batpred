@@ -23,6 +23,7 @@ Data endpoints used:
   GET  /openapi/system/{systemId}/devices                — device inventory
   GET  /openapi/systems/{systemId}/energyFlow            — realtime power & SOC
   GET  /openapi/systems/{systemId}/summary               — daily/lifetime yield
+  GET  /openapi/systems/{systemId}/v1/history             — lifetime energy totals (Sankey nodes)
   GET  /openapi/instruction/{systemId}/settings          — current operating mode
 
 Control endpoints:
@@ -191,6 +192,23 @@ SIGENERGY_DEVICE_METER = "Meter"
 _BASE_TIME = datetime.strptime("00:00:00", "%H:%M:%S")
 SIGENERGY_OPTIONS_TIME = [(_BASE_TIME + timedelta(seconds=m * 60)).strftime("%H:%M:%S") for m in range(0, 24 * 60)]
 
+# Sankey node IDs returned by the /v1/history endpoint (level=Lifetime), mapped to the
+# entity slug and friendly name used to publish each as a lifetime-cumulative kWh sensor.
+# There is no native "today" load/import/export sensor on the Sigenergy Cloud API, so
+# Predbat is wired to these ever-growing totals — the same pattern used for lifetime
+# energy counters on other inverter brands, where load_today/import_today/export_today
+# derive "today" by diffing against midnight rather than reading a daily-reset sensor.
+SIGENERGY_HISTORY_NODES = [
+    ("TO_LOAD", "load_lifetime", "Load Lifetime"),
+    ("FROM_GRID", "grid_import_lifetime", "Grid Import Lifetime"),
+    ("TO_GRID", "grid_export_lifetime", "Grid Export Lifetime"),
+    ("FROM_SOLAR", "pv_lifetime", "PV Lifetime"),
+    ("TO_BATTERY", "battery_charge_lifetime", "Battery Charge Lifetime"),
+    ("FROM_BATTERY", "battery_discharge_lifetime", "Battery Discharge Lifetime"),
+    ("TO_EVDC", "ev_charge_lifetime", "EV Charge Lifetime"),
+    ("FROM_EVDC", "ev_discharge_lifetime", "EV Discharge Lifetime"),
+]
+
 # Sentinel returned by _request() when the API responds with code=0 but an empty/null data field.
 # Distinguishes "success with no payload" from None which always means "request failed".
 _SIGENERGY_OK = object()
@@ -281,7 +299,10 @@ class SigenergyAPI(ComponentBase):
         self.energy_flow = {}     # systemId → latest energyFlow dict
         self.system_status = {}   # systemId → latest systemStatus dict
         self.daily_summary = {}   # systemId → latest summary dict
+        self.history_totals = {}  # systemId → {sankey node id: lifetime kWh total}
+        self.mqtt_period_raw = {}  # systemId → merged raw 'period' fields (MQTT only sends fields that changed)
         self.current_mode = {}    # systemId → energyStorageOperationMode int
+        self.onboard_status = {}  # systemId → onboarding status string (published for the SaaS UI)
 
         # Control state keyed by systemId
         self.controls = {}        # systemId → {charge: {…}, export: {…}, reserve: …}
@@ -614,9 +635,9 @@ class SigenergyAPI(ComponentBase):
         that all downstream code (publish_system_entities, apply_controls) works
         unchanged.  Also updates daily_summary with pvEnergyDaily if present.
 
-        Field sign conventions (realtimeInfo vs energyFlow):
-          batPower:   realtimeInfo positive=discharging  → energyFlow positive=charging (negated)
-          activePower: positive=generation/export        → gridPower positive=export (same)
+        Field sign conventions map directly onto Predbat's own convention, no negation needed:
+          batPower:    positive=discharging, negative=charging (same as Predbat battery_power)
+          activePower: positive=export, negative=import (same as Predbat grid_power)
           loadPower is derived as: pv + battery_discharge - grid_export
 
         Note: The API enforces a 5-minute access restriction per device, so this
@@ -648,17 +669,14 @@ class SigenergyAPI(ComponentBase):
 
         bat_soc = _safe_float(rt.get("batSoc", 0))
         # batPower: realtimeInfo convention is positive=discharging, negative=charging.
-        # energyFlow convention (used everywhere else) is positive=charging, negative=discharging.
-        # Negate to match the energyFlow convention.
-        bat_power_kw = -_safe_float(rt.get("batPower", 0))
+        bat_power_kw = _safe_float(rt.get("batPower", 0))
         pv_power_kw = _safe_float(rt.get("pvPower", 0))
         # activePower: positive=export (net generation to grid), negative=import.
-        # Maps directly to gridPower in the energyFlow convention (positive=export).
+        # Maps directly to gridPower in the Predbat convention (positive=export).
         grid_power_kw = _safe_float(rt.get("activePower", 0))
-        # Derive load: pv + battery_discharge - grid_export
-        # battery_discharge = -bat_power_kw when bat_power_kw < 0 (bat_power_kw is now in charging-positive convention)
-        battery_discharge_kw = max(0.0, -bat_power_kw)
-        load_power_kw = max(0.0, pv_power_kw + battery_discharge_kw - grid_power_kw)
+        # Energy balance in Predbat convention (bat: +discharge/-charge, grid: +export/-import):
+        # load = pv + battery_discharge - grid_export
+        load_power_kw = max(0.0, pv_power_kw + bat_power_kw - grid_power_kw)
 
         flow = {
             "batterySoc": bat_soc,
@@ -684,10 +702,10 @@ class SigenergyAPI(ComponentBase):
     async def fetch_energy_flow(self, system_id):
         """Fetch realtime energy-flow data for a system.
 
-        The API returns power values in kW with these sign conventions:
+        The raw API returns power values in kW with these sign conventions:
           pvPower      — always positive
-          gridPower    — positive = export to grid, negative = import from grid
-          batteryPower — positive = charging, negative = discharging
+          gridPower    — positive = export to grid, negative = import from grid (same as Predbat)
+          batteryPower — positive = charging, negative = discharging (opposite of Predbat - negated below)
           loadPower    — always positive
 
         Args:
@@ -716,11 +734,19 @@ class SigenergyAPI(ComponentBase):
             self.log("Warn: SigenergyAPI: Failed to fetch energy flow for {}".format(system_id))
             return False
 
-        self.energy_flow[system_id] = data
         soc = _safe_float(data.get("batterySoc", 0))
-        battery_kw = _safe_float(data.get("batteryPower", 0))
+        # batteryPower: raw API is positive=charging - negate to Predbat convention (positive=discharging)
+        battery_kw = -_safe_float(data.get("batteryPower", 0))
         pv_kw = _safe_float(data.get("pvPower", 0))
         grid_kw = _safe_float(data.get("gridPower", 0))
+        self.energy_flow[system_id] = {
+            "batterySoc": soc,
+            "batteryPower": battery_kw,
+            "pvPower": pv_kw,
+            "gridPower": grid_kw,
+            "loadPower": _safe_float(data.get("loadPower", 0)),
+            "evPower": _safe_float(data.get("evPower", 0)),
+        }
         self.log("SigenergyAPI: System {} — SOC {:.0f}% battery {:.2f}kW pv {:.2f}kW grid {:.2f}kW".format(system_id, soc, battery_kw, pv_kw, grid_kw))
         return True
 
@@ -739,6 +765,36 @@ class SigenergyAPI(ComponentBase):
             return False
 
         self.daily_summary[system_id] = data
+        return True
+
+    async def fetch_history_totals(self, system_id):
+        """Fetch lifetime cumulative energy totals for a system.
+
+        The Sigenergy Cloud API has no native "today" load/import/export sensor,
+        so this polls the history endpoint at level=Lifetime for the ever-growing
+        Sankey node totals (TO_LOAD, FROM_GRID, TO_GRID, FROM_SOLAR, TO_BATTERY,
+        FROM_BATTERY, TO_EVDC, FROM_EVDC). Predbat derives "today" energy from
+        these by diffing against midnight — the same pattern already used for
+        lifetime energy counters on other inverter brands.
+
+        Args:
+            system_id: Sigenergy system unique identifier.
+
+        Returns:
+            True on success, False on failure.
+        """
+        today = datetime.now(self.local_tz).strftime("%Y-%m-%d")
+        data = await self._request(
+            "GET",
+            "/openapi/systems/{}/v1/history".format(system_id),
+            params={"systemId": system_id, "date": today, "level": "Lifetime"},
+        )
+        if data is None or not isinstance(data, dict):
+            self.log("Warn: SigenergyAPI: Failed to fetch history totals for {}".format(system_id))
+            return False
+
+        nodes = data.get("sankeyData", {}).get("nodes", [])
+        self.history_totals[system_id] = {node.get("id"): _safe_float(node.get("value", 0)) for node in nodes if node.get("id")}
         return True
 
     async def fetch_current_mode(self, system_id):
@@ -824,13 +880,24 @@ class SigenergyAPI(ComponentBase):
                     code = item_codes[0]
 
         if code == SIGENERGY_CODE_SYSTEM_PENDING_REVIEW:
+            for sid in system_ids:
+                self.onboard_status[str(sid)] = "pending_approval"
             self.log("Warn: SigenergyAPI: Onboard for {} pending user approval in the Sigenergy app — approve to enable controls".format(system_ids))
             return None
         if code in (SIGENERGY_CODE_IN_OTHER_VPP, SIGENERGY_CODE_IN_OTHER_VPP_EVERGEN):
+            for sid in system_ids:
+                self.onboard_status[str(sid)] = "in_other_vpp"
             self.log("Warn: SigenergyAPI: Onboard failed — system {} is registered to another VPP (code={})".format(system_ids, code))
             return False
         if code == SIGENERGY_CODE_SOFTWARE_NO_VPP:
-            self.log("Warn: SigenergyAPI: Onboard failed — system {} firmware does not support VPP (code=1105)".format(system_ids))
+            for sid in system_ids:
+                self.onboard_status[str(sid)] = "firmware_no_vpp"
+            self.log("Warn: SigenergyAPI: Onboard failed — system {} firmware does not support VPP (code={})".format(system_ids, code))
+            return False
+        if code in (SIGENERGY_CODE_NO_PERMISSION_STATION, SIGENERGY_CODE_STATION_NOT_PERMITTED):
+            for sid in system_ids:
+                self.onboard_status[str(sid)] = "no_permission"
+            self.log("Warn: SigenergyAPI: Onboard failed — no permission for system {} (code={})".format(system_ids, code))
             return False
         if result is None:
             self.log("Warn: SigenergyAPI: Onboard request failed for systems {} (code={})".format(system_ids, code))
@@ -1087,17 +1154,19 @@ class SigenergyAPI(ComponentBase):
     def _handle_mqtt_period(self, system_id, value_dict):
         """Handle a Sigenergy ``openapi/period`` MQTT message.
 
-        Overwrites ``self.energy_flow[system_id]`` with fresh real-time data.
-        The ``period`` message is broadcast every ~5 s by the broker and carries
-        inverter and storage power/SOC values.
+        The broker only includes fields that changed since the previous message,
+        so ``value_dict`` is merged onto ``self.mqtt_period_raw[system_id]`` (the
+        last known value of every raw field) rather than used on its own —
+        otherwise any field that hasn't changed recently would read back as 0.
+        Recomputes and overwrites ``self.energy_flow[system_id]`` from that merged
+        state. The ``period`` message is broadcast every ~5 s by the broker and
+        carries inverter and storage power/SOC values.
 
-        Field sign convention matches the REST energyFlow convention used
-        throughout the rest of the code:
-          batteryPower — positive = charging, negative = discharging
+        Field sign convention matches Predbat's own battery_power/grid_power convention:
+          batteryPower — positive = discharging, negative = charging
           gridPower    — positive = export, negative = import
           pvPower      — always positive
-          loadPower    — derived as ``pvPower − batteryPower − gridPower``
-
+          loadPower    — derived as ``pvPower + batteryPower - gridPower``
         Example message:
         {
             "PV power": "0.0",
@@ -1131,34 +1200,41 @@ class SigenergyAPI(ComponentBase):
             system_id: Sigenergy system identifier extracted from the MQTT topic.
             value_dict: ``value`` sub-dict from the parsed MQTT payload (string→string).
         """
-        # Note: storageChargeDischargePowerW is negative when discharging — same
-        # sign convention as the REST batteryPower field (positive=charging).
-        bat_power_kw = _safe_float(value_dict.get("storageChargeDischargePowerW", 0)) / 1000.0
-        pv_power_kw = _safe_float(value_dict.get("PV power", 0)) / 1000.0
-        grid_power_kw = _safe_float(value_dict.get("gridActivePowerW", 0)) / 1000.0
-        load_power_kw = pv_power_kw - bat_power_kw - grid_power_kw
+        # The broker only sends fields that changed, so merge onto the last known
+        # raw values rather than treating an absent field as 0.
+        raw = self.mqtt_period_raw.setdefault(system_id, {})
+        raw.update(value_dict)
+
+        # Note: storageChargeDischargePowerW is negative when discharging, convert to Predbat
+        bat_power_kw = -_safe_float(raw.get("storageChargeDischargePowerW", 0)) / 1000.0
+        pv_power_kw = _safe_float(raw.get("PV power", 0)) / 1000.0
+        # Convert grid power, from positive=import to positive=export (same as Predbat)
+        grid_power_kw = -_safe_float(raw.get("gridActivePowerW", 0)) / 1000.0
+        # Energy balance in Predbat convention (bat: +discharge/-charge, grid: +export/-import):
+        # load = pv + battery_discharge - grid_export
+        load_power_kw = pv_power_kw + bat_power_kw - grid_power_kw
 
         flow = {
-            "batterySoc": _safe_float(value_dict.get("storageSOC%", 0)),
+            "batterySoc": _safe_float(raw.get("storageSOC%", 0)),
             "batteryPower": bat_power_kw,
             "pvPower": pv_power_kw,
             "gridPower": grid_power_kw,
             "loadPower": max(0.0, load_power_kw),
             "evPower": 0.0,
-            "inverterPower": _safe_float(value_dict.get("inverterActivePowerW", 0)) / 1000.0,
+            "inverterPower": _safe_float(raw.get("inverterActivePowerW", 0)) / 1000.0,
         }
         flow_status = {
-            "chargeCapacity": _safe_float(value_dict.get("storageChargeCapacityWh", 0)) / 1000.0,
-            "dischargeCapacity": _safe_float(value_dict.get("storageDischargeCapacityWh", 0)) / 1000.0,
-            "ratedChargePower": _safe_float(value_dict.get("batteryMaxChargePowerW", 0)) / 1000.0,
-            "ratedDischargePower": _safe_float(value_dict.get("batteryMaxDischargePowerW", 0)) / 1000.0,
-            "operationalMode": _safe_float(value_dict.get("operationalMode", 0)),
-            "systemStatus": _safe_float(value_dict.get("systemStatus", 0)),
+            "chargeCapacity": _safe_float(raw.get("storageChargeCapacityWh", 0)) / 1000.0,
+            "dischargeCapacity": _safe_float(raw.get("storageDischargeCapacityWh", 0)) / 1000.0,
+            "ratedChargePower": _safe_float(raw.get("batteryMaxChargePowerW", 0)) / 1000.0,
+            "ratedDischargePower": _safe_float(raw.get("batteryMaxDischargePowerW", 0)) / 1000.0,
+            "operationalMode": _safe_float(raw.get("operationalMode", 0)),
+            "systemStatus": _safe_float(raw.get("systemStatus", 0)),
         }
         self.energy_flow[system_id] = flow
         self.system_status[system_id] = flow_status
-        if "operationalMode" in value_dict:
-            self.current_mode[system_id] = int(_safe_float(value_dict["operationalMode"]))
+        if "operationalMode" in raw:
+            self.current_mode[system_id] = int(_safe_float(raw["operationalMode"]))
         self.log(
             "SigenergyAPI: MQTT period {}: SOC {:.0f}% bat {:.2f}kW pv {:.2f}kW grid {:.2f}kW load {:.2f}kW".format(
                 system_id, flow["batterySoc"], bat_power_kw, pv_power_kw, grid_power_kw, flow["loadPower"]
@@ -1261,7 +1337,7 @@ class SigenergyAPI(ComponentBase):
         On each (re)connect cycle:
           1. Refreshes the access token.
           2. Opens a TLS MQTT connection to the Sigenergy broker.
-          3. Subscribes to wildcard topics for change, period and alarm data.
+          3. Subscribes to change/period/alarm topics for each managed system.
           4. Publishes Sigenergy application-level subscription requests.
           5. Dispatches incoming messages to the appropriate handler.
           6. Publishes updated HA entities when data changes.
@@ -1277,12 +1353,6 @@ class SigenergyAPI(ComponentBase):
         reconnect_delay = 5
         attempt = 0
         system_id_list = list(self.systems.keys()) if self.systems else []
-        # Build per-app-key wildcard topics
-        topics = [
-            SIGENERGY_MQTT_TOPIC_CHANGE.format(app_key=self.app_key, system_id="#"),
-            SIGENERGY_MQTT_TOPIC_PERIOD.format(app_key=self.app_key, system_id="#"),
-            SIGENERGY_MQTT_TOPIC_ALARM.format(app_key=self.app_key, system_id="#"),
-        ]
 
         while not self.api_stop:
             attempt += 1
@@ -1297,6 +1367,16 @@ class SigenergyAPI(ComponentBase):
                 # Refresh system list for subscription if not yet known
                 if not system_id_list:
                     system_id_list = list(self.systems.keys())
+
+                # Subscribe only to the systems we manage - the broker topic includes the
+                # system_id, so a "#" wildcard here would also deliver messages for other
+                # systems on the same app_key that we are not managing (e.g. excluded by
+                # system_id_filter).
+                topics = []
+                for sid in system_id_list:
+                    topics.append(SIGENERGY_MQTT_TOPIC_CHANGE.format(app_key=self.app_key, system_id=sid))
+                    topics.append(SIGENERGY_MQTT_TOPIC_PERIOD.format(app_key=self.app_key, system_id=sid))
+                    topics.append(SIGENERGY_MQTT_TOPIC_ALARM.format(app_key=self.app_key, system_id=sid))
 
                 tls_context = self._build_tls_context()
                 async with aiomqtt.Client(
@@ -1341,6 +1421,11 @@ class SigenergyAPI(ComponentBase):
                         entries = payload if isinstance(payload, list) else [payload]
                         for entry in entries:
                             entry_sid = entry.get("systemId", msg_sid)
+                            if entry_sid not in self.systems:
+                                # Defensive belt-and-suspenders: subscriptions are scoped to
+                                # self.systems, but ignore anything outside that list in case
+                                # a stray message arrives (e.g. system list changed mid-connection).
+                                continue
                             self.last_mqtt_update[entry_sid] = time.time()
                             value_dict = entry.get("value", {})
                             self.log("SigenergyAPI: MQTT message on {} for system {}: type={} value={}".format(topic_str, entry_sid, msg_type, value_dict))
@@ -1389,11 +1474,9 @@ class SigenergyAPI(ComponentBase):
         summary = self.daily_summary.get(system_id, {})
 
         battery_soc_pct = _safe_float(flow.get("batterySoc", 0))
-        # battery_power: API positive=charging, negative=discharging (same as Predbat convention, in kW)
         battery_power_kw = _safe_float(flow.get("batteryPower", 0))
         pv_power_kw = _safe_float(flow.get("pvPower", 0))
-        # gridPower: API positive=export, negative=import → invert for Predbat (positive=import)
-        grid_power_kw = -_safe_float(flow.get("gridPower", 0))
+        grid_power_kw = _safe_float(flow.get("gridPower", 0))
         load_power_kw = _safe_float(flow.get("loadPower", 0))
         ev_power_kw = _safe_float(flow.get("evPower", 0))
 
@@ -1512,6 +1595,21 @@ class SigenergyAPI(ComponentBase):
             },
             app="sigenergy",
         )
+
+        # --- Lifetime energy totals (kWh, from /v1/history level=Lifetime) ---
+        history = self.history_totals.get(system_id, {})
+        for node_id, node_slug, friendly in SIGENERGY_HISTORY_NODES:
+            self.dashboard_item(
+                "sensor.{}_sigenergy_{}_{}".format(self.prefix, slug, node_slug),
+                state=round(_safe_float(history.get(node_id, 0)), 3),
+                attributes={
+                    "friendly_name": "Sigenergy {} {}".format(system_name, friendly),
+                    "unit_of_measurement": "kWh",
+                    "device_class": "energy",
+                    "state_class": "total_increasing",
+                },
+                app="sigenergy",
+            )
 
         # --- Battery capacity (kWh) ---
         self.dashboard_item(
@@ -1638,7 +1736,10 @@ class SigenergyAPI(ComponentBase):
         self.set_arg("pv_power", ["sensor.{}_sigenergy_{}_pv_power".format(self.prefix, s) for s in slugs])
         self.set_arg("grid_power", ["sensor.{}_sigenergy_{}_grid_power".format(self.prefix, s) for s in slugs])
         self.set_arg("load_power", ["sensor.{}_sigenergy_{}_load_power".format(self.prefix, s) for s in slugs])
-        self.set_arg("pv_today", ["sensor.{}_sigenergy_{}_pv_today".format(self.prefix, s) for s in slugs])
+        self.set_arg("pv_today", ["sensor.{}_sigenergy_{}_pv_lifetime".format(self.prefix, s) for s in slugs])
+        self.set_arg("load_today", ["sensor.{}_sigenergy_{}_load_lifetime".format(self.prefix, s) for s in slugs])
+        self.set_arg("import_today", ["sensor.{}_sigenergy_{}_grid_import_lifetime".format(self.prefix, s) for s in slugs])
+        self.set_arg("export_today", ["sensor.{}_sigenergy_{}_grid_export_lifetime".format(self.prefix, s) for s in slugs])
         self.set_arg("inverter_time", ["sensor.{}_sigenergy_{}_time".format(self.prefix, s) for s in slugs])
 
         # Control entities
@@ -2058,6 +2159,26 @@ class SigenergyAPI(ComponentBase):
 
         return in_vpp
 
+    def _publish_onboard_status(self):
+        """Publish onboarding-status sensors for all expected system IDs.
+
+        Iterates system_id_filter (or visible systems as a fallback) so that a
+        system still pending approval gets a sensor state even before it appears
+        in the authorised-system list.
+        """
+        for sid in (self.system_id_filter or set(self.systems.keys())):
+            slug = self._system_slug(sid)
+            self.dashboard_item(
+                "sensor.{}_sigenergy_{}_onboard_status".format(self.prefix, slug),
+                state=self.onboard_status.get(str(sid), "not_onboarded"),
+                attributes={
+                    "friendly_name": "Sigenergy {} Onboarding Status".format(sid),
+                    "system_id": sid,
+                    "in_vpp": self.current_mode.get(sid) == SIGENERGY_MODE_VPP,
+                },
+                app="sigenergy",
+            )
+
     # -----------------------------------------------------------------------
     # Main run loop
     # -----------------------------------------------------------------------
@@ -2089,6 +2210,7 @@ class SigenergyAPI(ComponentBase):
             # For each expected system ID not yet visible, attempt onboarding
             missing_ids = self.system_id_filter - set(self.systems.keys()) if self.system_id_filter else set()
             for sid in missing_ids:
+                self.onboard_status.setdefault(str(sid), "not_onboarded")
                 slug = self._system_slug(sid)
                 is_offboard_at_start = self.get_state_wrapper("switch.{}_sigenergy_{}_offboard".format(self.prefix, slug), default="off") == "on"
                 if is_offboard_at_start:
@@ -2097,6 +2219,8 @@ class SigenergyAPI(ComponentBase):
                 self.log("SigenergyAPI: System {} not found in authorised list — attempting onboard".format(sid))
                 result = await self.onboard_systems([sid])
                 if result is not True:
+                    # Publish status before exiting — run() won't reach the normal publish block.
+                    self._publish_onboard_status()
                     return False
                 await self.fetch_system_list()
 
@@ -2136,6 +2260,17 @@ class SigenergyAPI(ComponentBase):
                 slug = self._system_slug(sid)
                 is_offboard = self.get_state_wrapper("switch.{}_sigenergy_{}_offboard".format(self.prefix, slug), default="off") == "on"
                 await self._manage_vpp_registration(sid, is_readonly_vpp, is_offboard)
+                # Derive the user-facing onboarding status for the visible system.
+                if is_offboard:
+                    self.onboard_status[str(sid)] = "offboarded"
+                elif self.current_mode.get(sid) == SIGENERGY_MODE_VPP:
+                    self.onboard_status[str(sid)] = "active"
+                else:
+                    self.onboard_status[str(sid)] = "pending_approval"
+
+        # Publish onboarding status for the SaaS UI.
+        if first or seconds % SIGENERGY_POLL_INTERVAL == 0:
+            self._publish_onboard_status()
 
         # Fetch controls from HA on first run only
         if first:
@@ -2155,8 +2290,9 @@ class SigenergyAPI(ComponentBase):
                 else:
                     if not await self.fetch_inverter_realtime(sid):
                         await self.fetch_energy_flow(sid)
-                # Always poll daily summary — not provided by MQTT
+                # Always poll daily summary and lifetime history totals — not provided by MQTT
                 await self.fetch_daily_summary(sid)
+                await self.fetch_history_totals(sid)
 
         # Publish entities
         if first or seconds % SIGENERGY_POLL_INTERVAL == 0:

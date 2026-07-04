@@ -302,6 +302,23 @@ This significantly reduces planning time while maintaining near-optimal results.
   enable_coarse_fine_levels: true
 ```
 
+### prediction_kernel_enable
+
+**Experimental.** Enables a compiled C++ prediction kernel that replaces Predbat's Python simulation engine for the vast majority of the scenario evaluations run during planning, giving a significant (several-times) speedup with identical results.
+
+The default is `false` while this feature is being tested. It will likely default to `true` in a future release once it has had wider real-world testing.
+
+```yaml
+  prediction_kernel_enable: true
+```
+
+Notes:
+
+- This is an `apps.yaml`-only setting - there is no HA switch for it.
+- Predbat automatically falls back to the Python engine if the compiled kernel isn't available for your system's CPU architecture, so it is always safe to enable.
+- Predbat logs its status once per plan cycle, e.g. `Prediction kernel: enabled and active (...)` or `Prediction kernel: enabled but NOT available (...) - falling back to the Python engine` - check your Predbat log if you enable this and want to confirm it's actually being used.
+- Results are bit-for-bit identical to the Python engine; this option only affects performance, not the plan produced.
+
 ### Web interface
 
 Docker users can change the web port for the Predbat web interface by setting **web_port** to a new port number. The default port of 5052 must always be used for the Predbat app.
@@ -354,6 +371,37 @@ Or if you want Predbat to take the average of the same day for the last two week
 ```
 
 Further details and worked examples of [how days_previous works](#understanding-how-days_previous-works) are covered at the end of this document.
+
+#### days_previous_auto (weighted historical load forecast)
+
+Setting **days_previous_auto** to `True` in `apps.yaml` switches house-load prediction from the fixed
+list/weighting approach above to a weighted-bucket forecast:
+
+```yaml
+  days_previous_auto: True
+```
+
+In this mode Predbat ignores the fixed averaging and instead builds a forward load forecast from **all** of
+the load history within the search window (without padding when fewer days exist). The window is taken from
+`max(days_previous)`, or 7 days when `days_previous` is not set, capped at 30 days. This is more robust when
+there are gaps in your history or when your usage pattern has changed (for example when returning from
+holiday), because it no longer depends on a small number of specific days all being present and
+representative.
+
+Each historical 5-minute sample is combined into a weighted average for the matching time-of-day, where the
+weight of every sample is the product of three factors:
+
+- **Weekday** - 1.0 if the historical day is the same day of the week as today; 0.7 if it is a different day
+  but both are weekdays or both are weekend days; 0.5 if one is a weekday and the other a weekend day.
+- **Holiday** - reduced by 50% if that historical day's [holiday mode](customisation.md#holiday-mode) state
+  does not match today's holiday mode state. The historical holiday state is reconstructed from the recorded
+  history of `holiday_days_left`.
+- **Age** - 0.9 for yesterday, reducing by 0.03 per day down to a floor of 0.1 (reached after about a
+  month), so recent days count for more.
+
+Buckets with no recorded data (zero) are ignored entirely so gaps in the history do not drag the estimate
+down. As with Load ML, this replaces the normal days_previous averaging; if [Load ML](load-ml.md) is enabled
+it takes precedence over `days_previous_auto`.
 
 Do keep in mind that Home Assistant only keeps 10 days of history by default, so if you want to access more than this for Predbat you might need to increase the number of days of history
 kept in HA before it is purged by editing and adding the following to the `/homeassistant/configuration.yaml` configuration file and restarting Home Assistant afterwards:
@@ -431,6 +479,15 @@ you will need to wait until you have a few days of history established (at least
 
 - **ge_cloud_load_today_ignore** - Optional, defaults to false. When set to `true`, Predbat will override the **ge_cloud_automatic** setting and use the **load_today** sensor configured in `apps.yaml`.
 This can be useful if the **load_today** data in the GivEnergy Cloud does not accurately reflect your house load (e.g. multiple inverters that share load) and you want to use a custom load_today sensor.  All other sensors will use either the `apps.yaml` entries or the GivEnergy Cloud entities depending upon **ge_cloud_automatic**.
+
+- **ge_cloud_automatic_shared_ct** - Optional, defaults to false. When set to `true`, Predbat will treat multiple inverters as sharing a single physical CT clamp for grid and load measurement.
+In this mode only the first inverter's grid and load readings are used (the rest are zeroed out), preventing double-counting of grid import/export and house load.
+Use this if you have two or more inverters connected to a single CT clamp and Predbat is not detecting the shared CT automatically (e.g. your inverters have no external dedicated meters, so the cloud API does not report duplicate meter serials).
+See also **ge_cloud_automatic_split_ct** which takes priority over this setting if both are set.
+
+- **ge_cloud_automatic_split_ct** - Optional, defaults to false. When set to `true`, Predbat will treat each inverter as having its own independent CT clamp, summing all inverters' grid and load readings.
+Use this to override automatic shared-CT detection if Predbat incorrectly identifies your system as sharing a CT clamp (e.g. when duplicate meter serials are reported by the cloud API but the inverters actually have separate CT clamps).
+This setting takes priority over **ge_cloud_automatic_shared_ct** if both are set.
 
 ### SolaX Cloud Direct
 

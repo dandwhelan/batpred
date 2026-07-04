@@ -762,7 +762,7 @@ class WebInterface(ComponentBase):
                 if self.base.user_config_item_enabled(item):
                     entity_id = item.get("entity", "")
                     entity_friendly_name = item.get("friendly_name", "")
-                    unit = item.get("unit", "")
+                    unit = self.base.convert_currency_unit(item.get("unit", ""))
                     if unit:
                         entity_friendly_name = f"{entity_friendly_name} ({unit})"
                     if entity_id:
@@ -2659,13 +2659,18 @@ chart.render();
             text += "</table>"
         elif isinstance(value, str):
             pat = re.match(r"^[a-zA-Z_]+\.\S+", value)
+            # Only try entity resolution if the schema type for this arg can be a sensor.
+            # Pure string fields (e.g. gateway_mqtt_host = "mqtt.predbat.com") must not
+            # be treated as HA entity IDs even though they contain a dot.
+            schema_type = APPS_SCHEMA.get(arg, {}).get("type", "")
+            is_pure_string = schema_type and not any(t.startswith("sensor") for t in schema_type.split("|"))
             if "{" in value:
                 text = self.base.resolve_arg(arg, value, indirect=False, quiet=True)
                 if text is None:
                     text = '<span style="background-color:#FFAAAA"> {} </p>'.format(value)
                 else:
                     text = self.render_type(arg, text, parent_path, row_counter)
-            elif pat and (arg != "service"):
+            elif pat and (arg != "service") and not is_pure_string:
                 entity_id = value
                 unit_of_measurement = ""
                 if "$" in entity_id:
@@ -3380,7 +3385,7 @@ chart.render();
         for arg in args:
             value = args[arg]
             raw_value = self.resolve_value_raw(arg, value)
-            if ("_key" in arg) or ("_password" in arg) or ("_secret" in arg) or ("_pem" in arg):
+            if isinstance(arg, str) and (("_key" in arg) or ("_password" in arg) or ("_secret" in arg) or ("_pem" in arg)):
                 value = '<span title = "{}"> (hidden)</span>'.format(value)
             arg_errors = self.base.arg_errors.get(arg, "")
 
@@ -3583,7 +3588,7 @@ chart.render();
                 itemtype = item.get("type", "")
                 default = item.get("default", "")
                 icon = self.icon2html(item.get("icon", ""))
-                unit = item.get("unit", "")
+                unit = self.base.convert_currency_unit(item.get("unit", ""))
                 text += "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>".format(icon, friendly, entity, itemtype)
                 if value == default:
                     text += '<td class="cfg_default">{} {}</td><td>{} {}</td>\n'.format(value, unit, default, unit)
@@ -3634,7 +3639,7 @@ chart.render();
                 itemtype = item.get("type", "")
                 default = item.get("default", "")
                 useid = entity.replace(".", "__")
-                unit = item.get("unit", "")
+                unit = self.base.convert_currency_unit(item.get("unit", ""))
                 icon = self.icon2html(item.get("icon", ""))
 
                 if itemtype in ["input_number", "number"] and item.get("step", 1) == 1:
@@ -4086,9 +4091,16 @@ chart.render();
         if not self.base.dashboard_index:
             return '<span class="mdi mdi-battery-sync"></span>'
 
-        percent = calc_percent_limit(self.base.soc_kw, self.base.soc_max)
+        soc_now = self.get_state_wrapper(self.prefix + ".soc_kw", attribute="soc_now", default=None)
+        soc_max = self.get_state_wrapper(self.prefix + ".soc_kw", attribute="soc_max", default=None)
+        if soc_now is None or not soc_max:
+            return '<span class="mdi mdi-battery-sync"></span>'
+
+        percent = calc_percent_limit(soc_now, soc_max)
         percent_rounded_to_nearest_10 = round(float(percent) / 10) * 10
-        if self.base.isCharging:
+        is_charging = self.get_state_wrapper("binary_sensor." + self.prefix + "_charging", default="off") == "on"
+        is_exporting = self.get_state_wrapper("binary_sensor." + self.prefix + "_exporting", default="off") == "on"
+        if is_charging:
             if percent_rounded_to_nearest_10 == 0:
                 icon_text = "battery-charging-outline"
             else:
@@ -4104,7 +4116,7 @@ chart.render();
         text = '<span class="mdi mdi-{}"></span>'.format(icon_text)
         text += str(dp2(percent)) + "%"
 
-        if self.base.isExporting:
+        if is_exporting:
             text += '<span class="mdi mdi-transmission-tower-export"></span>'
         return text
 
