@@ -36,7 +36,7 @@ import pytz
 import requests
 import asyncio
 
-THIS_VERSION = "v8.40.10"
+THIS_VERSION = "v712.01"
 
 from download import predbat_update_move, predbat_update_download, check_install, resolve_predbat_repository, DEFAULT_PREDBAT_REPOSITORY
 from const import MINUTE_WATT
@@ -96,10 +96,12 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
     """
 
     def get_predbat_repository(self):
-        """Return the GitHub repository used for main-branch self-update operations.
+        """Return the GitHub repository used for self-update operations.
 
-        This override is applied to ``download_predbat_version('main')`` only.
-        Release discovery and tagged-version updates remain pinned to
+        Applies to release discovery, tagged-version updates and
+        ``download_predbat_version('main')``. Resolution order is the
+        ``predbat_repository`` apps.yaml setting, then the
+        ``PREDBAT_REPOSITORY`` environment variable, then
         ``DEFAULT_PREDBAT_REPOSITORY``.
         """
         repository = self.get_arg("predbat_repository", default="", indirect=False)
@@ -146,7 +148,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         """
         global PREDBAT_UPDATE_OPTIONS
         auto_update = self.get_arg("auto_update")
-        repository = DEFAULT_PREDBAT_REPOSITORY
+        repository = self.get_predbat_repository()
         url = "https://api.github.com/repos/{}/releases".format(repository)
         data = self.download_predbat_releases_url(url)
         self.releases = {}
@@ -1167,11 +1169,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
             self.log("Warn: Predbat update requested for the same version as we are running ({}), no update required".format(version))
             return
 
-        selected_tag = version.split(" ")[0] if version else ""
-        if selected_tag == "main":
-            repository = self.get_predbat_repository()
-        else:
-            repository = DEFAULT_PREDBAT_REPOSITORY
+        repository = self.get_predbat_repository()
 
         self.log("Update Predbat to version {} from repository {}".format(version, repository))
         self.expose_config("version", True, force=True, in_progress=True)
