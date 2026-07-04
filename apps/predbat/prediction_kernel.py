@@ -30,8 +30,8 @@ from const import PREDICT_STEP
 from utils import remove_intersecting_windows, get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot
 
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
-KERNEL_ABI_VERSION = 2
-KERNEL_PARITY_REVISION = 2
+KERNEL_ABI_VERSION = 102
+KERNEL_PARITY_REVISION = 102
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = 4
@@ -99,6 +99,9 @@ class PkContext(ctypes.Structure):
         ("iboost_min_soc", ctypes.c_double),
         ("iboost_rate_threshold", ctypes.c_double),
         ("iboost_rate_threshold_export", ctypes.c_double),
+        ("fit_generation_rate", ctypes.c_double),
+        ("fit_deemed_export_rate", ctypes.c_double),
+        ("fit_deemed_export_percentage", ctypes.c_double),
         ("n_steps", ctypes.c_int32),
         ("minutes_now", ctypes.c_int32),
         ("forecast_minutes", ctypes.c_int32),
@@ -393,6 +396,9 @@ def create_kernel_context(pred):
         ctx.iboost_min_soc = pred.iboost_min_soc
         ctx.iboost_rate_threshold = pred.iboost_rate_threshold
         ctx.iboost_rate_threshold_export = pred.iboost_rate_threshold_export
+        ctx.fit_generation_rate = float(pred.metric_fit_generation_rate)
+        ctx.fit_deemed_export_rate = float(pred.metric_fit_deemed_export_rate)
+        ctx.fit_deemed_export_percentage = float(pred.metric_fit_deemed_export_percentage)
 
         ctx.n_steps = n_steps
         ctx.minutes_now = minutes_now

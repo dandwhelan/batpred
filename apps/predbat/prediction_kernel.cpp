@@ -26,8 +26,8 @@
 #include <mutex>
 #include <vector>
 
-#define PK_ABI_VERSION 2
-#define PK_PARITY_REVISION 2
+#define PK_ABI_VERSION 102
+#define PK_PARITY_REVISION 102
 #define PK_MAX_CARS 4
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 
@@ -113,6 +113,9 @@ struct PkContext {
     double iboost_min_soc;
     double iboost_rate_threshold;
     double iboost_rate_threshold_export;
+    double fit_generation_rate;          // FIT generation tariff p/kWh (0 = disabled)
+    double fit_deemed_export_rate;       // FIT deemed export tariff p/kWh
+    double fit_deemed_export_percentage; // FIT deemed export percentage of generation
 
     int32_t n_steps;
     int32_t minutes_now;
@@ -366,6 +369,7 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
     double metric_keep = 0;
     double metric = c->cost_today_sofar;
     double carbon_g = c->carbon_today_sofar;
+    double clipped_today = 0;
     double iboost_today_kwh = c->iboost_today;
     bool four_hour_rule = true;
     bool record = true;
@@ -425,7 +429,12 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
         if (c->io_flag[k] && pv10 && minute > 30) {
             import_rate = c->rate_max; // Assume in worst case that slot goes away and max rate applies
         }
-        const double export_rate = c->rate_export[k];
+        double export_rate = c->rate_export[k];
+
+        // FIT deemed export: actual exports earn nothing extra since payment is on a fixed % of generation - prediction.py:610-613
+        if (c->fit_deemed_export_rate > 0 && c->fit_deemed_export_percentage > 0) {
+            export_rate = 0;
+        }
 
         // Alert - prediction.py:583
         const double alert_keep = c->alert_keep[k];
@@ -472,8 +481,13 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
         double pv_now = pv_step[k];
         double load_yesterday = load_step[k];
 
+        // Snapshot the running clipped total so the FIT calculation below can charge generation tariff
+        // only on PV the inverter actually delivers this step - prediction.py:694-695
+        const double clipped_before_step = clipped_today;
+
         // Clip PV for AC-coupled inverters with a PV AC limit - prediction.py:664-668
         if (!inverter_hybrid && pv_ac_limit > 0 && pv_now > pv_ac_limit) {
+            clipped_today += pv_now - pv_ac_limit;
             pv_now = pv_ac_limit;
         }
 
@@ -813,7 +827,10 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
             total_inverted = get_total_inverted(battery_draw, pv_dc, pv_ac, inverter_loss, inverter_hybrid);
             if (total_inverted > inverter_limit) {
                 const double over_limit = total_inverted - inverter_limit;
+                const double pv_ac_before = pv_ac;
                 pv_ac = std::max(pv_ac - over_limit * inverter_loss, 0.0);
+                const double pv_ac_no_loss = std::max(pv_ac_before - over_limit, 0.0);
+                clipped_today += pv_ac_before - pv_ac_no_loss;
             }
         } else {
             const double total_inverted = get_total_inverted(battery_draw, pv_dc, pv_ac, inverter_loss, inverter_hybrid);
@@ -831,7 +848,20 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
         double diff = get_diff(battery_draw, pv_dc, pv_ac, load_yesterday, inverter_loss, inverter_loss_recp);
         if (diff < 0 && std::fabs(diff) > export_limit) {
             const double over_limit = std::fabs(diff) - export_limit;
+            // Only solar PV is truly "clipped" (lost energy); excess battery discharge just gets limited
+            const double pv_ac_before = pv_ac;
             pv_ac = std::max(pv_ac - over_limit, 0.0);
+            clipped_today += pv_ac_before - pv_ac;
+        }
+
+        // FIT income: pay generation tariff on PV the inverter actually delivered plus deemed-export tariff
+        // on the configured percentage; subtracting from metric makes the optimiser treat clipped PV as
+        // lost FIT income - prediction.py:1096-1105
+        if (c->fit_generation_rate > 0 || (c->fit_deemed_export_rate > 0 && c->fit_deemed_export_percentage > 0)) {
+            const double pv_delivered = std::max(pv_now - (clipped_today - clipped_before_step), 0.0);
+            const double fit_gen = pv_delivered * c->fit_generation_rate;
+            const double fit_deemed = pv_delivered * (c->fit_deemed_export_percentage / 100.0) * c->fit_deemed_export_rate;
+            metric -= fit_gen + fit_deemed;
         }
 
         // Adjust battery soc - prediction.py:1060-1064

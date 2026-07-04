@@ -168,3 +168,9 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 | `plan.py` | Extracts FIT income from prediction results; publishes `fit_income` / `fit_income_best` sensors |
 | `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
 | `tests/test_infra.py` | FIT defaults added to test config and `reset_inverter()` |
+| `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 102) |
+| `tests/test_kernel_parity.py` | FIT deterministic edge cases and FIT rate randomisation in the parity sweep |
+
+### C++ Kernel Note (fork)
+
+This fork's kernel binaries are built with ABI/parity revision **102** (upstream uses small integers like 2). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.

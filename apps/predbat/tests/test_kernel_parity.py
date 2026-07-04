@@ -123,6 +123,9 @@ SCENARIO_STATE_ATTRS = [
     "iboost_today",
     "rate_gas",
     "iboost_plan",
+    "metric_fit_generation_rate",
+    "metric_fit_deemed_export_rate",
+    "metric_fit_deemed_export_percentage",
     "end_record",
 ]
 
@@ -250,6 +253,11 @@ def apply_random_scenario(my_predbat, rng):
         start = my_predbat.minutes_now + rng.randrange(0, my_predbat.forecast_minutes - 60, 5)
         for minute in range(start, start + 120):
             my_predbat.all_active_keep[minute] = rng.choice([20, 50, 100])
+
+    # FIT generation / deemed export tariffs
+    my_predbat.metric_fit_generation_rate = rng.choice([0.0, 0.0, round(rng.uniform(1, 60), 2)])
+    my_predbat.metric_fit_deemed_export_rate = rng.choice([0.0, 0.0, round(rng.uniform(1, 30), 2)])
+    my_predbat.metric_fit_deemed_export_percentage = rng.choice([0.0, 50.0, round(rng.uniform(10, 100), 1)])
 
     # Carbon intensity
     my_predbat.carbon_enable = rng.random() < 0.3
@@ -409,6 +417,21 @@ def run_edge_case_tests(my_predbat):
         ("misaligned_window", {"soc_kw": 50.0}, [100.0], [{"start": minutes_now + 3, "end": minutes_now + 63, "average": 10}], [], [], 0, 0.5, forecast_minutes),
         ("no_discharge_during_charge", {"soc_kw": 50.0, "set_discharge_during_charge": False}, [50.0], half_window, [], [], 0, 1.0, forecast_minutes),
         ("cold_battery", {"battery_temperature": 2, "soc_kw": 20.0}, [100.0], half_window, [], [], 1.0, 1.0, forecast_minutes),
+        ("fit_generation", {"metric_fit_generation_rate": 25.0, "soc_kw": 20.0}, [], [], [], [], 2.0, 0.5, forecast_minutes),
+        ("fit_deemed_export", {"metric_fit_generation_rate": 25.0, "metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0}, [], [], half_window, [0.0], 2.0, 0.5, forecast_minutes),
+        ("fit_clipped_inverter", {"metric_fit_generation_rate": 25.0, "metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0, "inverter_limit": 0.5 / 60.0}, [], [], [], [], 3.0, 0.2, forecast_minutes),
+        ("fit_clipped_ac_limit", {"metric_fit_generation_rate": 25.0, "pv_ac_limit": 1 / 60.0}, [], [], [], [], 3.0, 0.2, forecast_minutes),
+        (
+            "fit_clipped_export_limit",
+            {"metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0, "export_limit": 0.5 / 60.0, "battery_rate_max_export": 2 / 60.0},
+            [],
+            [],
+            half_window,
+            [0.0],
+            2.0,
+            0.2,
+            forecast_minutes,
+        ),
         ("carbon", {"carbon_enable": True, "carbon_intensity": {minute: 100 + (minute % 60) for minute in range(0, forecast_minutes, 5)}, "carbon_today_sofar": 500.0, "soc_kw": 20.0}, [], [], [], [], 1.0, 1.0, forecast_minutes),
         (
             "car_charging",

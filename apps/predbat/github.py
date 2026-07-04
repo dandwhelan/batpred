@@ -11,7 +11,7 @@
 from datetime import datetime, timedelta, timezone
 import requests
 from ha import run_async
-from download import DEFAULT_PREDBAT_REPOSITORY, resolve_predbat_repository
+from download import resolve_predbat_repository
 from utils import dp1
 from predbat import THIS_VERSION
 
@@ -20,10 +20,12 @@ class GitHub:
     """GitHub Mixin for Predbat self-update and release discovery."""
 
     def get_predbat_repository(self):
-        """Return the GitHub repository used for main-branch self-update operations.
+        """Return the GitHub repository used for self-update operations.
 
-        This override is applied to ``download_predbat_version('main')`` only.
-        Release discovery and tagged-version updates remain pinned to
+        Applies to release discovery, tagged-version updates and
+        ``download_predbat_version('main')``. Resolution order is the
+        ``predbat_repository`` apps.yaml setting, then the
+        ``PREDBAT_REPOSITORY`` environment variable, then
         ``DEFAULT_PREDBAT_REPOSITORY``.
         """
         repository = self.get_arg("predbat_repository", default="", indirect=False)
