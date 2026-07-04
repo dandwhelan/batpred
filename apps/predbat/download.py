@@ -20,7 +20,7 @@ import requests
 import yaml
 import hashlib
 
-DEFAULT_PREDBAT_REPOSITORY = "springfall2008/batpred"
+DEFAULT_PREDBAT_REPOSITORY = "dandwhelan/batpred"
 
 
 def resolve_predbat_repository(repository=None):

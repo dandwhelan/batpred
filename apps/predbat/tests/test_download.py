@@ -77,7 +77,7 @@ def test_download(my_predbat):
         ("update_download_skip_matching", _test_predbat_update_download_skip_matching_sha, "Update download skips files with matching SHA"),
         ("update_download_skip_mixed", _test_predbat_update_download_skip_mixed, "Update download skips some files, downloads others"),
         ("predbat_main_repo_override", _test_predbat_download_main_uses_configured_repository, "Predbat main update uses configured repository override"),
-        ("predbat_tag_repo_upstream", _test_predbat_download_tag_uses_default_repository, "Predbat tagged update always uses upstream repository"),
+        ("predbat_tag_repo_override", _test_predbat_download_tag_uses_configured_repository, "Predbat tagged update uses configured repository override"),
         ("predbat_startup_pins_upstream", _test_predbat_startup_self_check_uses_default_repository, "Predbat startup self-check pins repository to upstream"),
     ]
 
@@ -802,8 +802,8 @@ def _test_predbat_download_main_uses_configured_repository(my_predbat):
     return 0
 
 
-def _test_predbat_download_tag_uses_default_repository(my_predbat):
-    """Test download_predbat_version('<tag>') ignores override and uses upstream default."""
+def _test_predbat_download_tag_uses_configured_repository(my_predbat):
+    """Test download_predbat_version('<tag>') uses get_predbat_repository() value."""
     predbat_module = _import_predbat_module_for_tests()
 
     class DummyPredBat:
@@ -830,7 +830,7 @@ def _test_predbat_download_tag_uses_default_repository(my_predbat):
     with patch("predbat.predbat_update_download", return_value=None) as mock_download:
         predbat_module.PredBat.download_predbat_version(dummy, "v8.30.8")
         assert mock_download.called
-        assert mock_download.call_args.kwargs.get("repository") == DEFAULT_PREDBAT_REPOSITORY
+        assert mock_download.call_args.kwargs.get("repository") == "example/forked-batpred"
     return 0
 
 
