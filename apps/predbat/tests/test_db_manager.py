@@ -336,6 +336,22 @@ def _test_db_manager_entities_and_history(my_predbat=None):
                     except ValueError as e:
                         print(f"Warning: Timestamp format issue: {timestamp_str} - {e}")
 
+            # Test 6: History for an entity whose only state change is older than
+            # the window should return that state clamped to the window start
+            # (mirrors the HA history API initial-state injection)
+            stale_entity = "input_number.stale_slider"
+            stale_timestamp = now - timedelta(days=60)
+            await loop.run_in_executor(None, db_mgr.set_state_db, stale_entity, "18.0", {}, stale_timestamp)
+            stale_history = await loop.run_in_executor(None, db_mgr.get_history_db, stale_entity, now, 7)
+            assert stale_history is not None, "get_history_db returned None for stale entity"
+            stale_data = stale_history[0] if isinstance(stale_history[0], list) else stale_history
+            assert len(stale_data) == 1, f"Expected 1 injected entry for stale entity, got {len(stale_data)}"
+            assert stale_data[0]["state"] == "18.0", f"Injected state wrong: {stale_data[0]}"
+            injected_ts = stale_data[0].get("last_updated", "").rstrip("Z")
+            expected_start = now - timedelta(days=7)
+            assert datetime.strptime(injected_ts, TIME_FORMAT_DB) == expected_start.replace(tzinfo=None), f"Injected timestamp {injected_ts} not clamped to window start {expected_start}"
+            print("✓ Stale entity state injected at window start")
+
             # Stop the component and verify thread exits
             await db_mgr.stop()
 
