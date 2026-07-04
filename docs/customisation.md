@@ -93,6 +93,9 @@ Note: Combining export slots may prevent optimal forced export. Combining charge
 The number of CPU threads you use can change your performance, you can set **threads** in `apps.yaml` to 0 to disable threading if you don't have multiple CPUs available,
 or set it to 'auto' (the default) to use one thread per CPU. It is recommended you don't set this to an odd number of threads.
 
+Advanced: Predbat has an experimental compiled C++ prediction kernel that can give a significant speedup to planning with identical results. It is Off by default while it undergoes wider testing (it's expected to become the default in a future release).
+Set `prediction_kernel_enable: true` in `apps.yaml` to try it - see [prediction_kernel_enable](apps-yaml.md#prediction_kernel_enable) for details, including how to confirm it's actually active from the Predbat log.
+
 ## Battery loss options
 
 **input_number.predbat_battery_loss** is an assumed percentage figure for energy lost when charging the battery, the default 0.03 is 3%.
@@ -264,6 +267,10 @@ By default with this option turned On, if there are multiple charge slots of the
 When Off export slots are sorted just by decreasing export price and then time (so high value exports are planned first).
 
 By default with this option On the latest export slots of the same value will be picked, this is useful for fixed-price export tariffs where you want to export as late in the day as you can, thus preserving the battery for as long as possible.
+
+**switch.predbat_export_more_solar** When turned On, late in the planning stage Predbat will try enabling Freeze Export on every otherwise Idle slot that has predicted solar generation. With Freeze Export the battery is not charged from the surplus solar, so that solar is exported to the grid instead.
+
+This alternative plan is only kept if it does not increase the overall plan metric by more than **input_number.predbat_export_more_solar_threshold** (_expert mode_, default 1p), otherwise the original plan is restored. This lets you favour exporting solar over storing it when doing so is roughly cost-neutral. The feature relies on **switch.predbat_set_export_freeze** being enabled (and your inverter supporting export/discharge freeze); it is an optimiser-only setting and uses the existing Freeze Export execution behaviour.
 
 ## Battery margins and metrics options
 

@@ -19,6 +19,8 @@ appkey
 Apprent
 appsyaml
 argname
+armhf
+armv
 ASHP
 asyncio
 autodocstring
@@ -33,6 +35,7 @@ backprop
 Backpropagate
 backpropagation
 backsteps
+backtest
 Basepath
 Batpred
 battemperature
@@ -116,6 +119,7 @@ energydataservice
 energythroughput
 epod
 euids
+EVDC
 evergen
 evse
 exog
@@ -125,6 +129,7 @@ fdsoc
 feedin
 fentry
 figsize
+finaliser
 Fingerbot
 firstparty
 fline
@@ -147,6 +152,7 @@ getall
 Ginlong
 GivEnergy
 givtcp
+gnueabihf
 gridconsumption
 gridconsumptionpower
 growatt
@@ -165,6 +171,7 @@ heatingactive
 heatingtemp
 heatpump
 heatsink
+holdout
 homeassistant
 houseb
 htmlcov
@@ -202,6 +209,7 @@ kwhb
 labelcolor
 labelnames
 larr
+libc
 linebreak
 linestyle
 loadml
@@ -236,6 +244,7 @@ minsocongrid
 minuteb
 Mixergy
 mkdocs
+mlugg
 Modbus
 mogons
 monokai
@@ -260,6 +269,7 @@ nordpool
 nosc
 nrgheat
 numpy
+OCPP
 octo
 octoplus
 octopoints
@@ -275,27 +285,29 @@ openweathermap
 overfitting
 overvoltage
 ownerapi
+pbat
 pbgw
 pdata
 pdetails
 perc
 percnt
-PeterHaban
+peterhaban
 photovoltaics
 pitem
 pkwh
-Plenticore
+plenticore
 postdata
 powercontrolmode
 powerline
 Powerwall
 ppdetails
 ppkwh
-Pred
-Predai
-Predbat
+pred
+predai
+predbat
 predbatt
-Predheat
+predheat
+prevs
 psum
 pvbat
 pvenergytotal
@@ -420,6 +432,7 @@ visibilitychange
 Wallbox
 weblink
 welink
+Werror
 workmode
 writeonly
 wrongsha
