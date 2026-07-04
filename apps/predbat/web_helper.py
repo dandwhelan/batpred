@@ -2373,6 +2373,56 @@ function toggleAllSections() {
     saveSectionState();
 }
 
+function applyEntFilter() {
+    var q = (window.__entQuery || '').trim().toLowerCase();
+    var app = window.__entApp || '';
+    var rows = document.querySelectorAll('.ent-table tbody tr.ent-row');
+    rows.forEach(function(row) {
+        var matchApp = !app || row.getAttribute('data-app') === app;
+        var matchText = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
+        var show = matchApp && matchText;
+        row.style.display = show ? '' : 'none';
+        var detail = row.nextElementSibling;
+        if (detail && detail.classList.contains('ent-detail')) {
+            detail.style.display = 'none';
+            row.classList.remove('ent-open');
+            var caret = row.querySelector('.ent-caret');
+            if (caret) caret.style.transform = '';
+        }
+    });
+}
+
+function filterEntities(q) {
+    window.__entQuery = q;
+    applyEntFilter();
+}
+
+function filterByApp(btn, app) {
+    window.__entApp = app;
+    document.querySelectorAll('.ent-chip').forEach(function(c) { c.classList.remove('active'); });
+    if (btn) btn.classList.add('active');
+    applyEntFilter();
+}
+
+function toggleEntRow(row) {
+    var detail = row.nextElementSibling;
+    if (!detail || !detail.classList.contains('ent-detail')) return;
+    var open = detail.style.display !== 'none';
+    detail.style.display = open ? 'none' : '';
+    row.classList.toggle('ent-open', !open);
+    row.setAttribute('aria-expanded', open ? 'false' : 'true');
+    var caret = row.querySelector('.ent-caret');
+    if (caret) caret.style.transform = open ? '' : 'rotate(90deg)';
+}
+
+function entRowKey(event, row) {
+    // Enter or Space activates the disclosure for keyboard users
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault();
+        toggleEntRow(row);
+    }
+}
+
 // Restore state when page loads
 document.addEventListener('DOMContentLoaded', restoreSectionState);
 </script>
@@ -2473,6 +2523,199 @@ body.dark-mode .dashboard-section-header:hover {
 
 body.dark-mode .expand-icon {
     color: #4CAF50;
+}
+
+/* ---- Headline KPI cards ---- */
+.dash-kpi-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 4px 0 22px 0;
+}
+.kpi-card {
+    flex: 1 1 150px;
+    min-width: 140px;
+    background: #ffffff;
+    border: 1px solid #e3e6e3;
+    border-left: 4px solid #2E7D32;
+    border-radius: 8px;
+    padding: 12px 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.kpi-value {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: #1f2937;
+    word-break: break-word;
+}
+.kpi-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #6b7280;
+    margin-top: 4px;
+}
+.kpi-sub {
+    font-size: 13px;
+    color: #374151;
+    margin-top: 2px;
+}
+.kpi-brand   { border-left-color: #2E7D32; }
+.kpi-info    { border-left-color: #1565C0; }
+.kpi-ok      { border-left-color: #2E7D32; }
+.kpi-neutral { border-left-color: #6b7280; }
+.kpi-charge  { border-left-color: #1565C0; }
+.kpi-export  { border-left-color: #F57C00; }
+
+.dash-status-col { max-width: 520px; }
+
+/* Demoted debug/maintenance section */
+.dash-debug { margin: 18px 0; max-width: 520px; }
+.dash-debug > summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #6b7280;
+    padding: 6px 0;
+}
+
+/* Wide entity tables scroll within their own box instead of the whole page */
+.entity-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Dark mode for KPI cards */
+body.dark-mode .kpi-card {
+    background: #1e1e1e;
+    border-color: #333;
+}
+body.dark-mode .kpi-value { color: #f3f4f6; }
+body.dark-mode .kpi-label { color: #9ca3af; }
+body.dark-mode .kpi-sub { color: #d1d5db; }
+body.dark-mode .dash-debug > summary { color: #9ca3af; }
+
+/* Card-based two-column dash layout (redesign) */
+.dash-grid {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 16px;
+    align-items: start;
+    margin-bottom: 16px;
+}
+.dash-card {
+    background: var(--pb-surface, #fff);
+    border: 1px solid var(--pb-line, #e3e6e3);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(20,40,30,.06);
+    padding: 16px 18px;
+}
+.dash-card .card-title {
+    display: block;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--pb-muted, #5f6f66);
+    font-weight: 600;
+    margin: 0 0 12px;
+}
+/* Clean status rows inside the Status card (scoped so it doesn't affect other cards) */
+.dash-status-col table {
+    border: none;
+    border-radius: 0;
+    border-spacing: 0;
+    width: 100%;
+}
+.dash-status-col td {
+    border-bottom: 1px solid var(--pb-line, #eee);
+    padding: 8px 4px;
+    vertical-align: middle;
+}
+.dash-status-col tr:last-child td { border-bottom: none; }
+.dash-status-col td:first-child { color: var(--pb-muted, #5f6f66); width: 42%; }
+
+/* Entities card (clean Name / Entity / State table with filter chips) */
+.entities-card { margin-top: 16px; }
+.card-count { text-transform: none; letter-spacing: 0; color: var(--pb-muted, #888); font-weight: 500; margin-left: 6px; font-size: 13px; }
+.ent-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.ent-search-box { flex: 1 1 240px; min-width: 200px; }
+.ent-search-box input {
+    width: 100%; padding: 9px 12px; font: inherit;
+    border: 1px solid var(--pb-line, #ddd); border-radius: 9px;
+    background: var(--pb-surface, #fff); color: var(--pb-text, #333);
+}
+.ent-search-box input:focus-visible { outline: 2px solid #1565C0; outline-offset: 2px; }
+.ent-chip {
+    font: inherit; font-size: 13px; font-weight: 600; padding: 6px 12px;
+    border: 1px solid var(--pb-line, #ddd); border-radius: 999px;
+    background: var(--pb-surface, #fff); color: var(--pb-muted, #5f6f66); cursor: pointer;
+}
+.ent-chip:hover { border-color: var(--pb-brand, #2E7D32); color: var(--pb-text, #333); }
+.ent-chip.active { background: var(--pb-brand, #2E7D32); color: #fff; border-color: var(--pb-brand, #2E7D32); }
+.ent-table { width: 100%; border: none; border-radius: 0; border-spacing: 0; font-size: 14px; }
+.ent-table th {
+    background: transparent; color: var(--pb-muted, #5f6f66); text-transform: uppercase;
+    font-size: 11px; letter-spacing: .04em; font-weight: 600; text-align: left;
+    padding: 8px 10px; border-bottom: 1px solid var(--pb-line, #e3e6e3);
+}
+.ent-table th.st-col, .ent-table td.st-col { text-align: right; }
+.ent-table td { padding: 9px 10px; border-bottom: 1px solid var(--pb-line, #eee); vertical-align: top; }
+.ent-table .st-col { font-weight: 600; white-space: nowrap; }
+.ent-table .eid { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--pb-muted, #888); }
+.ent-table .eid a { color: inherit; text-decoration: none; }
+.ent-table .eid a:hover { text-decoration: underline; }
+.ent-row.ent-expandable { cursor: pointer; }
+.ent-row.ent-expandable:hover { background: var(--pb-line, #f5f7f5); }
+.ent-caret { display: inline-block; color: var(--pb-muted, #888); font-size: 11px; transition: transform .15s; margin-right: 5px; }
+.ent-detail > td { background: var(--surface-2, #fafafa); padding: 6px 10px 12px; }
+body.dark-mode .ent-row.ent-expandable:hover { background: #262d28; }
+body.dark-mode .ent-detail > td { background: #1a201c; }
+
+.dash-refresh-btn {
+    background: #1565C0; color: #fff; border: none; padding: 7px 14px;
+    border-radius: 8px; cursor: pointer; font-weight: 600; font: inherit;
+}
+.dash-refresh-btn:hover { background: #0d4f97; }
+body.dark-mode .dash-refresh-btn { background: #1565C0 !important; color: #fff !important; }
+body.dark-mode .dash-refresh-btn:hover { background: #0d4f97 !important; }
+.rate-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.chip { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 8px; }
+.chip-imp { background: #fae9e7; color: #c0362c; }
+.chip-exp { background: #fbf0df; color: #b35e00; }
+.plan-text { line-height: 1.6; }
+.plan-text ul { margin: 0; padding-left: 18px; }
+.plan-text li { margin: 4px 0; }
+body.dark-mode .chip-imp { background: #311512; color: #ef9a93; }
+body.dark-mode .chip-exp { background: #33240c; color: #f0b860; }
+@media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } }
+
+/* Next-action banner */
+.dash-banner {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+    margin: 4px 0 18px; padding: 12px 16px; border-radius: 10px;
+    background: var(--pb-surface, #fff); border: 1px solid var(--pb-line, #e3e6e3);
+    border-left: 4px solid var(--pb-brand, #2E7D32); box-shadow: 0 1px 3px rgba(20,40,30,.06);
+}
+.dash-banner .b-lead { font-weight: 700; }
+.dash-banner .b-seg { color: var(--pb-muted, #5f6f66); font-size: 14px; }
+.dash-banner .b-seg b { color: var(--pb-text, #1f2933); font-weight: 600; }
+body.dark-mode .dash-banner .b-seg b { color: #e0e0e0; }
+
+/* Entity search */
+.entity-search { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 14px; }
+.entity-search input {
+    flex: 1; min-width: 220px; max-width: 480px; padding: 9px 12px; font: inherit;
+    border: 1px solid var(--pb-line, #ddd); border-radius: 9px;
+    background: var(--pb-surface, #fff); color: var(--pb-text, #333);
+}
+.entity-search input:focus-visible { outline: 2px solid #1565C0; outline-offset: 2px; }
+
+/* Accessible toggle: visible On/Off label */
+.switch-state { vertical-align: middle; margin-left: 4px; font-size: 13px; color: var(--pb-muted, #5f6f66); }
+.toggle-switch:focus-visible { outline: 2px solid #1565C0; outline-offset: 2px; }
+
+/* Responsive dashboard tweaks */
+@media (max-width: 768px) {
+    .kpi-value { font-size: 22px; }
+    .dashboard-section-content table { font-size: 0.9em; }
+    .dash-status-col, .dash-debug { max-width: 100%; }
 }
 </style>
 """
@@ -7167,7 +7410,7 @@ def get_header_html(title, calculating, default_page, arg_errors, THIS_VERSION, 
     Return the HTML header for a page
     """
 
-    text = '<!doctype html><html><head><meta charset="utf-8"><title>{}</title>'.format(title)
+    text = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{}</title>'.format(title)
     text += '<link rel="icon" type="image/svg+xml" href="https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo.svg">'
     text += '<link rel="icon" type="image/png" href="https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_light.png">'
 
@@ -7186,6 +7429,21 @@ if (localStorage.getItem('darkMode') === 'true') {
 <link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
 <style>
+    :root {
+        --pb-brand: #2E7D32;
+        --pb-brand-strong: #1f6b27;
+        --pb-line: #dde3df;
+        --pb-text: #1f2933;
+        --pb-muted: #5f6f66;
+        --pb-surface: #ffffff;
+    }
+    html.dark-mode, body.dark-mode {
+        --pb-brand: #4CAF50;
+        --pb-line: #333333;
+        --pb-text: #e0e0e0;
+        --pb-muted: #9fb0a6;
+        --pb-surface: #1e1e1e;
+    }
     body, html {
         margin: 0;
         padding: 0;
@@ -7207,18 +7465,16 @@ if (localStorage.getItem('darkMode') === 'true') {
         color: #e0e0e0;
     }
     h1 {
-        color: #4CAF50;
+        color: var(--pb-brand);
     }
     h2 {
-        color: #4CAF50;
+        color: var(--pb-brand);
         display: inline
-    }
-    p {
-        white-space: nowrap;
     }
     table {
         padding: 1px;
-        border: 2px solid green;
+        border: 1px solid var(--pb-line);
+        border-radius: 8px;
         border-spacing: 2px;
         background-clip: padding-box;
     }
@@ -7229,7 +7485,7 @@ if (localStorage.getItem('darkMode') === 'true') {
         vertical-align: top;
     }
     th {
-        background-color: #4CAF50;
+        background-color: var(--pb-brand);
         color: white;
     }
     .default, .cfg_default {
@@ -7572,6 +7828,11 @@ function toggleSwitch(element, fieldName) {
     const isActive = element.classList.contains('active');
     const newValue = isActive ? 'on' : 'off';
 
+    // Keep the accessible state and the visible On/Off label in sync
+    element.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    const stateLabel = element.parentElement ? element.parentElement.querySelector('.switch-state') : null;
+    if (stateLabel) { stateLabel.textContent = isActive ? 'On' : 'Off'; }
+
     // Find the associated form and hidden input
     const form = element.closest('form');
     if (form) {
@@ -7628,7 +7889,7 @@ def get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_s
     # Check if there are configuration errors
     config_warning = ""
     if arg_errors:
-        config_warning = '<span style="color: #ffcc00; margin-left: 5px;">&#9888;</span>'
+        config_warning = '<span class="nav-warn" title="apps.yaml has configuration errors" aria-label="configuration errors">&#9888;</span>'
 
     # Define status icon based on calculating state
     status_icon = ""
@@ -7707,6 +7968,40 @@ background-color: #4CAF50;
 color: white;
 }
 
+.nav-more { position: relative; flex-shrink: 0; }
+.nav-more > summary {
+list-style: none;
+cursor: pointer;
+color: #333;
+padding: 14px 16px;
+font-size: 16px;
+display: flex;
+align-items: center;
+white-space: nowrap;
+}
+.nav-more > summary::-webkit-details-marker { display: none; }
+.nav-more > summary:hover { background-color: #f0f0f0; color: #4CAF50; }
+.nav-more[open] > summary { background-color: #f0f0f0; }
+.nav-more:has(a.active) > summary { color: #2E7D32; font-weight: bold; }
+.nav-more-menu {
+position: fixed;
+top: 56px;
+right: 8px;
+min-width: 190px;
+background: var(--pb-surface, #fff);
+border: 1px solid var(--pb-line, #ddd);
+border-radius: 8px;
+box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+display: flex;
+flex-direction: column;
+padding: 6px;
+z-index: 1100;
+}
+.nav-more-menu a { padding: 10px 12px; border-radius: 6px; font-size: 15px; }
+.nav-warn { color: #b58900; margin-left: 5px; }
+body.dark-mode .nav-more > summary { color: #e0e0e0; }
+body.dark-mode .nav-more-menu { background: #1e1e1e; border-color: #444; }
+
 .dark-mode-toggle {
 margin-left: auto;
 padding: 14px 16px;
@@ -7776,13 +8071,8 @@ background-color: #666;
 </style>
 
 <script>
-// Add viewport meta tag if it doesn't exist
-if (!document.querySelector('meta[name="viewport"]')) {
-const meta = document.createElement('meta');
-meta.name = 'viewport';
-meta.content = 'width=device-width, initial-scale=1, maximum-scale=1';
-document.head.appendChild(meta);
-}
+// Viewport meta is now server-rendered in the document head (see get_header_html),
+// so no runtime injection is needed here.
 
 // Store the active menu item in session storage
 function storeActiveMenuItem(path) {
@@ -7979,20 +8269,25 @@ setTimeout(function() {
 </div>
 <a href='./dash'>Dash</a>
 <a href='./plan'>Plan</a>
-<a href='./entity'>Entities</a>
 <a href='./charts'>Charts</a>
 <a href='./compare'>Compare</a>
 <a href='./log'>Log</a>
 <a href='./config'>Config</a>
-<a href='./apps'>Apps"""
+<details class="nav-more">
+<summary>Advanced &#9662;"""
         + config_warning
-        + """</a>
-<a href='./components'>Components</a>
+        + """</summary>
+<div class="nav-more-menu">
+<a href='./entity'>Entities</a>
+<a href='./apps'>Apps</a>
 <a href='./apps_editor'>Editor</a>
+<a href='./components'>Components</a>
 <a href='./browse'>Browse</a>
 <a href='./internals'>Internals</a>
 <a href='./metrics_dashboard'>Metrics</a>
 <a href='https://springfall2008.github.io/batpred/'>Docs</a>
+</div>
+</details>
 <div class="dark-mode-toggle">
     """
         + THIS_VERSION

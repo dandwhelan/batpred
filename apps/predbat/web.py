@@ -215,6 +215,8 @@ class WebInterface(ComponentBase):
         app.router.add_get("/dash", self.html_dash)
         app.router.add_post("/dash", self.html_dash_post)
         app.router.add_get("/dash_content", self.html_dash_content)
+        app.router.add_get("/dash_entities", self.html_dash_entities)
+        app.router.add_get("/api/dash_states", self.html_api_dash_states)
         app.router.add_get("/components", self.html_components)
         app.router.add_get("/component_entities", self.html_component_entities)
         app.router.add_post("/component_restart", self.html_component_restart)
@@ -303,15 +305,16 @@ class WebInterface(ComponentBase):
             if key in ["icon", "device_class", "state_class", "unit_of_measurement", "friendly_name"]:
                 continue
             value = attributes[key]
+            key_esc = html_module.escape(str(key))  # attribute names can come from third-party HA integrations
             full_value = str(value)[:16384]  # Limit to 16k
             full_value = full_value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
             if len(str(value)) > 128:
                 display_value = str(full_value)[:128] + " ... "
                 # Escape HTML entities for tooltip
-                text += '<tr><td>{}</td><td title="{}">{}</td></tr>'.format(key, full_value, display_value)
+                text += '<tr><td>{}</td><td title="{}">{}</td></tr>'.format(key_esc, full_value, display_value)
             else:
                 # Also escape HTML entities for short values
-                text += "<tr><td>{}</td><td>{}</td></tr>".format(key, full_value)
+                text += "<tr><td>{}</td><td>{}</td></tr>".format(key_esc, full_value)
         text += "</table>"
         return text
 
@@ -322,225 +325,97 @@ class WebInterface(ComponentBase):
 
     def get_power_flow_diagram(self):
         """
-        Generate a graphical power flow diagram showing energy movement between grid, battery, PV, and house load
-
-        Each component (grid, battery, PV, House) will be represented with a circle
-        arrows will run between the PV and Load, the Battery and Load and the House and Grid
-        The energy the house consumes is called the Load Power
-        The energy the PV generates is called the PV Power
-        The energy the battery charges or discharges is called the Battery Power
-        The energy the grid imports or exports is called the Grid Power
-
-        The house will be a circle in the middle the PV will be top left, the battery bottom left and the grid bottom right
+        Compact 'diamond' power-flow diagram: Solar (top), House (centre),
+        Battery (lower left), Grid (lower right), with animated flow connectors.
         """
-        # Get power values
         grid_power = self.base.grid_power
         battery_power = self.base.battery_power
         pv_power = self.base.pv_power
         load_power = self.base.load_power
 
-        # Determine flow directions
-        grid_importing = grid_power <= -10  # Grid is importing power (negative value)
-        grid_exporting = grid_power >= 10  # Grid is exporting power (positive value)
+        grid_importing = grid_power <= -10
+        grid_exporting = grid_power >= 10
+        battery_charging = battery_power >= 10
+        battery_discharging = battery_power <= -10
+        pv_generating = pv_power > 0
 
-        battery_charging = battery_power >= 10  # Battery is charging (positive value)
-        battery_discharging = battery_power <= -10  # Battery is discharging (negative value)
+        # Darker fills so the white in-circle text clears WCAG AA contrast
+        SOLAR = "#A85F00"
+        HOUSE = "#7E57C2"
+        BATT = "#1565C0"
+        GRID = "#2E7D32"
 
-        pv_generating = pv_power > 0  # PV is generating power
-        html = ""
+        def node(cx, cy, fill, name, val):
+            return (
+                '<circle cx="{cx}" cy="{cy}" r="40" fill="{fill}" />'
+                '<text x="{cx}" y="{cy}" text-anchor="middle" dy="-4" fill="#ffffff" font-size="13" font-weight="600">{name}</text>'
+                '<text x="{cx}" y="{cy}" text-anchor="middle" dy="14" fill="#ffffff" font-size="12">{val} W</text>'
+            ).format(cx=cx, cy=cy, fill=fill, name=name, val=dp0(abs(val)))
 
-        html += """
-        <div style="text-align: left; margin: 0px;">
-            <svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+        def flow(x1, y1, x2, y2, color, active, reverse=False):
+            if reverse:
+                x1, y1, x2, y2 = x2, y2, x1, y1
+            if active:
+                # CSS-animated dashes (class pf-flow): respects prefers-reduced-motion and survives innerHTML refresh
+                return '<line class="pf-flow" x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="3" stroke-linecap="round" stroke-dasharray="7 7" />'.format(x1, y1, x2, y2, color)
+            return '<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="2" stroke-dasharray="3 6" opacity="0.4" />'.format(x1, y1, x2, y2, color)
 
-                <!-- Grid Circle -->
-                <circle cx="450" cy="300" r="50" fill="#4CAF50" />
-                <text x="450" y="300" text-anchor="middle" dy=".3em" fill="#fff">Grid</text>
+        def vlabel(x, y, val):
+            # Neutral fill via CSS var so the label is readable in both light and dark mode
+            return '<text class="pf-val" x="{}" y="{}" text-anchor="middle" font-size="12" font-weight="600">{} W</text>'.format(x, y, dp0(abs(val)))
 
-                <!-- Battery Circle -->
-                <circle cx="150" cy="300" r="50" fill="#FF9800" />
-                <text x="150" y="300" text-anchor="middle" dy=".3em" fill="#fff">Battery</text>
+        batt_state = "charging" if battery_charging else ("discharging" if battery_discharging else "idle")
+        grid_state = "exporting" if grid_exporting else ("importing" if grid_importing else "idle")
+        desc = html_module.escape("Power flow. Solar {} watts. House load {} watts. Battery {} {} watts. Grid {} {} watts.".format(dp0(abs(pv_power)), dp0(abs(load_power)), batt_state, dp0(abs(battery_power)), grid_state, dp0(abs(grid_power))))
 
-                <!-- PV Circle -->
-                <circle cx="150" cy="100" r="50" fill="#2196F3" />
-                <text x="150" y="100" text-anchor="middle" dy=".3em" fill="#fff">PV</text>
+        html = '<div style="margin: 0; text-align: center;">'
+        html += '<svg viewBox="0 0 520 300" role="img" aria-label="{}" style="width:100%; max-width:500px; height:auto; display:block; margin: 0 auto;" xmlns="http://www.w3.org/2000/svg">'.format(desc)
+        html += "<title>Power flow</title><desc>{}</desc>".format(desc)
 
-                <!-- House Circle -->
-                <circle cx="300" cy="200" r="50" fill="#9C27B0" />
-                <text x="300" y="190" text-anchor="middle" dy=".3em" fill="#fff">House</text>
-                <text x="300" y="215" text-anchor="middle" dy=".3em" fill="#fff">{} W</text>
-
-                <!-- Define animation paths -->
-                <defs>
-                    <!-- PV to House path -->
-                    <path id="pv-house-path" d="M200,100 L250,150" stroke="transparent" fill="none" />
-                    <!-- House to PV path -->
-                    <path id="house-pv-path" d="M250,150 L200,100" stroke="transparent" fill="none" />
-                    <!-- Battery to House path -->
-                    <path id="battery-house-path" d="M200,300 L250,250" stroke="transparent" fill="none" />
-                    <!-- House to Battery path -->
-                    <path id="house-battery-path" d="M265,235 L215,275" stroke="transparent" fill="none" />
-                    <!-- Grid to House path -->
-                    <path id="grid-house-path" d="M410,290 L355,240" stroke="transparent" fill="none" />
-                    <!-- House to Grid path -->
-                    <path id="house-grid-path" d="M340,230 L390,270" stroke="transparent" fill="none" />
-                </defs>
-        """.format(
-            dp0(load_power)
-        )
-        # Draw arrows and labels
-        if pv_generating:
-            # Calculate animation speed based on power flow - faster for higher power
-            pv_speed = max(0.5, min(3.0, 2.0 - (abs(pv_power) / 3000)))
-
-            html += """
-                <!-- PV to House Arrow -->
-                <line x1="200" y1="100" x2="250" y2="150" stroke="#2196F3" stroke-width="2" marker-end="url(#pv-arrow)" />
-                <text x="250" y="120" text-anchor="middle" fill="#2196F3">{} W</text>
-
-                <!-- Moving dots for PV to House -->
-                <circle r="4" fill="#2196F3" opacity="0.8">
-                    <animateMotion dur="{}s" repeatCount="indefinite" path="M200,100 L250,150" />
-                </circle>
-                <circle r="3" fill="#2196F3" opacity="0.6">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="0.5s" path="M200,100 L250,150" />
-                </circle>
-                <circle r="2" fill="#2196F3" opacity="0.4">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="1.0s" path="M200,100 L250,150" />
-                </circle>
-            """.format(
-                dp0(pv_power), pv_speed, pv_speed, pv_speed
-            )
+        # Flow connectors (drawn under the nodes)
+        html += flow(260, 100, 260, 125, SOLAR, pv_generating)
+        if battery_discharging:
+            html += flow(143, 227, 227, 188, BATT, True)
+        elif battery_charging:
+            html += flow(143, 227, 227, 188, BATT, True, reverse=True)
         else:
-            # Make the PV to House line dashed if not generating
-            html += """
-                <!-- PV to House Arrow (dashed) -->
-                <line x1="200" y1="100" x2="250" y2="150" stroke="#2196F3" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#pv-arrow)" />
-                <text x="250" y="120" text-anchor="middle" fill="#2196F3">{} W</text>
-                <!-- No moving dot when PV is not generating -->
-            """.format(
-                dp0(pv_power)
-            )
-        if battery_charging:
-            # Calculate animation speed based on power flow - faster for higher power
-            battery_speed = max(0.5, min(3.0, 2.0 - (abs(battery_power) / 3000)))
-
-            html += """
-                <!-- Battery to House Arrow -->
-                <line x1="200" y1="300" x2="250" y2="250" stroke="#FF9800" stroke-width="2" marker-end="url(#battery-arrow)" />
-                <text x="260" y="280" text-anchor="middle" fill="#FF9800">{} W</text>
-
-                <!-- Moving dots for Battery to House -->
-                <circle r="4" fill="#FF9800" opacity="0.8">
-                    <animateMotion dur="{}s" repeatCount="indefinite" path="M200,300 L250,250" />
-                </circle>
-                <circle r="3" fill="#FF9800" opacity="0.6">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="0.5s" path="M200,300 L250,250" />
-                </circle>
-                <circle r="2" fill="#FF9800" opacity="0.4">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="1.0s" path="M200,300 L250,250" />
-                </circle>
-            """.format(
-                dp0(battery_power), battery_speed, battery_speed, battery_speed
-            )
+            html += flow(143, 227, 227, 188, BATT, False)
+        if grid_exporting:
+            html += flow(293, 188, 377, 227, GRID, True)
+        elif grid_importing:
+            html += flow(293, 188, 377, 227, GRID, True, reverse=True)
         else:
-            # Calculate animation speed based on power flow - faster for higher power
-            battery_speed = max(0.5, min(3.0, 2.0 - (abs(battery_power) / 3000)))
+            html += flow(293, 188, 377, 227, GRID, False)
 
-            html += """
-                <!-- House to Battery Arrow -->
-                <line x1="265" y1="235" x2="215" y2="275" stroke="#FF9800" stroke-width="2" marker-end="url(#battery-arrow)" />
-                <text x="260" y="280" text-anchor="middle" fill="#FF9800">{} W</text>
+        # Power value labels along each connector
+        html += vlabel(286, 116, pv_power)
+        html += vlabel(168, 198, battery_power)
+        html += vlabel(352, 198, grid_power)
 
-                <!-- Moving dots for House to Battery -->
-                <circle r="4" fill="#FF9800" opacity="0.8">
-                    <animateMotion dur="{}s" repeatCount="indefinite" path="M265,235 L215,275" />
-                </circle>
-                <circle r="3" fill="#FF9800" opacity="0.6">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="0.5s" path="M265,235 L215,275" />
-                </circle>
-                <circle r="2" fill="#FF9800" opacity="0.4">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="1.0s" path="M265,235 L215,275" />
-                </circle>
-            """.format(
-                dp0(battery_power), battery_speed, battery_speed, battery_speed
-            )
+        # Nodes (on top)
+        html += node(260, 60, SOLAR, "Solar", pv_power)
+        html += node(260, 165, HOUSE, "House", load_power)
+        html += node(110, 250, BATT, "Battery", battery_power)
+        html += node(410, 250, GRID, "Grid", grid_power)
 
-        if grid_importing:
-            # Calculate animation speed based on power flow - faster for higher power
-            grid_speed = max(0.5, min(3.0, 2.0 - (abs(grid_power) / 3000)))
-
-            html += """
-                <!-- Grid to House Arrow -->
-                <line x1="410" y1="290" x2="355" y2="240" stroke="#4CAF50" stroke-width="2" marker-end="url(#grid-arrow)" />
-                <text x="350" y="280" text-anchor="middle" fill="#4CAF50">{} W</text>
-
-                <!-- Moving dots for Grid to House -->
-                <circle r="4" fill="#4CAF50" opacity="0.8">
-                    <animateMotion dur="{}s" repeatCount="indefinite" path="M410,290 L355,240" />
-                </circle>
-                <circle r="3" fill="#4CAF50" opacity="0.6">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="0.5s" path="M410,290 L355,240" />
-                </circle>
-                <circle r="2" fill="#4CAF50" opacity="0.4">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="1.0s" path="M410,290 L355,240" />
-                </circle>
-            """.format(
-                dp0(grid_power), grid_speed, grid_speed, grid_speed
-            )
-        else:
-            # Calculate animation speed based on power flow - faster for higher power
-            grid_speed = max(0.5, min(3.0, 2.0 - (abs(grid_power) / 3000)))
-
-            html += """
-                <!-- House to Grid Arrow -->
-                <line x1="340" y1="230" x2="390" y2="270" stroke="#4CAF50" stroke-width="2" marker-end="url(#grid-arrow)" />
-                <text x="340" y="280" text-anchor="middle" fill="#4CAF50">{} W</text>
-
-                <!-- Moving dots for House to Grid -->
-                <circle r="4" fill="#4CAF50" opacity="0.8">
-                    <animateMotion dur="{}s" repeatCount="indefinite" path="M340,230 L390,270" />
-                </circle>
-                <circle r="3" fill="#4CAF50" opacity="0.6">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="0.5s" path="M340,230 L390,270" />
-                </circle>
-                <circle r="2" fill="#4CAF50" opacity="0.4">
-                    <animateMotion dur="{}s" repeatCount="indefinite" begin="1.0s" path="M340,230 L390,270" />
-                </circle>
-            """.format(
-                dp0(grid_power), grid_speed, grid_speed, grid_speed
-            )
-        html += """
-                <!-- Arrowhead Marker -->
-                <defs>
-                    <marker id="pv-arrow" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="#2196F3"/>
-                    </marker>
-                    <marker id="battery-arrow" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="#FF9800"/>
-                    </marker>
-                    <marker id="grid-arrow" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="#4CAF50"/>
-                    </marker>
-                </defs>
-            </svg>
-        </div>
-
-        <script>
-        // Ensure the animations work correctly in both light and dark modes
-        function adjustFlowAnimations() {
-            const isDarkMode = document.body.classList.contains('dark-mode');
-
-            // Could add additional animation adjustments here if needed for dark mode
-            // This function is called when the page loads and can be extended for other special effects
-        }
-
-        // Run when page loads
-        adjustFlowAnimations();
-        </script>
-        """
-
+        html += "</svg></div>"
         return html
+
+    def get_rate_chips_html(self):
+        """Small import/export rate chips shown under the power-flow diagram."""
+        imp = self.get_state_wrapper(self.prefix + ".rates", default=None)
+        exp = self.get_state_wrapper(self.prefix + ".rates_export", default=None)
+        chips = '<div class="rate-chips">'
+        try:
+            chips += '<span class="chip chip-imp">Import {:.1f}p</span>'.format(float(imp))
+        except (TypeError, ValueError):
+            pass
+        try:
+            chips += '<span class="chip chip-exp">Export {:.1f}p</span>'.format(float(exp))
+        except (TypeError, ValueError):
+            pass
+        chips += "</div>"
+        return chips
 
     def get_status_html(self, version):
         text = ""
@@ -548,16 +423,112 @@ class WebInterface(ComponentBase):
             text += "<h2>Loading please wait...</h2>"
             return text
 
+        # ---- Headline KPI cards: the at-a-glance numbers a user opens the dash for ----
+        prefix = self.prefix
+
+        def _kpi_num(entity_id, attribute=None, default=None):
+            if attribute:
+                value = self.get_state_wrapper(entity_id, attribute=attribute, default=default)
+            else:
+                value = self.get_state_wrapper(entity_id, default=default)
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _kpi_card(value, label, sub="", accent="brand"):
+            sub_html = '<div class="kpi-sub">{}</div>'.format(sub) if sub else ""
+            return '<div class="kpi-card kpi-{}"><div class="kpi-value">{}</div><div class="kpi-label">{}</div>{}</div>'.format(accent, value, label, sub_html)
+
+        def _pence_to_pounds(value):
+            if value is None:
+                return "&mdash;"
+            return "-£{:.2f}".format(abs(value / 100.0)) if value < 0 else "£{:.2f}".format(value / 100.0)
+
+        def _slot_card(time_val, rate, mins):
+            if time_val in (None, "", "unknown", "unavailable") or (mins is not None and mins >= 1440):
+                return ("None", "not scheduled")
+            display_time = str(time_val)[:5]
+            sub = "{:.1f}p".format(rate) if rate is not None else ""
+            if mins is not None:
+                when = "in {:.0f} min".format(mins) if mins < 90 else "in {:.1f} h".format(mins / 60.0)
+                sub = (sub + " · " + when) if sub else when
+            return (display_time, sub)
+
+        kpi_status = html_module.escape(str(self.get_state_wrapper(prefix + ".status", default="Unknown")))
+        kpi_mode, ignore = self.get_ha_config("mode", None)
+        kpi_mode = html_module.escape(str(kpi_mode)) if kpi_mode else ""
+        soc_pct = _kpi_num(prefix + ".soc_kw", attribute="soc_now_percent")
+        soc_kwh = _kpi_num(prefix + ".soc_kw", attribute="soc_now")
+        cost_today = _kpi_num(prefix + ".cost_today")
+        total_savings = _kpi_num(prefix + ".savings_total_predbat", attribute="pounds")
+        nc_rate = _kpi_num(prefix + ".best_charge_start", attribute="rate")
+        nc_val, nc_sub = _slot_card(self.get_state_wrapper(prefix + ".best_charge_start", default=None), nc_rate, _kpi_num(prefix + ".best_charge_start", attribute="minutes_to"))
+        ne_rate = _kpi_num(prefix + ".best_export_start", attribute="rate")
+        ne_val, ne_sub = _slot_card(self.get_state_wrapper(prefix + ".best_export_start", default=None), ne_rate, _kpi_num(prefix + ".best_export_start", attribute="minutes_to"))
+        ce_time = self.get_state_wrapper(prefix + ".best_charge_end", default=None)
+
+        soc_value = "{:.0f}%".format(soc_pct) if soc_pct is not None else "&mdash;"
+        soc_sub = "{:.1f} kWh".format(soc_kwh) if soc_kwh is not None else ""
+        savings_value = "£{:.2f}".format(total_savings) if total_savings is not None else "&mdash;"
+
+        # ---- Next-action banner: the single decision-relevant line ----
+        def _bin_on(name):
+            return str(self.get_state_wrapper("binary_sensor." + prefix + "_" + name, default="off")).lower() == "on"
+
+        if _bin_on("charging"):
+            now_action = "Charging the battery now"
+        elif _bin_on("exporting"):
+            now_action = "Force-exporting to grid now"
+        else:
+            now_action = "{} mode".format(kpi_status)
+
+        text += '<div class="dash-banner">'
+        text += '<span class="b-lead">{}</span>'.format(now_action)
+        if nc_val != "None":
+            end_s = str(ce_time)[:5] if ce_time not in (None, "", "unknown", "unavailable") else ""
+            win = nc_val + ("&ndash;" + end_s if end_s else "")
+            rate_s = " at <b>{:.1f}p</b>".format(nc_rate) if nc_rate is not None else ""
+            text += '<span class="b-seg">Next charge <b>{}</b>{}</span>'.format(win, rate_s)
+        if ne_val != "None":
+            rate_s = " at <b>{:.1f}p</b>".format(ne_rate) if ne_rate is not None else ""
+            text += '<span class="b-seg">Next export <b>{}</b>{}</span>'.format(ne_val, rate_s)
+        text += "</div>\n"
+        # ---- end banner ----
+
+        text += '<div class="dash-kpi-row">\n'
+        text += _kpi_card(soc_value, "Battery", soc_sub, "brand")
+        text += _kpi_card(_pence_to_pounds(cost_today), "Cost so far today", "", "info")
+        text += _kpi_card(savings_value, "Predbat savings", "total to date", "ok")
+        text += _kpi_card(kpi_status, "Status", kpi_mode, "neutral")
+        text += _kpi_card(nc_val, "Next charge", nc_sub, "charge")
+        text += _kpi_card(ne_val, "Next export", ne_sub, "export")
+        text += "</div>\n"
+        # ---- end KPI cards ----
+
         debug_enable, ignore = self.get_ha_config("debug_enable", None)
         read_only, ignore = self.get_ha_config("set_read_only", None)
         mode, ignore = self.get_ha_config("mode", None)
 
-        # Create a two-column layout for Status and Debug tables
-        text += '<div style="display: flex; gap: 5px; margin-bottom: 20px; max-width: 800px;">\n'
+        # Two-column card layout: Power Flow (left) and Status (right), like the redesign
+        text += '<div class="dash-grid">\n'
 
-        # Left column - Status table
-        text += '<div style="flex: 1;">\n'
-        text += "<h2>Status</h2>\n"
+        # Power Flow card
+        text += '<div class="dash-card">\n'
+        text += '<h2 class="card-title">Power flow</h2>\n'
+        text += """<div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px;">
+            <button id="inverterRefreshBtn" class="dash-refresh-btn" onclick="refreshInverterData()">Refresh</button>
+            <span id="inverterRefreshStatus" style="font-size: 13px; color: var(--pb-muted, #666);"></span>
+        </div>
+        """
+        text += get_refresh_inverter_js()
+        text += self.get_power_flow_diagram()
+        text += self.get_rate_chips_html()
+        text += "</div>\n"
+
+        # Status card
+        text += '<div class="dash-card dash-status-col">\n'
+        text += '<h2 class="card-title">Status</h2>\n'
         text += "<table>\n"
 
         try:
@@ -600,14 +571,16 @@ class WebInterface(ComponentBase):
         text += "<tr><td>Debug Enable</td><td>"
         text += f'<form style="display: inline;" method="post" action="./dash">'
         toggle_class = "toggle-switch active" if debug_enable else "toggle-switch"
-        text += f'<button class="{toggle_class}" type="button" onclick="toggleSwitch(this, \'debug_enable\')"></button>'
+        text += f'<button class="{toggle_class}" type="button" role="switch" aria-checked="{"true" if debug_enable else "false"}" aria-label="Debug enable" onclick="toggleSwitch(this, \'debug_enable\')"></button>'
+        text += f'<span class="switch-state">{"On" if debug_enable else "Off"}</span>'
         text += "</form></td></tr>\n"
 
         # Editable Set Read Only field
         text += "<tr><td>Set Read Only</td><td>"
         text += f'<form style="display: inline;" method="post" action="./dash">'
         toggle_class = "toggle-switch active" if read_only else "toggle-switch"
-        text += f'<button class="{toggle_class}" type="button" onclick="toggleSwitch(this, \'set_read_only\')"></button>'
+        text += f'<button class="{toggle_class}" type="button" role="switch" aria-checked="{"true" if read_only else "false"}" aria-label="Set read only" onclick="toggleSwitch(this, \'set_read_only\')"></button>'
+        text += f'<span class="switch-state">{"On" if read_only else "Off"}</span>'
         text += "</form></td></tr>\n"
 
         # Editable Predbat Active field
@@ -615,7 +588,10 @@ class WebInterface(ComponentBase):
         text += "<tr><td>Predbat Active</td><td>"
         text += f'<form style="display: inline;" method="post" action="./dash">'
         toggle_class = "toggle-switch active" if predbat_active else "toggle-switch"
-        text += f'<button class="{toggle_class}" type="button" onclick="toggleSwitch(this, \'active\')" title="On during calculations, off otherwise"></button>'
+        text += (
+            f'<button class="{toggle_class}" type="button" role="switch" aria-checked="{"true" if predbat_active else "false"}" aria-label="Predbat active" onclick="toggleSwitch(this, \'active\')" title="On during calculations, off otherwise"></button>'
+        )
+        text += f'<span class="switch-state">{"On" if predbat_active else "Off"}</span>'
         text += "</form></td></tr>\n"
         if self.arg_errors:
             count_errors = len(self.arg_errors)
@@ -625,9 +601,127 @@ class WebInterface(ComponentBase):
         text += "</table>\n"
         text += "</div>\n"
 
-        # Right column - Debug table
-        text += '<div style="flex: 1;">\n'
-        text += "<h2>Debug</h2>\n"
+        # Close the two-column grid
+        text += "</div>\n"
+
+        # Plan card (full width below the grid)
+        text += '<div class="dash-card">\n'
+        text += '<h2 class="card-title">Plan</h2>\n'
+        text_plan = self.get_state_wrapper(entity_id=self.prefix + ".plan_html", attribute="text", default="No plan available")
+        text += '<div class="plan-text">{}</div>\n'.format(text_plan)
+        text += "</div>\n"
+
+        return text
+
+    def get_entity_dump_html(self):
+        """
+        Render all entities as one clean card (Name / Entity / State table with category
+        filter chips), plus the demoted Debug tools. Rendered ONCE on full page load
+        (outside the AJAX-refreshed container) so the refresh payload stays small.
+        """
+        if not self.base.dashboard_index:
+            return ""
+
+        esc = html_module.escape
+
+        # Build the app list
+        app_list = ["predbat"]
+        for entity_id in self.base.dashboard_index_app.keys():
+            app = self.base.dashboard_index_app[entity_id]
+            if app not in app_list:
+                app_list.append(app)
+
+        def entities_for(app):
+            if app == "predbat":
+                return list(self.base.dashboard_index)
+            return [e for e in self.base.dashboard_index_app.keys() if self.base.dashboard_index_app[e] == app]
+
+        total = sum(len(entities_for(a)) for a in app_list)
+
+        text = '<div class="dash-card entities-card">\n'
+        text += '<h2 class="card-title">Entities <span class="card-count">{} total</span></h2>\n'.format(total)
+
+        # Controls: live search + category filter chips
+        text += '<div class="ent-controls">\n'
+        text += '<div class="ent-search-box"><input type="text" id="entityFilter" placeholder="Filter entities by name or id&hellip;" oninput="filterEntities(this.value)" aria-label="Filter entities"></div>\n'
+        text += '<button class="ent-chip active" data-app="" onclick="filterByApp(this, \'\')">All ({})</button>\n'.format(total)
+        for app in app_list:
+            label = app[0].upper() + app[1:]
+            text += '<button class="ent-chip" data-app="{app}" onclick="filterByApp(this, \'{app}\')">{label} ({cnt})</button>\n'.format(app=esc(str(app)), label=esc(str(label)), cnt=len(entities_for(app)))
+        text += "</div>\n"
+
+        # Single clean Name / Entity / State table
+        text += '<div class="entity-table-wrap">\n'
+        text += '<table class="ent-table">\n'
+        text += '<thead><tr><th>Name</th><th>Entity</th><th class="st-col">State</th></tr></thead>\n'
+        text += "<tbody>\n"
+        for app in app_list:
+            for entity in entities_for(app):
+                text += self.html_get_entity_row(entity, app)
+        text += "</tbody>\n</table>\n</div>\n"
+        text += "</div>\n"
+
+        # Debug / maintenance tools, demoted to a collapsed section at the bottom
+        text += self.get_debug_section_html()
+        return text
+
+    def html_get_entity_row(self, entity, app):
+        """One entity as a clean Name / Entity / State row; attributes go in an expandable
+        detail row when present."""
+        esc = html_module.escape
+        if entity in self.base.dashboard_values:
+            state = self.base.dashboard_values.get(entity, {}).get("state", None)
+            attributes = self.base.dashboard_values.get(entity, {}).get("attributes", {})
+            unit = attributes.get("unit_of_measurement", "") or ""
+            friendly_name = attributes.get("friendly_name", "") or entity
+            attr_html = self.get_attributes_html(entity)
+        else:
+            state = self.get_state_wrapper(entity_id=entity)
+            unit = self.get_state_wrapper(entity_id=entity, attribute="unit_of_measurement") or ""
+            friendly_name = self.get_state_wrapper(entity_id=entity, attribute="friendly_name") or entity
+            attr_html = self.get_attributes_html(entity, from_db=True)
+        if state is None:
+            state = "None"
+        state_disp = esc(str(state)) + (" " + esc(str(unit)) if unit else "")
+
+        has_attr = bool(attr_html and "<tr>" in attr_html)
+        eid = esc(str(entity))
+        if has_attr:
+            # Keyboard-operable disclosure: focusable, button role, expanded state, Enter/Space handled in JS
+            row_attrs = ' class="ent-row ent-expandable" data-app="{app}" data-eid="{eid}" tabindex="0" role="button" aria-expanded="false" onclick="toggleEntRow(this)" onkeydown="entRowKey(event, this)"'.format(app=esc(str(app)), eid=eid)
+            caret = '<span class="ent-caret" aria-hidden="true">&#9656;</span>'
+        else:
+            row_attrs = ' class="ent-row" data-app="{app}" data-eid="{eid}"'.format(app=esc(str(app)), eid=eid)
+            caret = ""
+
+        text = "<tr{attrs}>".format(attrs=row_attrs)
+        text += "<td>{caret}{name}</td>".format(caret=caret, name=esc(str(friendly_name)))
+        text += '<td class="eid"><a href="./entity?entity_id={eid}" onclick="event.stopPropagation()">{eid}</a></td>'.format(eid=eid)
+        text += '<td class="st-col">{}</td>'.format(state_disp)
+        text += "</tr>\n"
+        if has_attr:
+            text += '<tr class="ent-detail" data-app="{app}" style="display:none;"><td colspan="3">{attr}</td></tr>\n'.format(app=esc(str(app)), attr=attr_html)
+        return text
+
+    def _entity_state_display(self, entity):
+        """Return the RAW 'state unit' string for one entity (the /api/dash_states refresh sets it
+        via textContent, which is XSS-safe and must not receive pre-escaped HTML entities). The
+        server-rendered row escapes it separately."""
+        if entity in self.base.dashboard_values:
+            state = self.base.dashboard_values.get(entity, {}).get("state", None)
+            attributes = self.base.dashboard_values.get(entity, {}).get("attributes", {})
+            unit = attributes.get("unit_of_measurement", "") or ""
+        else:
+            state = self.get_state_wrapper(entity_id=entity)
+            unit = self.get_state_wrapper(entity_id=entity, attribute="unit_of_measurement") or ""
+        if state is None:
+            state = "None"
+        return str(state) + (" " + str(unit) if unit else "")
+
+    def get_debug_section_html(self):
+        """Debug / maintenance tools, demoted to a collapsed <details> at the bottom of the dash."""
+        text = '<details class="dash-debug">\n'
+        text += "<summary>Debug &amp; maintenance</summary>\n"
         text += "<table>\n"
         text += "<tr><td>Download</td><td><a href='./debug_apps'>apps.yaml</a></td></tr>\n"
         text += "<tr><td>Create</td><td><a href='./debug_yaml'>predbat_debug.yaml</a></td></tr>\n"
@@ -635,70 +729,7 @@ class WebInterface(ComponentBase):
         text += "<tr><td>Download</td><td><a href='./debug_plan'>predbat_plan.html</a></td></tr>\n"
         text += "<tr><td>Restart</td><td><button onclick='restartPredbat()' style='background-color: #ff4444; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;'>Restart Predbat</button></td></tr>\n"
         text += "</table>\n"
-        text += "</div>\n"
-
-        # Close the two-column layout
-        text += "</div>\n"
-
-        # Add power flow diagram
-        text += "<h2>Power Flow</h2>\n"
-        text += """<div style="margin-bottom: 8px; display: flex; align-items: center; gap: 10px;">
-            <button id="inverterRefreshBtn" onclick="refreshInverterData()" style="background-color: #2196F3; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;">Refresh</button>
-            <span id="inverterRefreshStatus" style="font-size: 13px; color: #666;"></span>
-        </div>
-        """
-        text += get_refresh_inverter_js()
-        text += self.get_power_flow_diagram()
-
-        # Text description of the plan
-        text += "<h2>Plan textual description</h2>\n"
-        text += "<table>\n"
-        text_plan = self.get_state_wrapper(entity_id=self.prefix + ".plan_html", attribute="text", default="No plan available")
-        text += "<tr><td>{}</td></tr>\n".format(text_plan)
-        text += "</table>\n"
-
-        # Form the app list
-        app_list = ["predbat"]
-        for entity_id in self.base.dashboard_index_app.keys():
-            app = self.base.dashboard_index_app[entity_id]
-            if app not in app_list:
-                app_list.append(app)
-
-        # Add expand/collapse all button
-        text += '<div style="margin: 20px 0;">\n'
-        text += '<button id="expandAllBtn" class="expand-all-button" onclick="toggleAllSections()">Expand All</button>\n'
-        text += "</div>\n"
-
-        # Display per app
-        for app in app_list:
-            section_id = f"section-{app}"
-
-            # Build entity list first to get count
-            if app == "predbat":
-                entity_list = self.base.dashboard_index
-            else:
-                entity_list = []
-                for entity_id in self.base.dashboard_index_app.keys():
-                    if self.base.dashboard_index_app[entity_id] == app:
-                        entity_list.append(entity_id)
-
-            entity_count = len(entity_list)
-            entity_word = "entity" if entity_count == 1 else "entities"
-
-            text += f'<div class="dashboard-section">\n'
-            text += f'<h2 class="dashboard-section-header" onclick="toggleDashboardSection(\'{section_id}\')">\n'
-            text += f'<span class="expand-icon" id="icon-{section_id}">+</span> {app[0].upper() + app[1:]} Entities ({entity_count} {entity_word})\n'
-            text += "</h2>\n"
-            text += f'<div id="{section_id}" class="dashboard-section-content collapsed">\n'
-            text += "<table>\n"
-            text += "<tr><th></th><th>Name</th><th>Entity</th><th>State</th><th>Attributes</th></tr>\n"
-
-            for entity in entity_list:
-                text += self.html_get_entity_text(entity)
-            text += "</table>\n"
-            text += "</div>\n"
-            text += "</div>\n"
-
+        text += "</details>\n"
         return text
 
     def html_get_entity_text(self, entity):
@@ -2739,6 +2770,22 @@ chart.render();
         text = self.get_status_html(THIS_VERSION)
         return web.Response(content_type="text/html", text=text)
 
+    async def html_dash_entities(self, request):
+        """Return just the entities card HTML, used to populate it if the page was opened
+        before dashboard_index was ready (e.g. immediately after a restart)."""
+        return web.Response(content_type="text/html", text=self.get_entity_dump_html())
+
+    async def html_api_dash_states(self, request):
+        """Lightweight JSON map {entity_id: 'state unit'} so the dashboard can refresh entity state
+        values in place every 60s without re-sending the whole entities table."""
+        states = {}
+        if self.base.dashboard_index:
+            for entity in self.base.dashboard_index:
+                states[entity] = self._entity_state_display(entity)
+            for entity in self.base.dashboard_index_app.keys():
+                states[entity] = self._entity_state_display(entity)
+        return web.json_response(states)
+
     async def html_dash(self, request):
         """
         Render apps.yaml as an HTML page
@@ -2765,11 +2812,36 @@ chart.render();
                     container.innerHTML = html;
                 }
                 window.scrollTo(scrollX, scrollY);
-                scheduleRefresh();
             })
-            .catch(function() {
-                scheduleRefresh();
-            });
+            .catch(function() {});
+        refreshEntityStates();
+        scheduleRefresh();
+    }
+
+    function refreshEntityStates() {
+        fetch('./api/dash_states')
+            .then(function(r) { return r.json(); })
+            .then(function(states) {
+                var container = document.getElementById('entities-container');
+                if (!container || !states) { return; }
+                var rows = container.querySelectorAll('tr.ent-row[data-eid]');
+                if (rows.length === 0 && Object.keys(states).length > 0) {
+                    // Entities weren't ready at first paint (e.g. right after a restart) - load them now
+                    fetch('./dash_entities')
+                        .then(function(r) { return r.text(); })
+                        .then(function(html) { container.innerHTML = html; })
+                        .catch(function() {});
+                    return;
+                }
+                rows.forEach(function(row) {
+                    var eid = row.getAttribute('data-eid');
+                    if (states[eid] !== undefined) {
+                        var cell = row.querySelector('.st-col');
+                        if (cell) { cell.textContent = states[eid]; }
+                    }
+                });
+            })
+            .catch(function() {});
     }
 
     function scheduleRefresh() {
@@ -2786,6 +2858,12 @@ chart.render();
         text += "<body>\n"
         text += '<div id="dash-content-container">\n'
         text += self.get_status_html(THIS_VERSION)
+        text += "</div>\n"
+        # Entity table rendered once on full load inside its own container. Entity *states* are
+        # patched in place every 60s via /api/dash_states (and the whole table is fetched via
+        # /dash_entities if it was empty at first paint, e.g. right after a restart).
+        text += '<div id="entities-container">\n'
+        text += self.get_entity_dump_html()
         text += "</div>\n"
         text += "</body></html>\n"
         return web.Response(content_type="text/html", text=text)
