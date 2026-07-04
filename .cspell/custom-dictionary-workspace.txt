@@ -1,13 +1,12 @@
-# Custom Dictionary Words
 activepower
 adata
 adbase
 afci
 AIO
-AIO's
 aiofiles
 aiohttp
 aiomqtt
+AIO's
 aios
 Alertfeed
 allclose
@@ -67,6 +66,7 @@ coro
 cprofile
 creds
 crosscharge
+# Custom Dictionary Words
 customisation
 Customise
 cvalue
@@ -171,6 +171,7 @@ heatingactive
 heatingtemp
 heatpump
 heatsink
+hellip
 holdout
 homeassistant
 houseb
@@ -211,6 +212,7 @@ labelnames
 larr
 libc
 linebreak
+linecap
 linestyle
 loadml
 loadmlpower
@@ -259,6 +261,7 @@ myenergi
 mypy
 nattribute
 ncalls
+ndash
 nearr
 njpwerner
 nobat
@@ -373,6 +376,7 @@ soliscloud
 solisx
 sourcery
 Southwell
+Spacebar
 sparkline
 springfall
 starthour
@@ -382,8 +386,8 @@ startt
 stdlib
 stepline
 Stromligning
-strptime
 Strømligning
+strptime
 submessage
 substep
 sunspec
@@ -429,6 +433,7 @@ varh
 venv
 Victron
 visibilitychange
+vlabel
 Wallbox
 weblink
 welink
