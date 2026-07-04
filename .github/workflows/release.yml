@@ -1,12 +1,16 @@
+# cspell:ignore jizyb
 name: Create release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v712.01)"
-        required: true
+        description: "Release tag (defaults to THIS_VERSION in predbat.py)"
+        required: false
   push:
+    branches:
+      - main
+      - claude/github-release-homeassistant-7jizyb
     tags:
       - "v*"
 
@@ -17,11 +21,35 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG=$(sed -n 's/^THIS_VERSION = "\(.*\)"/\1/p' apps/predbat/predbat.py)
+          fi
+          if [ -z "$TAG" ]; then
+            echo "Error: could not determine release tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping"
+            exit 0
+          fi
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
