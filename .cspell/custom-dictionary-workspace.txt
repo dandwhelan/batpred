@@ -1,12 +1,13 @@
+# Custom Dictionary Words
 activepower
 adata
 adbase
 afci
 AIO
+AIO's
 aiofiles
 aiohttp
 aiomqtt
-AIO's
 aios
 Alertfeed
 allclose
@@ -66,7 +67,6 @@ coro
 cprofile
 creds
 crosscharge
-# Custom Dictionary Words
 customisation
 Customise
 cvalue
@@ -386,8 +386,8 @@ startt
 stdlib
 stepline
 Stromligning
-Strømligning
 strptime
+Strømligning
 submessage
 substep
 sunspec
