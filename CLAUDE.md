@@ -174,3 +174,25 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 ### C++ Kernel Note (fork)
 
 This fork's kernel binaries are built with ABI/parity revision **102** (upstream uses small integers like 2). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.
+
+## Fork-Specific Notes
+
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.44.0). Fork changes on top of upstream:
+
+- **FIT support** — see the Feed-in Tariff section above
+- **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
+- **DB history fix** — `db_manager`/HA history returns correct results for entities with no state change inside the query window
+- **Fork release pipeline** — see below
+
+### Release Process (fork)
+
+Releases are versioned `v712.xx` (kept deliberately above upstream's `v8.x` scheme so the built-in updater treats fork releases as newest). To cut a release:
+
+1. Bump `THIS_VERSION` in `apps/predbat/predbat.py` (e.g. `v712.05`)
+2. Merge to `main` — `.github/workflows/release.yml` derives the tag from `THIS_VERSION` on push to `main` and creates the GitHub release automatically (skips if the tag already exists)
+
+Installations tracking this fork self-update from these releases via Predbat's built-in updater (`github.py` points at `dandwhelan/batpred`).
+
+### Merging from upstream
+
+When merging `upstream/main`, preserve the FIT feature (Python + C++ kernel), the custom dashboard, and the fork release workflow. If upstream bumps its kernel ABI revision, re-apply FIT kernel support and keep the fork's revision strictly above upstream's, then rebuild all six kernel binaries.
