@@ -40,6 +40,9 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from web_helper import (
     get_header_html,
+    get_chart_theme_js,
+    CHART_PALETTE_LIGHT,
+    CHART_PALETTE_DARK,
     get_plan_css,
     get_plan_renderer_js,
     get_editor_js,
@@ -1571,7 +1574,7 @@ class WebInterface(ComponentBase):
         self.update_success_timestamp()
         return get_header_html(title, calculating, self.default_page, self.arg_errors, THIS_VERSION, self.get_battery_status_icon(), refresh, codemirror=codemirror)
 
-    def get_chart_series(self, name, results, chart_type, color):
+    def get_chart_series(self, name, results, chart_type):
         """
         Return HTML for a chart series
         """
@@ -1579,8 +1582,6 @@ class WebInterface(ComponentBase):
         text += "   {\n"
         text += "    name: '{}',\n".format(name)
         text += "    type: '{}',\n".format(chart_type)
-        if color:
-            text += "    color: '{}',\n".format(color)
         text += "    data: [\n"
         first = True
         for key in results:
@@ -1600,63 +1601,97 @@ class WebInterface(ComponentBase):
         Render a chart
         """
         midnight_str = (self.midnight_utc + timedelta(days=1)).strftime(TIME_FORMAT)
-        text = ""
+        text = get_chart_theme_js()
+        text += "<script>\n"
+        text += "(function() {\n"
         if daily_chart:
             text += """
-<script>
-window.onresize = function(){ location.reload(); };
-var width = window.innerWidth;
-var height = window.innerHeight;
-if (width < 600) {
-    width = 600
-}
-width = width - 50;
-height = height - 120;
-
-if (height * 1.68 > width) {
-   height = width / 1.68;
-}
-else {
-   width = height * 1.68;
-}
-
-var options = {
-  chart: {
-    type: 'line',
-    width: width,
-    height: height,
-    animations: {
-        enabled: false
+function pbChartSize() {
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+    if (width < 600) {
+        width = 600;
     }
-  },
-  span: {
-    start: 'minute', offset: '-12h'
-  },
+    width = width - 50;
+    height = height - 120;
+    if (height * 1.68 > width) {
+        height = width / 1.68;
+    }
+    else {
+        width = height * 1.68;
+    }
+    return {width: width, height: height};
+}
 """
         else:
             text += """
-<script>
-window.onresize = function(){ location.reload(); };
-var width = window.innerWidth;
-var height = window.innerHeight;
-width = width / 3 * 2;
-height = height / 3 * 2;
-
-if (height * 1.68 > width) {
-   height = width / 1.68;
+function pbChartSize() {
+    var width = window.innerWidth / 3 * 2;
+    var height = window.innerHeight / 3 * 2;
+    if (height * 1.68 > width) {
+        height = width / 1.68;
+    }
+    else {
+        width = height * 1.68;
+    }
+    return {width: width, height: height};
 }
-else {
-   width = height * 1.68;
-}
+"""
 
+        # Assign palette slots in fixed order to any series without an explicit colour,
+        # skipping hues that an explicit series already uses and keeping the light and
+        # dark arrays aligned by series index
+        explicit_colors = {series.get("color", "").lower() for series in series_data if series.get("data") and series.get("color")}
+        series_colors_light = []
+        series_colors_dark = []
+        palette_slot = 0
+        for series in series_data:
+            if not series.get("data"):
+                continue
+            color = series.get("color", "")
+            if color:
+                series_colors_light.append(color)
+                series_colors_dark.append(color)
+            else:
+                attempts = 0
+                while CHART_PALETTE_LIGHT[palette_slot % len(CHART_PALETTE_LIGHT)].lower() in explicit_colors and attempts < len(CHART_PALETTE_LIGHT):
+                    palette_slot += 1
+                    attempts += 1
+                series_colors_light.append(CHART_PALETTE_LIGHT[palette_slot % len(CHART_PALETTE_LIGHT)])
+                series_colors_dark.append(CHART_PALETTE_DARK[palette_slot % len(CHART_PALETTE_DARK)])
+                palette_slot += 1
+
+        colors_light_array = ",".join("'{}'".format(color) for color in series_colors_light)
+        colors_dark_array = ",".join("'{}'".format(color) for color in series_colors_dark)
+        text += "var pbSeriesColors = pbChartDark ? [{}] : [{}];\n".format(colors_dark_array, colors_light_array)
+
+        text += """
+var size = pbChartSize();
 var options = {
   chart: {
     type: 'line',
-    width: width,
-    height: height
+    width: size.width,
+    height: size.height,
+    fontFamily: pbChartFont,
+    background: 'transparent',
+    foreColor: pbChartInk,
+    animations: {
+        enabled: false
+    },
+    toolbar: {
+        show: true,
+        tools: { download: true, selection: true, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true }
+    },
+    zoom: { enabled: true, type: 'x' }
   },
-  span: {
-    start: 'day'
+  theme: { mode: pbChartDark ? 'dark' : 'light' },
+  colors: pbSeriesColors,
+  dataLabels: { enabled: false },
+  grid: {
+    borderColor: pbChartGrid,
+    strokeDashArray: 0,
+    xaxis: { lines: { show: false } },
+    yaxis: { lines: { show: true } }
   },
 """
 
@@ -1673,14 +1708,13 @@ var options = {
             stroke_width_value = series.get("stroke_width", "1")
             stroke_curve_value = series.get("stroke_curve", "smooth")
             chart_type = series.get("chart_type", "line")
-            color = series.get("color", "")
             unit_name = series.get("unit", yaxis_name) or ""
 
             if results:
                 if not first:
                     text += ","
                 first = False
-                text += self.get_chart_series(name, results, chart_type, color)
+                text += self.get_chart_series(name, results, chart_type)
                 opacity.append(opacity_value)
                 stroke_width.append(stroke_width_value)
                 stroke_curve.append("'{}'".format(stroke_curve_value))
@@ -1695,14 +1729,18 @@ var options = {
         text += "  stroke: {\n"
         text += "     width: [{}],\n".format(",".join(stroke_width))
         text += "     curve: [{}],\n".format(",".join(stroke_curve))
+        text += "     lineCap: 'round'\n"
         text += "  },\n"
         text += "  xaxis: {\n"
         text += "    type: 'datetime',\n"
         text += "    labels: {\n"
         text += "           datetimeUTC: false\n"
-        text += "       }\n"
+        text += "       },\n"
+        text += "    axisBorder: { color: pbChartGrid },\n"
+        text += "    axisTicks: { color: pbChartGrid }\n"
         text += "  },\n"
         text += "  tooltip: {\n"
+        text += "    theme: pbChartDark ? 'dark' : 'light',\n"
         text += "    x: {\n"
         text += "      format: 'dd/MMM HH:mm'\n"
         text += "    },\n"
@@ -1763,10 +1801,15 @@ var options = {
             text += "    decimalsInFloat: 2\n"
             text += "  },\n"
         text += "  title: {\n"
-        text += "    text: '{}'\n".format(chart_name)
+        text += "    text: '{}',\n".format(chart_name)
+        text += "    style: { fontSize: '16px', fontWeight: 600 }\n"
         text += "  },\n"
         text += "  legend: {\n"
         text += "    position: 'top',\n"
+        text += "    horizontalAlign: 'left',\n"
+        text += "    fontSize: '13px',\n"
+        text += "    markers: { size: 5, shape: 'circle', strokeWidth: 0, offsetX: -2 },\n"
+        text += "    itemMargin: { horizontal: 10, vertical: 4 },\n"
         text += "    formatter: function(seriesName, opts) {\n"
         text += "        var units = [{}];\n".format(units_array)
         text += "        var unit = units[opts.seriesIndex] !== undefined ? units[opts.seriesIndex] : '{}';\n".format(yaxis_name)
@@ -1777,18 +1820,24 @@ var options = {
         text += "   xaxis: [\n"
         text += "    {\n"
         text += "       x: new Date('{}').getTime(),\n".format(now_str)
-        text += "       borderColor: '#775DD0',\n"
+        text += "       borderColor: pbChartAccent,\n"
+        text += "       strokeDashArray: 4,\n"
         text += "       textAnchor: 'middle',\n"
         text += "       label: {\n"
-        text += "          text: 'now'\n"
+        text += "          text: 'now',\n"
+        text += "          borderWidth: 0,\n"
+        text += "          style: { background: pbChartAccent, color: pbChartDark ? '#0d0d0d' : '#ffffff', fontFamily: pbChartFont, fontSize: '11px' }\n"
         text += "       }\n"
         text += "    },\n"
         text += "    {\n"
         text += "       x: new Date('{}').getTime(),\n".format(midnight_str)
-        text += "       borderColor: '#000000',\n"
+        text += "       borderColor: '#898781',\n"
+        text += "       strokeDashArray: 4,\n"
         text += "       textAnchor: 'middle',\n"
         text += "       label: {\n"
-        text += "          text: 'midnight'\n"
+        text += "          text: 'midnight',\n"
+        text += "          borderWidth: 0,\n"
+        text += "          style: { background: '#898781', color: '#ffffff', fontFamily: pbChartFont, fontSize: '11px' }\n"
         text += "       }\n"
         text += "    }\n"
         text += "   ]\n"
@@ -1796,6 +1845,8 @@ var options = {
         text += "}\n"
         text += "var chart = new ApexCharts(document.querySelector('#{}'), options);\n".format(tagname)
         text += "chart.render();\n"
+        text += "pbRegisterChart(chart, pbChartSize);\n"
+        text += "})();\n"
         text += "</script>\n"
         return text
 
@@ -1810,7 +1861,7 @@ var options = {
         """
         # Build a 5-stop green-to-red colour gradient across the value range
         span = max(range_max - range_min, 0.01)
-        gradient_colors = ["#00B050", "#85C21A", "#FFFF00", "#FFA500", "#FF0000"]
+        gradient_colors = ["#0ca30c", "#85c21a", "#fab219", "#ec835a", "#d03b3b"]
         num_stops = len(gradient_colors)
         ranges_js = ""
         for i, color in enumerate(gradient_colors):
@@ -1829,23 +1880,26 @@ var options = {
             points_js = ", ".join("{{ x: '{}', y: {} }}".format(p["x"], "null" if p["y"] is None else p["y"]) for p in data_points)
             series_js += "    {{ name: '{}', data: [{}] }},\n".format(name, points_js)
 
-        text = ""
+        text = get_chart_theme_js()
         text += "<script>\n"
-        text += "window.onresize = function(){ location.reload(); };\n"
-        text += "var width = window.innerWidth;\n"
-        text += "var height = window.innerHeight;\n"
-        text += "if (width < 400) { width = 400; }\n"
-        text += "width = width - 50;\n"
+        text += "(function() {\n"
+        text += "function pbChartSize() {\n"
+        text += "    var width = window.innerWidth;\n"
+        text += "    if (width < 400) { width = 400; }\n"
+        text += "    width = width - 50;\n"
         if fixed_height is not None:
-            text += "var height_{} = {};\n".format(chart_id, fixed_height)
+            text += "    return {{width: width, height: {}}};\n".format(fixed_height)
         else:
             num_rows = max(len(series_data), 1)
-            text += "var height_{} = {};\n".format(chart_id, num_rows * 80 + 80)
+            text += "    return {{width: width, height: {}}};\n".format(num_rows * 80 + 80)
+        text += "}\n"
+        text += "var size = pbChartSize();\n"
         text += "var options = {\n"
-        text += "  chart: {{ type: 'heatmap', width: width, height: height_{}, animations: {{ enabled: false }} }},\n".format(chart_id)
+        text += "  chart: { type: 'heatmap', width: size.width, height: size.height, animations: { enabled: false }, fontFamily: pbChartFont, background: 'transparent', foreColor: pbChartInk },\n"
+        text += "  theme: { mode: pbChartDark ? 'dark' : 'light' },\n"
         text += "  plotOptions: {\n"
         text += "    heatmap: {\n"
-        text += "      radius: 2,\n"
+        text += "      radius: 4,\n"
         text += "      enableShades: false,\n"
         text += "      colorScale: {\n"
         text += "        ranges: [\n"
@@ -1854,16 +1908,19 @@ var options = {
         text += "      }\n"
         text += "    }\n"
         text += "  },\n"
+        text += "  stroke: { width: 2, colors: [pbChartDark ? '#1a1a19' : '#fcfcfb'] },\n"
         text += "  dataLabels: { enabled: true, style: { colors: ['#000'] } },\n"
         text += "  series: [\n"
         text += series_js
         text += "  ],\n"
         text += "  xaxis: { type: 'category' },\n"
-        text += "  title: {{ text: '{}' }},\n".format(title)
-        text += "  tooltip: { y: { formatter: function(val) { return val !== null ? val.toFixed(2) : 'N/A'; } } }\n"
+        text += "  title: {{ text: '{}', style: {{ fontSize: '16px', fontWeight: 600 }} }},\n".format(title)
+        text += "  tooltip: { theme: pbChartDark ? 'dark' : 'light', y: { formatter: function(val) { return val !== null ? val.toFixed(2) : 'N/A'; } } }\n"
         text += "};\n"
-        text += "var chart_{cid} = new ApexCharts(document.querySelector('#{cid}'), options);\n".format(cid=chart_id)
-        text += "chart_{}.render();\n".format(chart_id)
+        text += "var chart = new ApexCharts(document.querySelector('#{}'), options);\n".format(chart_id)
+        text += "chart.render();\n"
+        text += "pbRegisterChart(chart, pbChartSize);\n"
+        text += "})();\n"
         text += "</script>\n"
         return text
 
@@ -1880,28 +1937,32 @@ var options = {
         # Build the initial template - use direct substitution, NOT .format(), to avoid
         # breakage when state values or entity names contain { or } characters
         series_count = len(timeline_data)
-        text = (
+        text = get_chart_theme_js() + (
             """
 <script>
-window.onresize = function() { location.reload(); };
-var width = window.innerWidth;
-var height = window.innerHeight;
+(function() {
+function pbChartSize() {
+    // Use full width minus small margins
+    var width = Math.max(800, window.innerWidth - 100);
 
-// Use full width minus small margins
-width = Math.max(800, width - 100);
-
-// Calculate height based on number of series (compact timeline view)
-var seriesCount = """
+    // Calculate height based on number of series (compact timeline view)
+    var seriesCount = """
             + str(series_count)
             + """;
-var baseHeight = Math.max(200, seriesCount * 50 + 100);
-height = Math.min(400, baseHeight);
+    var baseHeight = Math.max(200, seriesCount * 50 + 100);
+    var height = Math.min(400, baseHeight);
+    return {width: width, height: height};
+}
+var size = pbChartSize();
 
 var options = {
   chart: {
     type: 'rangeBar',
-    width: width,
-    height: height,
+    width: size.width,
+    height: size.height,
+    fontFamily: pbChartFont,
+    background: 'transparent',
+    foreColor: pbChartInk,
     animations: {
       enabled: false
     },
@@ -1909,10 +1970,12 @@ var options = {
       show: true
     }
   },
+  theme: { mode: pbChartDark ? 'dark' : 'light' },
   plotOptions: {
     bar: {
       horizontal: true,
       barHeight: '70%',
+      borderRadius: 4,
       rangeBarGroupRows: false
     }
   },
@@ -2060,6 +2123,8 @@ var chart = new ApexCharts(document.querySelector('#"""
             + tagname
             + """'), options);
 chart.render();
+pbRegisterChart(chart, pbChartSize);
+})();
 </script>
 """
         )
@@ -2940,12 +3005,12 @@ chart.render();
             text += "<br><h2>Loading...</h2>"
         elif chart == "Battery":
             series_data = [
-                {"name": "Base", "data": soc_kw, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#3291a8"},
-                {"name": "Base10", "data": soc_kw_base10, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#e8972c"},
-                {"name": "Best", "data": soc_kw_best, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "smooth", "color": "#eb2323"},
-                {"name": "Best10", "data": soc_kw_best10, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#cd23eb"},
-                {"name": "Actual", "data": soc_kw_h0, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#3291a8"},
-                {"name": "Charge Limit Base", "data": charge_limit_kw, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "stepline", "color": "#15eb8b"},
+                {"name": "Base", "data": soc_kw, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#2a78d6"},
+                {"name": "Base10", "data": soc_kw_base10, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#eb6834"},
+                {"name": "Best", "data": soc_kw_best, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "smooth", "color": "#e34948"},
+                {"name": "Best10", "data": soc_kw_best10, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#4a3aa7"},
+                {"name": "Actual", "data": soc_kw_h0, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#2a78d6"},
+                {"name": "Charge Limit Base", "data": charge_limit_kw, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "stepline", "color": "#1baf7a"},
                 {
                     "name": "Charge Limit Best",
                     "data": best_charge_limit_kw,
@@ -2953,10 +3018,10 @@ chart.render();
                     "stroke_width": "4",
                     "stroke_curve": "stepline",
                     "chart_type": "area",
-                    "color": "#e3e019",
+                    "color": "#eda100",
                 },
-                {"name": "Best Export Limit", "data": best_export_limit_kw, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#15eb1c"},
-                {"name": "Record", "data": record, "opacity": "0.5", "stroke_width": "4", "stroke_curve": "stepline", "color": "#000000", "chart_type": "area"},
+                {"name": "Best Export Limit", "data": best_export_limit_kw, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#008300"},
+                {"name": "Record", "data": record, "opacity": "0.5", "stroke_width": "4", "stroke_curve": "stepline", "color": "#898781", "chart_type": "area"},
             ]
             text += self.render_chart(series_data, "kWh", "Battery SoC Prediction", now_str)
         elif chart == "Power":
@@ -3034,13 +3099,13 @@ chart.render();
             pv_today_forecastCL.update(prune_today(self.get_entity_detailedForecast("sensor." + self.prefix + "_pv_tomorrow", "pv_estimateCL"), self.now_utc, self.midnight_utc, prune=False, intermediate=True))
 
             series_data = [
-                {"name": "PV Power", "data": pv_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#f5c43d"},
-                {"name": "Forecast History", "data": pv_forecast, "opacity": "0.3", "stroke_width": "3", "stroke_curve": "smooth", "color": "#a8a8a7", "chart_type": "area"},
-                {"name": "Forecast History CL", "data": pv_forecastCL, "opacity": "0.3", "stroke_width": "3", "stroke_curve": "smooth", "color": "#e90a0a", "chart_type": "area"},
-                {"name": "Forecast", "data": pv_today_forecast, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#a8a8a7"},
+                {"name": "PV Power", "data": pv_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#eda100"},
+                {"name": "Forecast History", "data": pv_forecast, "opacity": "0.3", "stroke_width": "3", "stroke_curve": "smooth", "color": "#898781", "chart_type": "area"},
+                {"name": "Forecast History CL", "data": pv_forecastCL, "opacity": "0.3", "stroke_width": "3", "stroke_curve": "smooth", "color": "#e34948", "chart_type": "area"},
+                {"name": "Forecast", "data": pv_today_forecast, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#898781"},
                 {"name": "Forecast 10%", "data": pv_today_forecast10, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#6b6b6b"},
-                {"name": "Forecast 90%", "data": pv_today_forecast90, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#cccccc"},
-                {"name": "Forecast CL", "data": pv_today_forecastCL, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#e90a0a"},
+                {"name": "Forecast 90%", "data": pv_today_forecast90, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#c3c2b7"},
+                {"name": "Forecast CL", "data": pv_today_forecastCL, "opacity": "0.3", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#e34948"},
             ]
             text += self.render_chart(series_data, "kW", "Solar Forecast", now_str)
         elif chart == "PVAccuracy":
@@ -3058,8 +3123,8 @@ chart.render();
             pv_actual_hist = history_attribute(self.get_history_wrapper(self.prefix + ".pv_energy_h0", 7, required=False))
             pv_actual = prune_today(pv_actual_hist, self.now_utc, self.midnight_utc, prune=False)
             series_data = [
-                {"name": "PV Forecast (so far)", "data": pv_forecast_sofar, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "stepline", "color": "#a8a8a7"},
-                {"name": "PV Actual", "data": pv_actual, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#f5c43d"},
+                {"name": "PV Forecast (so far)", "data": pv_forecast_sofar, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "stepline", "color": "#898781"},
+                {"name": "PV Actual", "data": pv_actual, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eda100"},
             ]
             text += self.render_chart(series_data, "kWh", "PV Forecast vs Actual", now_str)
         elif chart == "LoadML":
@@ -3073,10 +3138,10 @@ chart.render();
             load_ml_forecast = self.get_entity_results("sensor." + self.prefix + "_load_ml_forecast")
 
             series_data = [
-                {"name": "Load (Actual)", "data": load_today, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#3291a8"},
-                {"name": "Forecast (+1h)", "data": load_today_h1, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "color": "#f5a442"},
-                {"name": "Forecast (+8h)", "data": load_today_h8, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "color": "#9b59b6"},
-                {"name": "Load (ML Forecast)", "data": load_ml_forecast, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#eb2323"},
+                {"name": "Load (Actual)", "data": load_today, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#2a78d6"},
+                {"name": "Forecast (+1h)", "data": load_today_h1, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "color": "#eb6834"},
+                {"name": "Forecast (+8h)", "data": load_today_h8, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "color": "#4a3aa7"},
+                {"name": "Load (ML Forecast)", "data": load_ml_forecast, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#e34948"},
             ]
             text += self.render_chart(series_data, "kWh", "ML Load Forecast", now_str)
         elif chart == "LoadMLPower":
@@ -3124,14 +3189,14 @@ chart.render();
             temperature_forecast = prune_today(self.get_entity_results("sensor." + self.prefix + "_temperature"), self.now_utc, self.midnight_utc, prune_future=True, prune_future_days=2, prune=True, prune_past_days=7)
 
             series_data = [
-                {"name": "Load Power (Actual)", "data": load_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#3291a8", "unit": "kW"},
-                {"name": "Load Power (ML Predicted Future)", "data": load_ml_forecast_power, "opacity": "0.5", "stroke_width": "3", "chart_type": "area", "stroke_curve": "smooth", "color": "#eb2323", "unit": "kW"},
-                {"name": "Load Power ML History", "data": power_today, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "unit": "kW", "color": "#eb2323"},
+                {"name": "Load Power (Actual)", "data": load_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#2a78d6", "unit": "kW"},
+                {"name": "Load Power (ML Predicted Future)", "data": load_ml_forecast_power, "opacity": "0.5", "stroke_width": "3", "chart_type": "area", "stroke_curve": "smooth", "color": "#e34948", "unit": "kW"},
+                {"name": "Load Power ML History", "data": power_today, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "unit": "kW", "color": "#e34948"},
                 {"name": "Load Power ML History +1h", "data": power_today_h1, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "unit": "kW", "color": "#716d63"},
                 {"name": "Load Power ML History +8h", "data": power_today_h8, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "unit": "kW", "color": "#a6a5a3"},
-                {"name": "PV Power (Actual)", "data": pv_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#f5c43d", "unit": "kW"},
-                {"name": "PV Power (Predicted)", "data": pv_power_best, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#ffa500", "unit": "kW"},
-                {"name": "Temperature", "data": temperature_forecast, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#75ff6b", "unit": "°C"},
+                {"name": "PV Power (Actual)", "data": pv_power, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#eda100", "unit": "kW"},
+                {"name": "PV Power (Predicted)", "data": pv_power_best, "opacity": "0.7", "stroke_width": "2", "stroke_curve": "smooth", "chart_type": "area", "color": "#c98500", "unit": "kW"},
+                {"name": "Temperature", "data": temperature_forecast, "opacity": "1.0", "stroke_width": "2", "stroke_curve": "smooth", "color": "#1baf7a", "unit": "°C"},
             ]
 
             # Configure secondary axis for temperature
@@ -3159,12 +3224,12 @@ chart.render();
 
             series_data = [
                 # Daily savings (bars) on primary axis
-                {"name": "Daily Predbat Saving", "data": savings_predbat_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#f5a442", "unit": self.currency_symbols[0]},
-                {"name": "Daily PV/Battery Saving", "data": savings_pvbat_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#3291a8", "unit": self.currency_symbols[0]},
-                {"name": "Daily Actual Cost", "data": cost_yesterday_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#eb2323", "unit": self.currency_symbols[0]},
+                {"name": "Daily Predbat Saving", "data": savings_predbat_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#eb6834", "unit": self.currency_symbols[0]},
+                {"name": "Daily PV/Battery Saving", "data": savings_pvbat_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#2a78d6", "unit": self.currency_symbols[0]},
+                {"name": "Daily Actual Cost", "data": cost_yesterday_hist, "opacity": "1.0", "stroke_width": "2", "chart_type": "bar", "color": "#e34948", "unit": self.currency_symbols[0]},
                 # Cumulative savings (lines) on secondary axis
-                {"name": "Total Predbat Saving", "data": savings_total_predbat_hist, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#f5c43d", "unit": self.currency_symbols[0]},
-                {"name": "Total PV/Battery Saving", "data": savings_total_pvbat_hist, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#15eb8b", "unit": self.currency_symbols[0]},
+                {"name": "Total Predbat Saving", "data": savings_total_predbat_hist, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#eda100", "unit": self.currency_symbols[0]},
+                {"name": "Total PV/Battery Saving", "data": savings_total_pvbat_hist, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "smooth", "color": "#1baf7a", "unit": self.currency_symbols[0]},
             ]
 
             # Configure secondary axis for cumulative totals
@@ -3184,10 +3249,10 @@ chart.render();
             series_data = []
             secondary_series_names = []
             inv_colors = [
-                ("#3291a8", "#eb2323", "#f5a442"),
-                ("#9b59b6", "#15eb8b", "#f5c43d"),
-                ("#e8972c", "#cd23eb", "#15eb1c"),
-                ("#6b6b6b", "#cccccc", "#a8a8a7"),
+                ("#2a78d6", "#e34948", "#eb6834"),
+                ("#4a3aa7", "#1baf7a", "#eda100"),
+                ("#eb6834", "#4a3aa7", "#008300"),
+                ("#6b6b6b", "#c3c2b7", "#898781"),
             ]
             for inv_id in range(num_inverters):
                 suffix = "" if inv_id == 0 else "_{}".format(inv_id)
@@ -3235,10 +3300,10 @@ chart.render();
             ]
             text += self.render_chart(series_data, "kWh", "Battery Degradation", now_str, daily_chart=False, extra_yaxis=secondary_axis)
             if self.base.battery_scaling_auto:
-                text += "<p style='color:#15eb8b;font-weight:bold;'>&#10003; battery_scaling_auto is enabled &mdash; Predbat is automatically adjusting the usable battery capacity to account for degradation.</p>\n"
+                text += "<p style='color:#0ca30c;font-weight:bold;'>&#10003; battery_scaling_auto is enabled &mdash; Predbat is automatically adjusting the usable battery capacity to account for degradation.</p>\n"
             else:
                 text += (
-                    "<p style='color:#f5a442;font-weight:bold;'>&#9888; battery_scaling_auto is disabled. "
+                    "<p style='color:#c98500;font-weight:bold;'>&#9888; battery_scaling_auto is disabled. "
                     "Enable it in apps.yaml (<code>battery_scaling_auto: true</code>) so Predbat can automatically "
                     "scale the usable battery capacity to reflect real-world degradation shown in this chart.</p>\n"
                 )
@@ -3322,18 +3387,18 @@ chart.render();
                     fwd_export_fwd[ts] = grid_export.get(t_label, 0)
 
                 line_series = [
-                    {"name": "Low 1kWh", "data": hist_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#3291a8"},
-                    {"name": "Low 1kWh (future)", "data": fwd_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#3291a8"},
-                    {"name": "Med 2kWh", "data": hist_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#f5a442"},
-                    {"name": "Med 2kWh (future)", "data": fwd_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#f5a442"},
-                    {"name": "High 4kWh", "data": hist_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb2323"},
-                    {"name": "High 4kWh (future)", "data": fwd_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb2323"},
-                    {"name": "EV 8kWh (future)", "data": fwd_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#9b59b6"},
-                    {"name": "EV 8kWh", "data": hist_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#9b59b6"},
-                    {"name": "Import rate", "data": hist_import, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb8b"},
-                    {"name": "Export rate", "data": hist_export, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb1c"},
-                    {"name": "Import rate (future)", "data": fwd_import_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb8b"},
-                    {"name": "Export rate (future)", "data": fwd_export_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#15eb1c"},
+                    {"name": "Low 1kWh", "data": hist_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#2a78d6"},
+                    {"name": "Low 1kWh (future)", "data": fwd_low, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#2a78d6"},
+                    {"name": "Med 2kWh", "data": hist_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb6834"},
+                    {"name": "Med 2kWh (future)", "data": fwd_med, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#eb6834"},
+                    {"name": "High 4kWh", "data": hist_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#e34948"},
+                    {"name": "High 4kWh (future)", "data": fwd_high, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#e34948"},
+                    {"name": "EV 8kWh (future)", "data": fwd_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#4a3aa7"},
+                    {"name": "EV 8kWh", "data": hist_ev, "opacity": "1.0", "stroke_width": "3", "stroke_curve": "stepline", "color": "#4a3aa7"},
+                    {"name": "Import rate", "data": hist_import, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#1baf7a"},
+                    {"name": "Export rate", "data": hist_export, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#008300"},
+                    {"name": "Import rate (future)", "data": fwd_import_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#1baf7a"},
+                    {"name": "Export rate (future)", "data": fwd_export_fwd, "opacity": "1.0", "stroke_width": "4", "stroke_curve": "stepline", "color": "#008300"},
                 ]
                 text += "<div id='chart_marginal_hist'></div>\n"
                 text += self.render_chart(line_series, curr, "Marginal Energy Rates \u2014 History & Forecast", now_str, tagname="chart_marginal_hist", daily_chart=False)

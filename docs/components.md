@@ -277,6 +277,11 @@ Connects to your Octopus Energy account to automatically download your tariff ra
 | `key` | String | Yes | - | `octopus_api_key` | Your Octopus Energy API key |
 | `account_id` | String | Yes | - | `octopus_api_account` | Your Octopus Energy account number (starts with A-) |
 | `automatic` | Boolean | No | true | `octopus_automatic` | Set to `true` to automatically configure Predbat to use this Component (no need to update apps.yaml) |
+| `tariff_refresh_minutes` | Integer | No | 30 | `octopus_api_tariff_refresh_minutes` | How often (in minutes) to refresh account and tariff discovery from the Octopus API (minimum 5) |
+| `device_refresh_minutes` | Integer | No | 10 | `octopus_api_device_refresh_minutes` | How often (in minutes) to refresh Intelligent Octopus device dispatches (minimum 5, only polled on an intelligent tariff) |
+| `session_refresh_minutes` | Integer | No | 30 | `octopus_api_session_refresh_minutes` | How often (in minutes) to refresh saving sessions and free electricity events (minimum 5) |
+
+Increase these refresh intervals if you want Predbat to call the Octopus API less often; rate data itself is cached and only re-downloaded when it goes stale.
 
 #### How to get your API credentials (octopus)
 

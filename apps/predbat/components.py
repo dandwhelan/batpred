@@ -178,6 +178,21 @@ COMPONENT_LIST = {
                 "default": True,
                 "config": "octopus_automatic",
             },
+            "tariff_refresh_minutes": {
+                "required": False,
+                "default": None,
+                "config": "octopus_api_tariff_refresh_minutes",
+            },
+            "device_refresh_minutes": {
+                "required": False,
+                "default": None,
+                "config": "octopus_api_device_refresh_minutes",
+            },
+            "session_refresh_minutes": {
+                "required": False,
+                "default": None,
+                "config": "octopus_api_session_refresh_minutes",
+            },
         },
         "phase": 1,
     },

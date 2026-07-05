@@ -155,6 +155,7 @@ givtcp
 gnueabihf
 gridconsumption
 gridconsumptionpower
+gridlines
 growatt
 GWMQTT
 HACS
@@ -455,3 +456,5 @@ ylabel
 yuanzhi
 zappi
 zigbee
+zoomin
+zoomout
