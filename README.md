@@ -4,6 +4,34 @@
 ![image](https://github.com/springfall2008/batpred/actions/workflows/publish-docs.yml/badge.svg)
 ![image](https://github.com/springfall2008/batpred/actions/workflows/pages/pages-build-deployment/badge.svg)
 
+## About this fork
+
+This is a personal fork of [springfall2008/batpred](https://github.com/springfall2008/batpred) with the following additions on top of upstream (currently based on upstream v8.44.0):
+
+### Feed-in Tariff (FIT) support
+
+UK FIT scheme support for solar self-consumption optimisation. When `metric_fit_generation_rate` is set (Expert Mode), the optimiser treats actual export as having no additional value (deemed export pays regardless), prefers self-consumption of solar, and leaves battery headroom for forecast solar rather than grid-charging to 100%. Adds config items `metric_fit_generation_rate`, `metric_fit_deemed_export_rate` and `metric_fit_deemed_export_percentage`, plus sensors `predbat.fit_income`, `predbat.fit_income_best` and `predbat.fit_income_yesterday`. FIT logic is also implemented in the C++ prediction kernel (fork ABI revision 102) with parity tests, and all six platform kernel binaries are rebuilt with FIT support.
+
+### Custom web dashboard
+
+The built-in web UI (port 5052) gains a `/dash_entities` page and a redesigned power flow diagram.
+
+### Fork-based releases and self-update
+
+This fork publishes its own GitHub releases (versioned `v712.xx`) via a release workflow that derives the tag from `THIS_VERSION` in `apps/predbat/predbat.py` on push to `main`. Predbat's built-in updater points at this fork, so installations tracking this repository self-update from these releases.
+
+### Fixes
+
+* Database history now returns correct results for entities with no state change inside the query window
+* FIT payment calculator bug fixes
+* cspell dictionary ordering fixed to match the pre-commit hook
+
+### Fork agent docs
+
+`CLAUDE.md`, `AGENTS.md`, `CODEX.md` and `GEMINI.md` provide guidance for AI coding agents working in this repository, including fork-specific constraints (kernel ABI revision rules, release process).
+
+Everything below is the upstream README.
+
 ## Introduction
 
 Home battery prediction and automatic charging for Home Assistant supporting multiple inverters, including GivEnergy, Solis, Huawei, SolarEdge, SigEnergy, FoxESS, Sofar, Tesla Powerwall and many more.
