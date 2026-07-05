@@ -19,6 +19,69 @@ selectors, form controls, code editors (CodeMirror), modals, and responsive
 navigation menus.
 """
 
+# Categorical chart palette, colour-vision-deficiency validated for the light and
+# dark surfaces.  Slots are assigned to series in this fixed order; the dark column
+# is the same eight hues re-stepped for the dark surface, not a separate palette.
+CHART_PALETTE_LIGHT = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+CHART_PALETTE_DARK = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"]
+
+# Chart chrome: axis/label ink, hairline gridlines and the annotation accents
+CHART_INK_LIGHT = "#52514e"
+CHART_INK_DARK = "#c3c2b7"
+CHART_GRID_LIGHT = "#e1e0d9"
+CHART_GRID_DARK = "#2c2c2a"
+CHART_ACCENT_LIGHT = "#4a3aa7"
+CHART_ACCENT_DARK = "#9085e9"
+CHART_MUTED = "#898781"
+CHART_FONT_STACK = "system-ui, -apple-system, 'Segoe UI', sans-serif"
+
+
+def get_chart_theme_js():
+    """
+    Return shared JavaScript helpers used by every ApexCharts chart: dark-mode
+    detection, the categorical palettes and a debounced resize handler that
+    redraws registered charts in place (instead of reloading the page).
+    """
+    return """
+<script>
+var pbChartDark = document.documentElement.classList.contains('dark-mode') || (document.body && document.body.classList.contains('dark-mode'));
+var pbChartPalette = pbChartDark ? %s : %s;
+var pbChartInk = pbChartDark ? '%s' : '%s';
+var pbChartGrid = pbChartDark ? '%s' : '%s';
+var pbChartAccent = pbChartDark ? '%s' : '%s';
+var pbChartFont = "%s";
+window._pbCharts = window._pbCharts || [];
+function pbRegisterChart(chart, sizer) {
+    window._pbCharts.push({chart: chart, sizer: sizer});
+    if (!window._pbResizeHooked) {
+        window._pbResizeHooked = true;
+        var pbResizeTimer;
+        window.addEventListener('resize', function() {
+            clearTimeout(pbResizeTimer);
+            pbResizeTimer = setTimeout(function() {
+                window._pbCharts.forEach(function(entry) {
+                    if (entry.sizer) {
+                        var size = entry.sizer();
+                        entry.chart.updateOptions({chart: {width: size.width, height: size.height}}, false, false);
+                    }
+                });
+            }, 150);
+        });
+    }
+}
+</script>
+""" % (
+        str(CHART_PALETTE_DARK).replace("'", '"'),
+        str(CHART_PALETTE_LIGHT).replace("'", '"'),
+        CHART_INK_DARK,
+        CHART_INK_LIGHT,
+        CHART_GRID_DARK,
+        CHART_GRID_LIGHT,
+        CHART_ACCENT_DARK,
+        CHART_ACCENT_LIGHT,
+        CHART_FONT_STACK,
+    )
+
 
 def get_refresh_inverter_js():
     """
@@ -4382,15 +4445,15 @@ def get_charts_css():
     text = """
 <style>
 .charts-menu {
-tabindex="0"  <!-- Make the menu focusable -->
-    background-color: #ffffff;
+    background-color: var(--pb-surface, #ffffff);
     overflow-x: auto; /* Enable horizontal scrolling */
     white-space: nowrap; /* Prevent menu items from wrapping */
     display: flex;
     align-items: center;
-    margin-bottom: 6px;
-    border-bottom: 1px solid #ddd;
-    padding: 4px 0;
+    gap: 4px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--pb-line, #dde3df);
+    padding: 8px 6px;
     -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
     scrollbar-width: thin; /* Firefox */
     scrollbar-color: #4CAF50 #f0f0f0; /* Firefox */
@@ -4398,6 +4461,8 @@ tabindex="0"  <!-- Make the menu focusable -->
 
 .charts-menu h3 {
     margin: 0 10px;
+    font-size: 15px;
+    font-weight: 600;
     flex-shrink: 0; /* Prevent shrinking */
     white-space: nowrap; /* Prevent text wrapping */
 }
@@ -4405,23 +4470,25 @@ tabindex="0"  <!-- Make the menu focusable -->
 .charts-menu a {
     color: #333;
     text-align: center;
-    padding: 4px 12px;
+    padding: 6px 14px;
     text-decoration: none;
     font-size: 14px;
-    border-radius: 4px;
-    margin: 0 2px;
+    border-radius: 999px;
+    border: 1px solid transparent;
     flex-shrink: 0; /* Prevent items from shrinking */
     white-space: nowrap;
     display: inline-block;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .charts-menu a:hover {
     background-color: #f0f0f0;
-    color: #4CAF50;
+    border-color: var(--pb-line, #dde3df);
+    color: #2E7D32;
 }
 
 .charts-menu a.active {
-    background-color: #4CAF50;
+    background-color: #2E7D32;
     color: white;
 }
 
@@ -4437,17 +4504,18 @@ body.dark-mode .charts-menu h3 {
 }
 
 body.dark-mode .charts-menu a {
-    color: white;
+    color: #e0e0e0;
 }
 
 body.dark-mode .charts-menu a:hover {
     background-color: #2c652f;
+    border-color: #333;
     color: white;
 }
 
 body.dark-mode .charts-menu a.active {
     background-color: #4CAF50;
-    color: white;
+    color: #0d0d0d;
 }
 </style>
 <script>

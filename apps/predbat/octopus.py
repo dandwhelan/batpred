@@ -351,7 +351,15 @@ class OctopusAPI(ComponentBase):
     Publishes rate sensors and handles Octopus-specific features.
     """
 
-    def initialize(self, key, account_id, automatic):
+    # Default refresh cadences in minutes; overridable via apps.yaml
+    # (octopus_api_tariff_refresh_minutes etc.) and clamped to a safe minimum
+    # so a misconfiguration can't hammer the Octopus API.
+    TARIFF_REFRESH_MINUTES = 30
+    DEVICE_REFRESH_MINUTES = 10
+    SESSION_REFRESH_MINUTES = 30
+    MINIMUM_REFRESH_MINUTES = 5
+
+    def initialize(self, key, account_id, automatic, tariff_refresh_minutes=None, device_refresh_minutes=None, session_refresh_minutes=None):
         """Initialise the Octopus API component"""
         self.api_key = key
         self.api = OctopusEnergyApiClient(key, self.log)
@@ -365,6 +373,10 @@ class OctopusAPI(ComponentBase):
         self.intelligent_devices = {}
         self.tariff_fetched_at = None
         self.device_fetched_at = None
+        self.session_fetched_at = None
+        self.tariff_refresh_minutes = self._sanitise_refresh_minutes(tariff_refresh_minutes, self.TARIFF_REFRESH_MINUTES, "tariff")
+        self.device_refresh_minutes = self._sanitise_refresh_minutes(device_refresh_minutes, self.DEVICE_REFRESH_MINUTES, "device")
+        self.session_refresh_minutes = self._sanitise_refresh_minutes(session_refresh_minutes, self.SESSION_REFRESH_MINUTES, "session")
         self.automatic = automatic
         self.commands = []
         self.mpan = None
@@ -377,7 +389,21 @@ class OctopusAPI(ComponentBase):
         # In-memory cache for product info (keyed by product_code) to avoid repeated API calls
         self._product_info_cache = {}
 
-        self.log("OctopusAPI: Initialised with account ID {}".format(self.account_id))
+        self.log("OctopusAPI: Initialised with account ID {} refresh intervals tariff {}m devices {}m sessions {}m".format(self.account_id, self.tariff_refresh_minutes, self.device_refresh_minutes, self.session_refresh_minutes))
+
+    def _sanitise_refresh_minutes(self, value, default, name):
+        """Validate a configured refresh interval, falling back to the default and enforcing the minimum."""
+        if value is None:
+            return default
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            self.log("Warn: OctopusAPI: Invalid {} refresh interval '{}', using default {} minutes".format(name, value, default))
+            return default
+        if value < self.MINIMUM_REFRESH_MINUTES:
+            self.log("Warn: OctopusAPI: {} refresh interval {}m is below the minimum, clamping to {} minutes".format(name, value, self.MINIMUM_REFRESH_MINUTES))
+            return self.MINIMUM_REFRESH_MINUTES
+        return value
 
     async def select_event(self, entity_id, value):
         suffix = self.get_entity_suffix(entity_id)
@@ -425,7 +451,7 @@ class OctopusAPI(ComponentBase):
         Main run loop
         """
         if first:
-            # Load cached data (restores tariff_fetched_at / device_fetched_at timestamps)
+            # Load cached data (restores the tariff/device/session fetch timestamps)
             await self.load_octopus_cache()
             self.log("OctopusAPI: Started")
 
@@ -444,12 +470,13 @@ class OctopusAPI(ComponentBase):
         # data was never fetched (no cache), so treat as stale.  Sensor data is always pushed
         # on startup so HA entities are populated immediately.
 
-        tariff_due = self._data_age_minutes(self.tariff_fetched_at) >= 30
-        device_due = refresh or self._data_age_minutes(self.device_fetched_at) >= 10
+        tariff_due = self._data_age_minutes(self.tariff_fetched_at) >= self.tariff_refresh_minutes
+        device_due = refresh or self._data_age_minutes(self.device_fetched_at) >= self.device_refresh_minutes
+        session_due = refresh or self._data_age_minutes(self.session_fetched_at) >= self.session_refresh_minutes
         sensor_due = first or refresh or (count_minutes % 2) == 0
 
         if tariff_due:
-            # 30-minute API refresh for account and tariff discovery
+            # API refresh for account and tariff discovery (default every 30 minutes)
             if await self.async_get_account(self.account_id):
                 self.tariff_fetched_at = datetime.now()
 
@@ -458,11 +485,17 @@ class OctopusAPI(ComponentBase):
             await self.async_find_tariffs()
 
         if device_due:
-            # 10-minute API refresh for intelligent device and saving sessions
+            # API refresh for intelligent device dispatches (default every 10 minutes,
+            # no API call is made unless the account is on an intelligent tariff)
             await self.async_update_intelligent_devices(self.account_id)
+            self.device_fetched_at = datetime.now()
+
+        if session_due:
+            # API refresh for saving sessions and free electricity events (default every 30
+            # minutes) - these are announced hours or days ahead so a slower poll is enough
             self.saving_sessions = await self.async_get_flexibility_events(self.account_id)
             self.get_saving_session_data()
-            self.device_fetched_at = datetime.now()
+            self.session_fetched_at = datetime.now()
 
         if device_due or first:
             # Download rate data into tariff structure (uses storage cache, needed after cache load)
@@ -472,7 +505,7 @@ class OctopusAPI(ComponentBase):
             # 2-minute update for intelligent device sensor
             await self.async_intelligent_update_sensor(self.account_id)
 
-        if tariff_due or device_due:
+        if tariff_due or device_due or session_due:
             # Don't save cache every 2 minutes, if we lose it then we re-fresh it anyhow
             await self.save_octopus_cache()
 
@@ -559,6 +592,7 @@ class OctopusAPI(ComponentBase):
             self.graphql_token = data.get("kraken_token")
             self.tariff_fetched_at = data.get("tariff_fetched_at")
             self.device_fetched_at = data.get("device_fetched_at")
+            self.session_fetched_at = data.get("session_fetched_at")
             self.update_success_timestamp()
 
         self.tariffs = {}
@@ -578,6 +612,7 @@ class OctopusAPI(ComponentBase):
             "kraken_token": self.graphql_token,
             "tariff_fetched_at": self.tariff_fetched_at,
             "device_fetched_at": self.device_fetched_at,
+            "session_fetched_at": self.session_fetched_at,
         }
         if self.storage:
             await self.storage.save("octopus_user", "account", octopus_cache, format="yaml", expiry=datetime.now(timezone.utc) + timedelta(days=7))
