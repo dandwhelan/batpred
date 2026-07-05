@@ -623,6 +623,11 @@ def get_entity_css():
         .entity-search-container {
             position: relative;
         }
+        @media (max-width: 768px) {
+            .entity-dropdown {
+                min-width: 0 !important;
+            }
+        }
         .entity-dropdown {
             position: absolute;
             top: 100%;
@@ -1875,6 +1880,17 @@ def get_html_config_css():
             color: #e0e0e0;
             border-color: #555;
         }
+        @media (max-width: 768px) {
+            .filter-container {
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .filter-input {
+                flex: 1;
+                width: auto;
+                min-width: 0;
+            }
+        }
         </style>
         <script>
         // Save and restore filter value between page loads
@@ -2285,6 +2301,23 @@ body.dark-mode .confirmation-dialog h3 {
     overflow-y: auto;
     z-index: 1000;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* On small screens let the dropdown and inputs shrink to the viewport;
+   !important is needed to beat the inline min-width styles set by the
+   nested entity editor JavaScript */
+@media (max-width: 768px) {
+    .entity-dropdown-container,
+    .entity-search-input,
+    .entity-dropdown {
+        min-width: 0 !important;
+        width: 100% !important;
+        box-sizing: border-box;
+    }
+    .edit-input {
+        width: 100%;
+        box-sizing: border-box;
+    }
 }
 
 .entity-option {
@@ -4542,12 +4575,18 @@ def get_log_css():
 <style>
 .log-menu {
     background-color: #ffffff;
-    overflow: hidden;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
     display: flex;
     align-items: center;
     margin-bottom: 6px;
     border-bottom: 1px solid #ddd;
     padding: 4px 0;
+}
+
+.log-menu a {
+    flex-shrink: 0;
 }
 
 .log-menu a {
@@ -4593,6 +4632,7 @@ body.dark-mode .log-menu a.active {
 /* Log search container styles */
 .log-search-container {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     margin-bottom: 10px;
     padding: 8px;
@@ -7754,6 +7794,38 @@ if (localStorage.getItem('darkMode') === 'true') {
         padding-top: 65px; /* Increased padding to account for the fixed menu height */
     }
 
+    /* Global mobile responsiveness: applies to every page via the shared header */
+    @media (max-width: 768px) {
+        body {
+            margin: 4px;
+            padding-top: 56px; /* Menu bar is more compact on mobile */
+            -webkit-text-size-adjust: 100%;
+        }
+        h1 {
+            font-size: 24px;
+        }
+        h2 {
+            font-size: 20px;
+        }
+        /* Wide tables scroll horizontally within their own box instead of
+           forcing the whole page to overflow sideways */
+        table {
+            display: block;
+            width: fit-content;
+            max-width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        input[type="text"],
+        input[type="search"],
+        input[type="number"],
+        select,
+        textarea {
+            max-width: 100%;
+            box-sizing: border-box;
+        }
+    }
+
     .battery-wrapper {
         display: flex;
         align-items: center;
@@ -8136,6 +8208,23 @@ border-color: #555;
 body.dark-mode .dark-mode-toggle button:hover {
 background-color: #666;
 }
+
+/* Icon shown in place of the button text on small screens */
+.dark-mode-toggle .dm-icon { display: none; }
+
+/* Compact menu bar for phones/small tablets */
+@media (max-width: 768px) {
+.menu-bar .logo { padding: 0 8px; }
+.menu-bar .logo img { height: 30px; margin-right: 6px; }
+.menu-bar a { padding: 12px 9px; font-size: 14px; }
+.nav-more > summary { padding: 12px 9px; font-size: 14px; }
+.nav-more-menu { top: 48px; }
+.dark-mode-toggle { padding: 8px; }
+.dark-mode-toggle .version-label { display: none; }
+.dark-mode-toggle .dm-label { display: none; }
+.dark-mode-toggle .dm-icon { display: inline; font-size: 18px; line-height: 1; }
+.dark-mode-toggle button { padding: 7px 9px; }
+}
 </style>
 
 <script>
@@ -8357,10 +8446,10 @@ setTimeout(function() {
 </div>
 </details>
 <div class="dark-mode-toggle">
-    """
+    <span class="version-label">"""
         + THIS_VERSION
-        + """
-    <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
+        + """</span>
+    <button onclick="toggleDarkMode()" aria-label="Toggle dark mode"><span class="dm-label">Toggle Dark Mode</span><span class="dm-icon mdi mdi-theme-light-dark" aria-hidden="true"></span></button>
 </div>
 </div>
 """

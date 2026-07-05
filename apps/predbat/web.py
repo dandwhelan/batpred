@@ -1609,8 +1609,11 @@ class WebInterface(ComponentBase):
 function pbChartSize() {
     var width = window.innerWidth;
     var height = window.innerHeight;
-    if (width < 600) {
-        width = 600;
+    if (width <= 700) {
+        // Mobile: fill the viewport width and use a squarer aspect ratio
+        width = width - 20;
+        height = Math.max(280, Math.min(height - 160, width * 1.1));
+        return {width: width, height: height};
     }
     width = width - 50;
     height = height - 120;
@@ -1626,6 +1629,11 @@ function pbChartSize() {
         else:
             text += """
 function pbChartSize() {
+    if (window.innerWidth <= 700) {
+        // Mobile: use the full viewport width rather than two thirds
+        var mWidth = window.innerWidth - 20;
+        return {width: mWidth, height: Math.max(240, mWidth / 1.4)};
+    }
     var width = window.innerWidth / 3 * 2;
     var height = window.innerHeight / 3 * 2;
     if (height * 1.68 > width) {
@@ -1886,7 +1894,7 @@ var options = {
         text += "function pbChartSize() {\n"
         text += "    var width = window.innerWidth;\n"
         text += "    if (width < 400) { width = 400; }\n"
-        text += "    width = width - 50;\n"
+        text += "    width = width <= 700 ? width - 20 : width - 50;\n"
         if fixed_height is not None:
             text += "    return {{width: width, height: {}}};\n".format(fixed_height)
         else:
@@ -1942,8 +1950,8 @@ var options = {
 <script>
 (function() {
 function pbChartSize() {
-    // Use full width minus small margins
-    var width = Math.max(800, window.innerWidth - 100);
+    // Use full width minus small margins; on mobile fit the viewport
+    var width = window.innerWidth <= 700 ? window.innerWidth - 20 : Math.max(800, window.innerWidth - 100);
 
     // Calculate height based on number of series (compact timeline view)
     var seriesCount = """
@@ -2483,7 +2491,7 @@ pbRegisterChart(chart, pbChartSize);
         text += '<div id="planError" style="display:none; padding:10px; background:#fee; color:#c00; border:1px solid #c00; margin-bottom:10px;"></div>'
 
         # Add view switcher buttons
-        text += '<div style="margin-bottom: 15px; display: flex; gap: 8px; align-items: center;">'
+        text += '<div style="margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">'
         text += '<button class="view-button" data-view="plan" onclick="switchView(\'plan\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #4CAF50; color: white; cursor: pointer;">Plan</button>'
         text += '<button class="view-button" data-view="yesterday" onclick="switchView(\'yesterday\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #f0f0f0; color: black; cursor: pointer;">History</button>'
         text += '<button class="view-button" data-view="baseline" onclick="switchView(\'baseline\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #f0f0f0; color: black; cursor: pointer;">Yesterday Without Predbat</button>'
@@ -4528,7 +4536,7 @@ pbRegisterChart(chart, pbChartSize);
                 disabled_components.append(component_name)
 
         # Add heading with checkbox and totals on the same line
-        text += "<div style='display: flex; align-items: center; margin-bottom: 15px;'>\n"
+        text += "<div style='display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-bottom: 15px;'>\n"
         text += "<h2 style='margin: 0; margin-right: 20px;'>Component Status</h2>\n"
         text += "<label style='cursor: pointer; margin-right: 20px; white-space: nowrap;'>\n"
         text += "<input type='checkbox' id='showDisabledCheckbox' onclick='toggleDisabledComponents()' style='margin-right: 8px;'>\n"
