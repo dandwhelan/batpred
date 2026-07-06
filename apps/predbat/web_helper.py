@@ -7774,7 +7774,7 @@ if (localStorage.getItem('darkMode') === 'true') {
         background-color: #ffffff;
         display: flex;
         align-items: center;
-        flex-wrap: wrap; /* Wrap onto extra rows on narrow screens instead of scrolling sideways */
+        min-height: 56px; /* Material top app bar height */
         border-bottom: 1px solid #ddd;
         position: fixed; /* Change from sticky to fixed */
         top: 0; /* Stick to the top */
@@ -7965,7 +7965,7 @@ def get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_s
 background-color: #ffffff;
 display: flex;
 align-items: center;
-flex-wrap: wrap; /* Wrap onto extra rows on narrow screens instead of scrolling sideways */
+min-height: 56px; /* Material top app bar height */
 border-bottom: 1px solid #ddd;
 position: fixed; /* Change from sticky to fixed */
 top: 0; /* Stick to the top */
@@ -7982,11 +7982,51 @@ body {
 padding-top: 65px; /* Increased padding to account for the fixed menu height */
 }
 
+/* Hamburger button, only shown on small screens where the links live in a drawer */
+.nav-toggle {
+display: none;
+align-items: center;
+justify-content: center;
+width: 44px;
+height: 44px;
+margin-left: 4px;
+border: none;
+border-radius: 50%;
+background: transparent;
+color: #333;
+font-size: 24px;
+cursor: pointer;
+flex-shrink: 0;
+}
+.nav-toggle:hover { background-color: #f0f0f0; }
+
 .menu-bar .nav-status {
 display: flex;
 align-items: center;
 padding: 0 4px;
 min-width: fit-content; /* Prevent status icons from shrinking */
+}
+
+/* Name of the current page, shown in the app bar on small screens only */
+.nav-current {
+display: none;
+margin-left: 10px;
+font-size: 18px;
+font-weight: 500;
+color: #333;
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+min-width: 0;
+}
+
+/* Row of page links; becomes a drop-down drawer on small screens */
+.nav-links {
+display: flex;
+align-items: center;
+flex-wrap: wrap;
+flex: 1 1 auto;
+min-width: 0;
 }
 
 .menu-bar a {
@@ -8047,6 +8087,8 @@ z-index: 1100;
 .nav-more-menu a { padding: 10px 12px; border-radius: 6px; font-size: 15px; }
 .nav-warn { color: #b58900; margin-left: 5px; }
 body.dark-mode .nav-more > summary { color: #e0e0e0; }
+body.dark-mode .nav-more > summary:hover,
+body.dark-mode .nav-more[open] > summary { background-color: #333; color: #e0e0e0; }
 body.dark-mode .nav-more-menu { background: #1e1e1e; border-color: #444; }
 
 .dark-mode-toggle {
@@ -8097,29 +8139,85 @@ body.dark-mode .idle-icon {
 color: #6CFF72 !important;
 }
 
+/* !important needed to beat the global 'body.dark-mode button' restart-button rule */
 body.dark-mode .dark-mode-toggle button {
-background-color: #444;
-color: #e0e0e0;
+background-color: #444 !important;
+color: #e0e0e0 !important;
 border-color: #555;
 }
 
 body.dark-mode .dark-mode-toggle button:hover {
-background-color: #666;
+background-color: #666 !important;
 }
 
 /* Icon shown in place of the button text on small screens */
 .dark-mode-toggle .dm-icon { display: none; }
 
-/* Compact menu bar for phones/small tablets */
+/* !important needed to beat the global 'body.dark-mode button' restart-button rule */
+body.dark-mode .nav-toggle { color: #e0e0e0 !important; background: transparent !important; }
+body.dark-mode .nav-toggle:hover { background-color: #333 !important; }
+body.dark-mode .nav-current { color: #e0e0e0; }
+
+/* Material-style single-row app bar for phones/small tablets:
+   the page links collapse into a drawer behind a hamburger button */
 @media (max-width: 768px) {
+.nav-toggle { display: flex; }
 .menu-bar .nav-status { padding: 0 2px; }
-.menu-bar a { padding: 12px 8px; font-size: 14px; }
-.nav-more > summary { padding: 12px 8px; font-size: 14px; }
-.dark-mode-toggle { padding: 8px; }
+.nav-current { display: block; }
+
+/* The link row becomes a drop-down drawer under the app bar */
+.nav-links {
+display: none;
+position: absolute;
+top: 100%;
+left: 0;
+right: 0;
+flex-direction: column;
+flex-wrap: nowrap; /* A single scrolling column; never wrap into side-by-side columns */
+align-items: stretch;
+background-color: #ffffff;
+border-bottom: 1px solid #ddd;
+box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+max-height: calc(100vh - 56px);
+overflow-y: auto;
+}
+.nav-links.open { display: flex; }
+body.dark-mode .nav-links { background-color: #1e1e1e; border-color: #333; }
+
+/* Drawer rows: full width, comfortable touch targets */
+.nav-links a { padding: 14px 20px; font-size: 16px; text-align: left; }
+.nav-more { width: 100%; }
+.nav-more > summary { padding: 14px 20px; font-size: 16px; }
+
+/* Advanced expands inline within the drawer rather than as a floating menu */
+.nav-more-menu {
+position: static;
+min-width: 0;
+max-width: none;
+border: none;
+border-radius: 0;
+box-shadow: none;
+padding: 0 0 4px 16px;
+background: transparent;
+}
+body.dark-mode .nav-more-menu { background: transparent; }
+
+.dark-mode-toggle { padding: 6px 8px; }
 .dark-mode-toggle .version-label { display: none; }
 .dark-mode-toggle .dm-label { display: none; }
-.dark-mode-toggle .dm-icon { display: inline; font-size: 18px; line-height: 1; }
-.dark-mode-toggle button { padding: 7px 9px; }
+.dark-mode-toggle .dm-icon { display: inline; font-size: 20px; line-height: 1; }
+.dark-mode-toggle button {
+padding: 0;
+width: 40px;
+height: 40px;
+border: none;
+border-radius: 50%;
+background: transparent;
+display: flex;
+align-items: center;
+justify-content: center;
+}
+body.dark-mode .dark-mode-toggle button { background: transparent !important; }
 }
 </style>
 
@@ -8196,10 +8294,48 @@ if (!activeFound && menuLinks.length > 0) {
     defaultLink.classList.add('active');
     storeActiveMenuItem(new URL(defaultLink.href).pathname);
 }
+
+updateNavCurrent();
 }
 
-// Keep the body padding in sync with the real height of the fixed menu bar,
-// which can span multiple rows on narrow screens now that items wrap
+// Show the active page name in the app bar (visible on small screens only)
+function updateNavCurrent() {
+const navCurrent = document.getElementById('nav-current');
+const activeLink = document.querySelector('.menu-bar a.active');
+if (navCurrent && activeLink) {
+    navCurrent.textContent = activeLink.textContent.trim();
+}
+}
+
+// Open/close the navigation drawer (small screens)
+function toggleNavDrawer() {
+const links = document.getElementById('nav-links');
+const button = document.querySelector('.nav-toggle');
+if (links) {
+    const open = links.classList.toggle('open');
+    if (button) {
+        button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+}
+}
+
+function closeNavDrawer() {
+const links = document.getElementById('nav-links');
+const button = document.querySelector('.nav-toggle');
+if (links) {
+    links.classList.remove('open');
+}
+if (button) {
+    button.setAttribute('aria-expanded', 'false');
+}
+// Also collapse the Advanced section so the drawer reopens tidily
+const more = document.querySelector('.nav-more');
+if (more) {
+    more.removeAttribute('open');
+}
+}
+
+// Keep the body padding in sync with the real height of the fixed menu bar
 function syncMenuOffset() {
 const menuBar = document.querySelector('.menu-bar');
 if (menuBar) {
@@ -8272,7 +8408,19 @@ menuLinks.forEach(link => {
 
         // Store the clicked menu item path
         storeActiveMenuItem(new URL(this.href).pathname);
+        updateNavCurrent();
+        closeNavDrawer();
     });
+});
+
+// Close the drawer when tapping outside it
+document.addEventListener('click', function(e) {
+    const links = document.getElementById('nav-links');
+    const button = document.querySelector('.nav-toggle');
+    if (links && links.classList.contains('open') &&
+        !links.contains(e.target) && (!button || !button.contains(e.target))) {
+        closeNavDrawer();
+    }
 });
 });
 
@@ -8295,6 +8443,7 @@ setTimeout(syncMenuOffset, 100);
 </script>
 
 <div class="menu-bar">
+<button class="nav-toggle" onclick="toggleNavDrawer()" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav-links">&#9776;</button>
 <div class="nav-status">
     <span id="status-icon">"""
         + status_icon
@@ -8305,6 +8454,8 @@ setTimeout(syncMenuOffset, 100);
         + """
     </div>
 </div>
+<span class="nav-current" id="nav-current"></span>
+<nav class="nav-links" id="nav-links">
 <a href='./dash'>Dash</a>
 <a href='./plan'>Plan</a>
 <a href='./charts'>Charts</a>
@@ -8326,6 +8477,7 @@ setTimeout(syncMenuOffset, 100);
 <a href='https://springfall2008.github.io/batpred/'>Docs</a>
 </div>
 </details>
+</nav>
 <div class="dark-mode-toggle">
     <span class="version-label">"""
         + THIS_VERSION
