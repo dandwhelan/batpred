@@ -8007,20 +8007,7 @@ padding: 0 4px;
 min-width: fit-content; /* Prevent status icons from shrinking */
 }
 
-/* Name of the current page, shown in the app bar on small screens only */
-.nav-current {
-display: none;
-margin-left: 10px;
-font-size: 18px;
-font-weight: 500;
-color: #333;
-white-space: nowrap;
-overflow: hidden;
-text-overflow: ellipsis;
-min-width: 0;
-}
-
-/* Row of page links; becomes a drop-down drawer on small screens */
+/* Row of page links shown in the bar */
 .nav-links {
 display: flex;
 align-items: center;
@@ -8028,6 +8015,38 @@ flex-wrap: wrap;
 flex: 1 1 auto;
 min-width: 0;
 }
+
+/* Secondary links: inline on desktop, hidden on small screens (they live in the drawer instead) */
+.nav-extra { display: contents; }
+
+/* Drop-down drawer holding the secondary links on small screens; opened via the hamburger */
+.nav-drawer {
+display: none;
+position: absolute;
+top: 100%;
+left: 0;
+right: 0;
+flex-direction: column;
+flex-wrap: nowrap; /* A single scrolling column; never wrap into side-by-side columns */
+align-items: stretch;
+background-color: #ffffff;
+border-bottom: 1px solid #ddd;
+box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+max-height: calc(100vh - 56px);
+overflow-y: auto;
+}
+.nav-drawer a { padding: 14px 20px; font-size: 16px; text-align: left; }
+.nav-drawer .nav-sub { padding-left: 36px; }
+.nav-drawer-heading {
+padding: 12px 20px 4px;
+font-size: 13px;
+font-weight: bold;
+text-transform: uppercase;
+letter-spacing: 0.06em;
+color: #777;
+}
+body.dark-mode .nav-drawer { background-color: #1e1e1e; border-color: #333; }
+body.dark-mode .nav-drawer-heading { color: #999; }
 
 .menu-bar a {
 color: #333;
@@ -8156,51 +8175,16 @@ background-color: #666 !important;
 /* !important needed to beat the global 'body.dark-mode button' restart-button rule */
 body.dark-mode .nav-toggle { color: #e0e0e0 !important; background: transparent !important; }
 body.dark-mode .nav-toggle:hover { background-color: #333 !important; }
-body.dark-mode .nav-current { color: #e0e0e0; }
 
 /* Material-style single-row app bar for phones/small tablets:
-   the page links collapse into a drawer behind a hamburger button */
+   only the primary links (Dash/Plan/Log) stay in the bar,
+   everything else collapses into a drawer behind the hamburger button */
 @media (max-width: 768px) {
 .nav-toggle { display: flex; }
 .menu-bar .nav-status { padding: 0 2px; }
-.nav-current { display: block; }
-
-/* The link row becomes a drop-down drawer under the app bar */
-.nav-links {
-display: none;
-position: absolute;
-top: 100%;
-left: 0;
-right: 0;
-flex-direction: column;
-flex-wrap: nowrap; /* A single scrolling column; never wrap into side-by-side columns */
-align-items: stretch;
-background-color: #ffffff;
-border-bottom: 1px solid #ddd;
-box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-max-height: calc(100vh - 56px);
-overflow-y: auto;
-}
-.nav-links.open { display: flex; }
-body.dark-mode .nav-links { background-color: #1e1e1e; border-color: #333; }
-
-/* Drawer rows: full width, comfortable touch targets */
-.nav-links a { padding: 14px 20px; font-size: 16px; text-align: left; }
-.nav-more { width: 100%; }
-.nav-more > summary { padding: 14px 20px; font-size: 16px; }
-
-/* Advanced expands inline within the drawer rather than as a floating menu */
-.nav-more-menu {
-position: static;
-min-width: 0;
-max-width: none;
-border: none;
-border-radius: 0;
-box-shadow: none;
-padding: 0 0 4px 16px;
-background: transparent;
-}
-body.dark-mode .nav-more-menu { background: transparent; }
+.nav-links a { padding: 12px 10px; font-size: 15px; }
+.nav-extra { display: none; }
+.nav-drawer.open { display: flex; }
 
 .dark-mode-toggle { padding: 6px 8px; }
 .dark-mode-toggle .version-label { display: none; }
@@ -8218,6 +8202,16 @@ align-items: center;
 justify-content: center;
 }
 body.dark-mode .dark-mode-toggle button { background: transparent !important; }
+}
+
+/* Very narrow phones: squeeze the bar further so it stays a single row */
+@media (max-width: 360px) {
+.nav-toggle { width: 40px; margin-left: 0; }
+.nav-links a { padding: 12px 6px; font-size: 14px; }
+/* !important to beat the inline margins on the status icon */
+.nav-status #status-icon .mdi { margin-left: 4px !important; margin-right: 4px !important; }
+.battery-wrapper { margin-left: 4px; }
+.dark-mode-toggle { padding: 4px 4px; }
 }
 </style>
 
@@ -8295,24 +8289,14 @@ if (!activeFound && menuLinks.length > 0) {
     storeActiveMenuItem(new URL(defaultLink.href).pathname);
 }
 
-updateNavCurrent();
-}
-
-// Show the active page name in the app bar (visible on small screens only)
-function updateNavCurrent() {
-const navCurrent = document.getElementById('nav-current');
-const activeLink = document.querySelector('.menu-bar a.active');
-if (navCurrent && activeLink) {
-    navCurrent.textContent = activeLink.textContent.trim();
-}
 }
 
 // Open/close the navigation drawer (small screens)
 function toggleNavDrawer() {
-const links = document.getElementById('nav-links');
+const drawer = document.getElementById('nav-drawer');
 const button = document.querySelector('.nav-toggle');
-if (links) {
-    const open = links.classList.toggle('open');
+if (drawer) {
+    const open = drawer.classList.toggle('open');
     if (button) {
         button.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
@@ -8320,18 +8304,13 @@ if (links) {
 }
 
 function closeNavDrawer() {
-const links = document.getElementById('nav-links');
+const drawer = document.getElementById('nav-drawer');
 const button = document.querySelector('.nav-toggle');
-if (links) {
-    links.classList.remove('open');
+if (drawer) {
+    drawer.classList.remove('open');
 }
 if (button) {
     button.setAttribute('aria-expanded', 'false');
-}
-// Also collapse the Advanced section so the drawer reopens tidily
-const more = document.querySelector('.nav-more');
-if (more) {
-    more.removeAttribute('open');
 }
 }
 
@@ -8408,17 +8387,16 @@ menuLinks.forEach(link => {
 
         // Store the clicked menu item path
         storeActiveMenuItem(new URL(this.href).pathname);
-        updateNavCurrent();
         closeNavDrawer();
     });
 });
 
 // Close the drawer when tapping outside it
 document.addEventListener('click', function(e) {
-    const links = document.getElementById('nav-links');
+    const drawer = document.getElementById('nav-drawer');
     const button = document.querySelector('.nav-toggle');
-    if (links && links.classList.contains('open') &&
-        !links.contains(e.target) && (!button || !button.contains(e.target))) {
+    if (drawer && drawer.classList.contains('open') &&
+        !drawer.contains(e.target) && (!button || !button.contains(e.target))) {
         closeNavDrawer();
     }
 });
@@ -8443,7 +8421,7 @@ setTimeout(syncMenuOffset, 100);
 </script>
 
 <div class="menu-bar">
-<button class="nav-toggle" onclick="toggleNavDrawer()" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav-links">&#9776;</button>
+<button class="nav-toggle" onclick="toggleNavDrawer()" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav-drawer">&#9776;</button>
 <div class="nav-status">
     <span id="status-icon">"""
         + status_icon
@@ -8454,13 +8432,13 @@ setTimeout(syncMenuOffset, 100);
         + """
     </div>
 </div>
-<span class="nav-current" id="nav-current"></span>
-<nav class="nav-links" id="nav-links">
+<nav class="nav-links">
 <a href='./dash'>Dash</a>
 <a href='./plan'>Plan</a>
+<a href='./log'>Log</a>
+<span class="nav-extra">
 <a href='./charts'>Charts</a>
 <a href='./compare'>Compare</a>
-<a href='./log'>Log</a>
 <a href='./config'>Config</a>
 <details class="nav-more">
 <summary>Advanced &#9662;"""
@@ -8477,6 +8455,23 @@ setTimeout(syncMenuOffset, 100);
 <a href='https://springfall2008.github.io/batpred/'>Docs</a>
 </div>
 </details>
+</span>
+</nav>
+<nav class="nav-drawer" id="nav-drawer">
+<a href='./charts'>Charts</a>
+<a href='./compare'>Compare</a>
+<a href='./config'>Config</a>
+<div class="nav-drawer-heading">Advanced"""
+        + config_warning
+        + """</div>
+<a class="nav-sub" href='./entity'>Entities</a>
+<a class="nav-sub" href='./apps'>Apps</a>
+<a class="nav-sub" href='./apps_editor'>Editor</a>
+<a class="nav-sub" href='./components'>Components</a>
+<a class="nav-sub" href='./browse'>Browse</a>
+<a class="nav-sub" href='./internals'>Internals</a>
+<a class="nav-sub" href='./metrics_dashboard'>Metrics</a>
+<a class="nav-sub" href='https://springfall2008.github.io/batpred/'>Docs</a>
 </nav>
 <div class="dark-mode-toggle">
     <span class="version-label">"""
