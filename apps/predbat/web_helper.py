@@ -7772,14 +7772,10 @@ if (localStorage.getItem('darkMode') === 'true') {
 
     .menu-bar {
         background-color: #ffffff;
-        overflow-x: auto; /* Enable horizontal scrolling */
-        white-space: nowrap; /* Prevent menu items from wrapping */
         display: flex;
         align-items: center;
+        flex-wrap: wrap; /* Wrap onto extra rows on narrow screens instead of scrolling sideways */
         border-bottom: 1px solid #ddd;
-        -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-        scrollbar-width: thin; /* Firefox */
-        scrollbar-color: #4CAF50 #f0f0f0; /* Firefox */
         position: fixed; /* Change from sticky to fixed */
         top: 0; /* Stick to the top */
         left: 0; /* Ensure it starts from the left edge */
@@ -7832,47 +7828,6 @@ if (localStorage.getItem('darkMode') === 'true') {
         margin-left: 10px;
     }
 
-    /* Flying bat animation */
-    @keyframes flyAcross {
-        0% {
-            left: 10px;
-            top: 30px;
-            transform: translateY(0) scale(1.5);
-        }
-        25% {
-            left: 25%;
-            top: 65%;
-            transform: translateY(0) scale(2.0) rotate(45deg);
-        }
-        50% {
-            left: 50%;
-            top: 30px;
-            transform: translateY(0) scale(1.5) rotate(-45deg);
-        }
-        75% {
-            left: 75%;
-            top: 65%;
-            transform: translateY(0) scale(2.0) rotate(45deg);
-        }
-        100% {
-            left: 100%;
-            top: 30px;
-            transform: translateY(0) scale(1.5);
-        }
-    }
-
-    .flying-bat {
-        position: fixed;
-        z-index: 9999;
-        width: 60px;
-        height: 60px;
-        background-size: contain;
-        background-repeat: no-repeat;
-        background-position: center;
-        pointer-events: none;
-        animation: flyAcross 3s linear forwards;
-    }
-
 </style>
 <script>
 // Check and apply the saved dark mode preference on page load
@@ -7889,16 +7844,6 @@ function applyDarkMode() {
         document.body.classList.remove('dark-mode');
         document.documentElement.classList.remove('dark-mode');
     }
-
-    // Update logo image source based on dark mode
-    const logoImage = document.getElementById('logo-image');
-    if (logoImage) {
-        if (darkModeEnabled) {
-            logoImage.src = logoImage.getAttribute('data-dark-src');
-        } else {
-            logoImage.src = logoImage.getAttribute('data-light-src');
-        }
-    }
 };
 
 function toggleDarkMode() {
@@ -7906,31 +7851,6 @@ function toggleDarkMode() {
     localStorage.setItem('darkMode', isDarkMode);
     // Force reload to apply dark mode styles
     location.reload();
-}
-
-function flyBat() {
-    // Remove any existing flying bats
-    document.querySelectorAll('.flying-bat').forEach(bat => bat.remove());
-
-    // Create a new bat element
-    const bat = document.createElement('div');
-    bat.className = 'flying-bat';
-
-    // Get the appropriate bat image based on dark/light mode
-    const isDarkMode = document.body.classList.contains('dark-mode');
-    const batImage = isDarkMode
-        ? 'https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_dark.png'
-        : 'https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_light.png';
-
-    bat.style.backgroundImage = `url('${batImage}')`;
-
-    // Add to document
-    document.body.appendChild(bat);
-
-    // Remove after animation completes
-    setTimeout(() => {
-        bat.remove();
-    }, 4100);  // Slightly longer than the animation duration
 }
 
 function restartPredbat() {
@@ -8043,14 +7963,10 @@ def get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_s
 <style>
 .menu-bar {
 background-color: #ffffff;
-overflow-x: auto; /* Enable horizontal scrolling */
-white-space: nowrap; /* Prevent menu items from wrapping */
 display: flex;
 align-items: center;
+flex-wrap: wrap; /* Wrap onto extra rows on narrow screens instead of scrolling sideways */
 border-bottom: 1px solid #ddd;
--webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-scrollbar-width: thin; /* Firefox */
-scrollbar-color: #4CAF50 #f0f0f0; /* Firefox */
 position: fixed; /* Change from sticky to fixed */
 top: 0; /* Stick to the top */
 left: 0; /* Ensure it starts from the left edge */
@@ -8060,28 +7976,17 @@ z-index: 1000; /* Ensure it's above other content */
 box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1); /* Add subtle shadow for visual separation */
 }
 
-/* Add padding to body to prevent content from hiding under fixed header */
+/* Add padding to body to prevent content from hiding under fixed header.
+   syncMenuOffset() adjusts this to the real menu height once the page loads. */
 body {
 padding-top: 65px; /* Increased padding to account for the fixed menu height */
 }
 
-.menu-bar .logo {
+.menu-bar .nav-status {
 display: flex;
 align-items: center;
-padding: 0 16px;
-min-width: fit-content; /* Prevent logo from shrinking */
-}
-
-.menu-bar .logo img {
-height: 40px;
-margin-right: 10px;
-}
-
-.menu-bar .logo-text {
-font-size: 24px;
-font-weight: bold;
-color: #333;
-white-space: nowrap;
+padding: 0 4px;
+min-width: fit-content; /* Prevent status icons from shrinking */
 }
 
 .menu-bar a {
@@ -8108,7 +8013,7 @@ background-color: #4CAF50;
 color: white;
 }
 
-.nav-more { position: relative; flex-shrink: 0; }
+.nav-more { flex-shrink: 0; }
 .nav-more > summary {
 list-style: none;
 cursor: pointer;
@@ -8124,10 +8029,12 @@ white-space: nowrap;
 .nav-more[open] > summary { background-color: #f0f0f0; }
 .nav-more:has(a.active) > summary { color: #2E7D32; font-weight: bold; }
 .nav-more-menu {
-position: fixed;
-top: 56px;
+/* Positioned relative to the fixed .menu-bar, so it always opens just below the bar */
+position: absolute;
+top: 100%;
 right: 8px;
 min-width: 190px;
+max-width: calc(100vw - 16px);
 background: var(--pb-surface, #fff);
 border: 1px solid var(--pb-line, #ddd);
 border-radius: 8px;
@@ -8166,15 +8073,6 @@ background-color: #e0e0e0;
 body.dark-mode .menu-bar {
 background-color: #1e1e1e;
 border-bottom: 1px solid #333;
-scrollbar-color: #4CAF50 #333; /* Firefox */
-}
-
-body.dark-mode .menu-bar::-webkit-scrollbar-track {
-background: #333;
-}
-
-body.dark-mode .menu-bar .logo-text {
-color: white;
 }
 
 body.dark-mode .menu-bar a {
@@ -8214,11 +8112,9 @@ background-color: #666;
 
 /* Compact menu bar for phones/small tablets */
 @media (max-width: 768px) {
-.menu-bar .logo { padding: 0 8px; }
-.menu-bar .logo img { height: 30px; margin-right: 6px; }
-.menu-bar a { padding: 12px 9px; font-size: 14px; }
-.nav-more > summary { padding: 12px 9px; font-size: 14px; }
-.nav-more-menu { top: 48px; }
+.menu-bar .nav-status { padding: 0 2px; }
+.menu-bar a { padding: 12px 8px; font-size: 14px; }
+.nav-more > summary { padding: 12px 8px; font-size: 14px; }
 .dark-mode-toggle { padding: 8px; }
 .dark-mode-toggle .version-label { display: none; }
 .dark-mode-toggle .dm-label { display: none; }
@@ -8300,15 +8196,14 @@ if (!activeFound && menuLinks.length > 0) {
     defaultLink.classList.add('active');
     storeActiveMenuItem(new URL(defaultLink.href).pathname);
 }
+}
 
-// Scroll active item into view
-const activeItem = document.querySelector('.menu-bar a.active');
-if (activeItem) {
-    // Scroll with a slight offset to make it more visible
-    const menuBar = document.querySelector('.menu-bar');
-    const activeItemLeft = activeItem.offsetLeft;
-    const menuBarWidth = menuBar.clientWidth;
-    menuBar.scrollLeft = activeItemLeft - menuBarWidth / 2 + activeItem.clientWidth / 2;
+// Keep the body padding in sync with the real height of the fixed menu bar,
+// which can span multiple rows on narrow screens now that items wrap
+function syncMenuOffset() {
+const menuBar = document.querySelector('.menu-bar');
+if (menuBar) {
+    document.body.style.paddingTop = (menuBar.offsetHeight + 8) + 'px';
 }
 }
 
@@ -8357,6 +8252,7 @@ function stopStatusUpdates() {
 // Initialise menu on page load
 document.addEventListener("DOMContentLoaded", function() {
 setActiveMenuItem();
+syncMenuOffset();
 startStatusUpdates();
 
 // For each menu item, add click handler to set it as active
@@ -8388,33 +8284,18 @@ if (typeof originalOnLoad === 'function') {
     originalOnLoad();
 }
 applyDarkMode();
+// Re-measure once everything (fonts, icons) has loaded as the bar height can change
+syncMenuOffset();
 };
 
-// Handle window resize without losing active menu item
+// Re-measure the menu height when the window resizes, as wrapping can change it
 window.addEventListener('resize', function() {
-// Don't reload the page, just make sure the active menu item is visible
-setTimeout(function() {
-    const activeItem = document.querySelector('.menu-bar a.active');
-    if (activeItem) {
-        const menuBar = document.querySelector('.menu-bar');
-        const activeItemLeft = activeItem.offsetLeft;
-        const menuBarWidth = menuBar.clientWidth;
-        menuBar.scrollLeft = activeItemLeft - menuBarWidth / 2 + activeItem.clientWidth / 2;
-    }
-}, 100);
+setTimeout(syncMenuOffset, 100);
 });
 </script>
 
 <div class="menu-bar">
-<div class="logo">
-    <img id="logo-image"
-            src="https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_light.png"
-            data-light-src="https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_light.png"
-            data-dark-src="https://raw.githubusercontent.com/springfall2008/batpred/refs/heads/main/docs/images/bat_logo_dark.png"
-            alt="Predbat Logo"
-            onclick="flyBat()"
-            style="cursor: pointer;"
-    >
+<div class="nav-status">
     <span id="status-icon">"""
         + status_icon
         + """</span>
