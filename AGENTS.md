@@ -132,11 +132,13 @@ Predbat supports UK Feed-in Tariff schemes where users earn a generation tariff 
 
 ### How It Works
 
-When `metric_fit_generation_rate` is set above 0 (Expert Mode), FIT mode is activated:
+FIT is off by default. When the `metric_fit_enable` master switch is turned on **and** `metric_fit_generation_rate` is set above 0 (both Expert Mode), FIT mode is activated:
 
 - **Export rate zeroed in optimizer**: Since deemed export pays regardless of actual export, the optimizer treats actual export as having zero additional value. This makes the optimizer prefer self-consumption of solar over exporting it.
 - **Battery headroom for solar**: The optimizer will not charge the battery to 100% from the grid when solar generation is forecast, leaving room for solar to charge the battery during the day.
 - **FIT income tracked**: Generation and deemed export income are subtracted from the cost metric for accurate cost/savings display.
+
+Turning `metric_fit_enable` off zeroes the FIT rates at config-load time (`Fetch.fit_apply_enable()`), so every downstream consumer — the Python prediction engine, the C++ kernel, and the published sensors — sees FIT as inactive without the user having to clear their configured rates. Because this gate lives at the single point where rates are loaded, no kernel change or ABI bump is required for the toggle.
 
 ### Config Items
 
@@ -144,6 +146,7 @@ All under Expert Mode in `config.py`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `metric_fit_enable` | False | Master switch (off by default); must be turned on to activate FIT, otherwise all FIT behaviour is disabled and configured rates are ignored |
 | `metric_fit_generation_rate` | 0 p/kWh | FIT generation tariff rate |
 | `metric_fit_deemed_export_rate` | 0 p/kWh | Deemed export tariff rate |
 | `metric_fit_deemed_export_percentage` | 50% | Deemed export percentage |
@@ -162,12 +165,13 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 
 | File | What changed |
 |------|-------------|
-| `config.py` | Three new `CONFIG_ITEMS` entries for FIT settings |
-| `fetch.py` | Loads FIT config values, logs when FIT is enabled |
+| `config.py` | `metric_fit_enable` master switch plus three FIT rate `CONFIG_ITEMS` entries |
+| `fetch.py` | Loads FIT config values, applies the `metric_fit_enable` gate (`fit_apply_enable()`), logs when FIT is enabled or disabled by the switch |
 | `prediction.py` | Zeros export rate when FIT enabled; tracks FIT income per simulation step |
 | `plan.py` | Extracts FIT income from prediction results; publishes `fit_income` / `fit_income_best` sensors |
 | `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
-| `tests/test_infra.py` | FIT defaults added to test config and `reset_inverter()` |
+| `tests/test_infra.py` | FIT defaults (including `metric_fit_enable`) added to test config and `reset_inverter()` |
+| `tests/test_fit.py` | Covers the FIT calculator plus the `metric_fit_enable` master-switch toggle |
 | `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 102) |
 | `tests/test_kernel_parity.py` | FIT deterministic edge cases and FIT rate randomisation in the parity sweep |
 

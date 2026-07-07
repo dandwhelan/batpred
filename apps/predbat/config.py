@@ -513,6 +513,13 @@ CONFIG_ITEMS = [
         "default": 0.0,
     },
     {
+        "name": "metric_fit_enable",
+        "friendly_name": "FIT Enable",
+        "type": "switch",
+        "enable": "expert_mode",
+        "default": False,
+    },
+    {
         "name": "metric_fit_generation_rate",
         "friendly_name": "FIT Generation Rate",
         "type": "input_number",
