@@ -12,11 +12,13 @@
 from tests.test_infra import reset_rates, reset_inverter, simple_scenario
 
 
-def _set_fit(my_predbat, generation_rate=0.0, deemed_rate=0.0, deemed_pct=50.0):
-    """Set FIT configuration on the predbat instance."""
+def _set_fit(my_predbat, generation_rate=0.0, deemed_rate=0.0, deemed_pct=50.0, enable=True):
+    """Set FIT configuration on the predbat instance and apply the master switch."""
+    my_predbat.metric_fit_enable = enable
     my_predbat.metric_fit_generation_rate = generation_rate
     my_predbat.metric_fit_deemed_export_rate = deemed_rate
     my_predbat.metric_fit_deemed_export_percentage = deemed_pct
+    my_predbat.fit_apply_enable()
 
 
 def _check(name, value, expected, tolerance=0.5):
@@ -151,6 +153,27 @@ def run_fit_tests(my_predbat):
     failed |= fail
     failed |= _check("fit_clipping_deemed.gen_income", pred.final_fit_generation_income, 0)
     failed |= _check("fit_clipping_deemed.deemed_income", pred.final_fit_deemed_export_income, 36 * 0.5 * 4.0, tolerance=2.0)
+
+    # --- Test 7: FIT master switch off disables FIT even when rates are configured ---
+    # Rates are set as for the full FIT case but the master switch is off, so the gate
+    # zeroes the rates and the scenario must behave exactly like FIT disabled: export rate
+    # left intact and no FIT income tracked.
+    _set_fit(my_predbat, generation_rate=10.0, deemed_rate=5.0, deemed_pct=50.0, enable=False)
+    failed |= _check("fit_switch_off.gen_rate", my_predbat.metric_fit_generation_rate, 0)
+    failed |= _check("fit_switch_off.deemed_rate", my_predbat.metric_fit_deemed_export_rate, 0)
+    fail, pred = simple_scenario(
+        "fit_switch_off",
+        my_predbat,
+        load_amount=0,
+        pv_amount=1,
+        assert_final_metric=-export_rate * 24,  # exports 24kWh @ 5p, export rate NOT zeroed
+        assert_final_soc=0,
+        with_battery=False,
+        return_prediction_handle=True,
+    )
+    failed |= fail
+    failed |= _check("fit_switch_off.gen_income", pred.final_fit_generation_income, 0)
+    failed |= _check("fit_switch_off.deemed_income", pred.final_fit_deemed_export_income, 0)
 
     # Restore default FIT config so subsequent tests are unaffected.
     _set_fit(my_predbat, generation_rate=0.0, deemed_rate=0.0, deemed_pct=50.0)
