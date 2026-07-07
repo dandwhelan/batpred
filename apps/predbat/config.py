@@ -517,7 +517,7 @@ CONFIG_ITEMS = [
         "friendly_name": "FIT Enable",
         "type": "switch",
         "enable": "expert_mode",
-        "default": True,
+        "default": False,
     },
     {
         "name": "metric_fit_generation_rate",

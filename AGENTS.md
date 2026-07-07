@@ -132,7 +132,7 @@ Predbat supports UK Feed-in Tariff schemes where users earn a generation tariff 
 
 ### How It Works
 
-When the `metric_fit_enable` master switch is on (default) **and** `metric_fit_generation_rate` is set above 0 (Expert Mode), FIT mode is activated:
+FIT is off by default. When the `metric_fit_enable` master switch is turned on **and** `metric_fit_generation_rate` is set above 0 (both Expert Mode), FIT mode is activated:
 
 - **Export rate zeroed in optimizer**: Since deemed export pays regardless of actual export, the optimizer treats actual export as having zero additional value. This makes the optimizer prefer self-consumption of solar over exporting it.
 - **Battery headroom for solar**: The optimizer will not charge the battery to 100% from the grid when solar generation is forecast, leaving room for solar to charge the battery during the day.
@@ -146,7 +146,7 @@ All under Expert Mode in `config.py`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `metric_fit_enable` | True | Master switch; when off, all FIT behaviour is disabled and configured rates are ignored |
+| `metric_fit_enable` | False | Master switch (off by default); must be turned on to activate FIT, otherwise all FIT behaviour is disabled and configured rates are ignored |
 | `metric_fit_generation_rate` | 0 p/kWh | FIT generation tariff rate |
 | `metric_fit_deemed_export_rate` | 0 p/kWh | Deemed export tariff rate |
 | `metric_fit_deemed_export_percentage` | 50% | Deemed export percentage |
