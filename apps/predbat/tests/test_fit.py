@@ -37,6 +37,14 @@ def run_fit_tests(my_predbat):
     export_rate = 5.0
     reset_rates(my_predbat, import_rate, export_rate)
 
+    # The FIT income breakdown (final_fit_generation_income / final_fit_deemed_export_income) is
+    # produced only by the Python prediction engine's save-mode run - the same path that publishes
+    # the fit_income sensors in production (the kernel is never used when save is set). The C++
+    # kernel mirrors only the FIT metric adjustment (its parity is covered by test_kernel_parity),
+    # so force the Python engine here to exercise the income breakdown these tests assert on.
+    kernel_enable_saved = getattr(my_predbat, "prediction_kernel_enable", False)
+    my_predbat.prediction_kernel_enable = False
+
     failed = False
 
     # --- Test 1: FIT disabled -> no income tracked, export rate unaffected ---
@@ -175,8 +183,9 @@ def run_fit_tests(my_predbat):
     failed |= _check("fit_switch_off.gen_income", pred.final_fit_generation_income, 0)
     failed |= _check("fit_switch_off.deemed_income", pred.final_fit_deemed_export_income, 0)
 
-    # Restore default FIT config so subsequent tests are unaffected.
+    # Restore default FIT config and the prediction-kernel setting so subsequent tests are unaffected.
     _set_fit(my_predbat, generation_rate=0.0, deemed_rate=0.0, deemed_pct=50.0)
+    my_predbat.prediction_kernel_enable = kernel_enable_saved
 
     if failed:
         print("**** FIT tests FAILED ****")

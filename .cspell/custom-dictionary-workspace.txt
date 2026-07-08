@@ -124,6 +124,7 @@ evergen
 evse
 exog
 exportlimit
+exportvalue
 fdpwr
 fdsoc
 feedin
@@ -138,6 +139,7 @@ fontsize
 fontweight
 Forestfire
 foxess
+foxesscloud
 freephase
 fronius
 funcs
@@ -153,6 +155,7 @@ Ginlong
 GivEnergy
 givtcp
 gnueabihf
+gridcode
 gridconsumption
 gridconsumptionpower
 gridlines
@@ -184,6 +187,7 @@ idag
 idetails
 idxs
 iflux
+importlimit
 inday
 INTELLI
 intelligentdevice
@@ -289,6 +293,7 @@ openweathermap
 overfitting
 overvoltage
 ownerapi
+parseable
 pbat
 pbgw
 pdata
@@ -316,6 +321,7 @@ psum
 pvbat
 pvenergytotal
 pvlib
+pvlimit
 pvpower
 pvwatts
 pwindow
@@ -326,8 +332,10 @@ pytest
 pytz
 randn
 rarr
+reactivepower
 recp
-Redownload
+redownload
+refetches
 regionid
 regname
 remainings
