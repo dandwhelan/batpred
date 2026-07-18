@@ -2771,6 +2771,39 @@ body.dark-mode .ent-detail > td { background: #1a201c; }
 .dash-refresh-btn:hover { background: #0d4f97; }
 body.dark-mode .dash-refresh-btn { background: #1565C0 !important; color: #fff !important; }
 body.dark-mode .dash-refresh-btn:hover { background: #0d4f97 !important; }
+/* Isometric power-flow scene */
+.pf-scene { width: 100%; max-width: 560px; height: auto; display: block; margin: 0 auto; }
+.pf-ground { fill: #eef1f4; }
+.pf-wall-l { fill: #f9fafb; stroke: #d7dce1; stroke-width: 1; }
+.pf-wall-r { fill: #e2e7ec; stroke: #ccd3d9; stroke-width: 1; }
+.pf-roof { fill: #dbe1e8; stroke: #c5cdd5; stroke-width: 1; }
+.pf-panel { fill: #2c3e50; stroke: #1d2b3a; stroke-width: 0.005; }
+.pf-panel-line { stroke: #506b85; stroke-width: 1; }
+.pf-glass { fill: #bcd6e4; stroke: #9fb4c0; stroke-width: 1; }
+.pf-door { fill: #b0bec5; stroke: #90a4ae; stroke-width: 1; }
+.pf-pole { fill: #8d99a3; }
+.pf-wire { stroke: #8d99a3; stroke-width: 1.5; fill: none; }
+.pf-car-body { fill: #cfd8dc; stroke: #a4b0b7; stroke-width: 1; }
+.pf-wheel { fill: #37474f; }
+.pf-flow-base { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.pf-flow { fill: none; stroke-linecap: round; stroke-linejoin: round; animation: pf-dash 1.2s linear infinite; }
+.pf-flow-rev { animation-direction: reverse; }
+@keyframes pf-dash { to { stroke-dashoffset: -32; } }
+@media (prefers-reduced-motion: reduce) { .pf-flow { animation: none; } }
+body.dark-mode .pf-ground { fill: #23272b; }
+body.dark-mode .pf-wall-l { fill: #3a4148; stroke: #4c545c; }
+body.dark-mode .pf-wall-r { fill: #2d3339; stroke: #434b52; }
+body.dark-mode .pf-roof { fill: #333a41; stroke: #475058; }
+body.dark-mode .pf-glass { fill: #4a6273; stroke: #5d7a8d; }
+body.dark-mode .pf-door { fill: #4d585f; stroke: #5f6b73; }
+body.dark-mode .pf-pole, body.dark-mode .pf-wire { fill: #5c666e; stroke: #5c666e; }
+body.dark-mode .pf-wire { fill: none; }
+body.dark-mode .pf-car-body { fill: #465158; stroke: #57636b; }
+/* Battery elements are slate-coloured; lighten them so they stand out on the dark walls */
+body.dark-mode path.pf-batt { stroke: #90a4ae; }
+body.dark-mode rect.pf-batt { fill: #546e7a; }
+body.dark-mode circle.pf-batt { fill: #90a4ae; }
+
 .rate-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .chip { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 8px; }
 .chip-imp { background: #fae9e7; color: #c0362c; }

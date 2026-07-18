@@ -156,11 +156,81 @@ def run_web_functions_tests(my_predbat):
     my_predbat.dashboard_index = original_dashboard_index
 
     # -------------------------------------------------------------------------
+    # Isometric power-flow diagram
+    failed += run_power_flow_tests(my_predbat, web)
+
+    # -------------------------------------------------------------------------
     # Currency unit display in the web config pages (issue #4071)
     # The web UI must show the user's configured currency symbol, not the raw "p".
     failed += run_currency_unit_tests(my_predbat, web)
 
     print("**** Web functions tests completed ****")
+    return failed
+
+
+def run_power_flow_tests(my_predbat, web):
+    """Unit tests for the isometric power-flow diagram SVG."""
+    failed = 0
+    print("Test: isometric power-flow diagram")
+
+    def set_powers(pv=0, load=0, batt=0, grid=0, soc=0):
+        my_predbat.pv_power = pv
+        my_predbat.load_power = load
+        my_predbat.battery_power = batt
+        my_predbat.grid_power = grid
+        my_predbat.soc_percent = soc
+
+    def expect(result, fragment, message):
+        nonlocal failed
+        if fragment not in result:
+            print("  ERROR: {}: expected '{}' in diagram".format(message, fragment))
+            failed += 1
+
+    def expect_not(result, fragment, message):
+        nonlocal failed
+        if fragment in result:
+            print("  ERROR: {}: did not expect '{}' in diagram".format(message, fragment))
+            failed += 1
+
+    # Solar generating, battery charging, grid importing
+    set_powers(pv=2200, load=412, batt=1500, grid=-300, soc=28)
+    result = web.get_power_flow_diagram()
+    expect(result, "2200 W", "solar power value shown")
+    expect(result, "412 W", "house load value shown")
+    expect(result, "300 W", "grid power value shown")
+    expect(result, "28% · 1500 W", "battery SOC and power shown when charging")
+    expect(result, "#C62828", "grid pill red when importing")
+    expect(result, "importing", "accessible description says importing")
+    expect(result, "charging", "accessible description says charging")
+    expect(result, 'class="pf-flow "', "solar flow animated when generating")
+    expect(result, "pf-flow pf-flow-rev pf-batt", "battery flow animates in reverse when charging")
+
+    # Battery discharging, grid exporting
+    set_powers(pv=0, load=950, batt=-800, grid=1200, soc=76)
+    result = web.get_power_flow_diagram()
+    expect(result, "#2E7D32", "grid pill green when exporting")
+    expect_not(result, "#C62828", "no red import colour when exporting")
+    expect(result, "exporting", "accessible description says exporting")
+    expect(result, "discharging", "accessible description says discharging")
+    expect(result, "pf-flow pf-batt", "battery flow animates forwards when discharging")
+    expect_not(result, "pf-flow-rev pf-batt", "battery flow not reversed when discharging")
+    expect(result, "76% · 800 W", "battery SOC and power shown when discharging")
+
+    # Everything idle
+    set_powers(pv=0, load=5, batt=0, grid=0, soc=50)
+    result = web.get_power_flow_diagram()
+    expect(result, "#78909C", "grid pill grey when idle")
+    expect_not(result, "pf-flow ", "no animated flows when idle")
+    expect(result, "50%", "battery SOC shown when idle")
+    expect_not(result, "50% ·", "no battery power shown when idle")
+
+    # Scene furniture is always present
+    expect(result, "pf-panel", "solar panels drawn")
+    expect(result, "pf-pole", "grid pylon drawn")
+    expect(result, "pf-car-body", "EV drawn")
+    expect(result, "pf-scene", "scene svg class present")
+
+    set_powers()
     return failed
 
 
