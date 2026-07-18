@@ -76,6 +76,7 @@ darkgreen
 darkred
 darray
 dasharray
+dashoffset
 datain
 datalog
 datap
@@ -218,6 +219,7 @@ larr
 libc
 linebreak
 linecap
+linejoin
 linestyle
 loadml
 loadmlpower

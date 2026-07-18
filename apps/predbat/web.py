@@ -328,79 +328,191 @@ class WebInterface(ComponentBase):
 
     def get_power_flow_diagram(self):
         """
-        Compact 'diamond' power-flow diagram: Solar (top), House (centre),
-        Battery (lower left), Grid (lower right), with animated flow connectors.
+        Isometric 'house scene' power-flow diagram: a house with a solar-panel
+        roof, attached garage with an EV, and a grid pylon, annotated with
+        colour-coded power pills (solar, house load, grid, battery SOC) joined
+        by animated flow lines. Scene colours live in CSS (pf-* classes) so
+        light and dark mode both work.
         """
         grid_power = self.base.grid_power
         battery_power = self.base.battery_power
         pv_power = self.base.pv_power
         load_power = self.base.load_power
+        soc_percent = self.base.soc_percent
 
         grid_importing = grid_power <= -10
         grid_exporting = grid_power >= 10
         battery_charging = battery_power >= 10
         battery_discharging = battery_power <= -10
+        battery_active = battery_charging or battery_discharging
         pv_generating = pv_power > 0
+        house_consuming = load_power > 10
 
-        # Darker fills so the white in-circle text clears WCAG AA contrast
+        # Pill fills are dark enough for white text to clear WCAG AA contrast
         SOLAR = "#A85F00"
-        HOUSE = "#7E57C2"
-        BATT = "#1565C0"
-        GRID = "#2E7D32"
+        HOUSE = "#00838F"
+        BATT = "#37474F"
+        GRID_IMP = "#C62828"
+        GRID_EXP = "#2E7D32"
+        GRID_IDLE = "#78909C"
+        grid_color = GRID_EXP if grid_exporting else (GRID_IMP if grid_importing else GRID_IDLE)
 
-        def node(cx, cy, fill, name, val):
-            return (
-                '<circle cx="{cx}" cy="{cy}" r="40" fill="{fill}" />'
-                '<text x="{cx}" y="{cy}" text-anchor="middle" dy="-4" fill="#ffffff" font-size="13" font-weight="600">{name}</text>'
-                '<text x="{cx}" y="{cy}" text-anchor="middle" dy="14" fill="#ffffff" font-size="12">{val} W</text>'
-            ).format(cx=cx, cy=cy, fill=fill, name=name, val=dp0(abs(val)))
+        # --- Isometric projection helpers (2:1-ish axonometric) -------------
+        ISO_X = 0.866  # cos(30)
+        ISO_Y = 0.5  # sin(30)
 
-        def flow(x1, y1, x2, y2, color, active, reverse=False):
-            if reverse:
-                x1, y1, x2, y2 = x2, y2, x1, y1
+        def iso(origin, du, dw, dz=0):
+            # du: along the right-facing axis, dw: along the left-facing axis, dz: up
+            return (origin[0] + ISO_X * (du - dw), origin[1] + ISO_Y * (du + dw) - dz)
+
+        def pts(*points):
+            return " ".join("{:.1f},{:.1f}".format(x, y) for x, y in points)
+
+        def poly(css, *points, extra=""):
+            return '<polygon class="{}" points="{}" {}/>'.format(css, pts(*points), extra)
+
+        def matrix(origin, e1, e2):
+            # SVG matrix mapping unit-square coords onto the plane spanned by e1/e2 at origin
+            return "matrix({:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f})".format(e1[0], e1[1], e2[0], e2[1], origin[0], origin[1])
+
+        def flow_path(d, color, active, reverse=False, css=""):
+            # Faint solid guide line, plus an animated dash overlay when power is flowing
+            out = '<path class="pf-flow-base {}" d="{}" stroke="{}" stroke-width="4" opacity="{}" />'.format(css, d, color, "0.35" if active else "0.18")
             if active:
-                # CSS-animated dashes (class pf-flow): respects prefers-reduced-motion and survives innerHTML refresh
-                return '<line class="pf-flow" x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="3" stroke-linecap="round" stroke-dasharray="7 7" />'.format(x1, y1, x2, y2, color)
-            return '<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="2" stroke-dasharray="3 6" opacity="0.4" />'.format(x1, y1, x2, y2, color)
+                anim = "pf-flow pf-flow-rev" if reverse else "pf-flow"
+                out += '<path class="{} {}" d="{}" stroke="{}" stroke-width="4" stroke-dasharray="6 10" />'.format(anim, css, d, color)
+            return out
 
-        def vlabel(x, y, val):
-            # Neutral fill via CSS var so the label is readable in both light and dark mode
-            return '<text class="pf-val" x="{}" y="{}" text-anchor="middle" font-size="12" font-weight="600">{} W</text>'.format(x, y, dp0(abs(val)))
+        def dot(x, y, color, css=""):
+            return '<circle class="{}" cx="{:.1f}" cy="{:.1f}" r="4.5" fill="{}" stroke="#ffffff" stroke-width="1.5" />'.format(css, x, y, color)
 
+        def pill(cx, cy, color, icon, text, css=""):
+            # Rounded label pill with a small white glyph and value text
+            width = 30 + 7.5 * len(text)
+            x = cx - width / 2
+            out = '<rect class="{}" x="{:.1f}" y="{:.1f}" width="{:.1f}" height="26" rx="13" fill="{}" />'.format(css, x, cy - 13, width, color)
+            out += '<g transform="translate({:.1f},{:.1f})">{}</g>'.format(x + 15, cy, icon)
+            out += '<text x="{:.1f}" y="{:.1f}" fill="#ffffff" font-size="13" font-weight="600" dominant-baseline="middle">{}</text>'.format(x + 26, cy + 1, text)
+            return out
+
+        # Small white glyphs, drawn around (0,0) so pill() can position them
+        icon_sun = '<circle r="3.5" fill="none" stroke="#fff" stroke-width="1.6"/><g stroke="#fff" stroke-width="1.4" stroke-linecap="round"><line y1="-6.5" y2="-5"/><line y1="5" y2="6.5"/><line x1="-6.5" x2="-5"/><line x1="5" x2="6.5"/><line x1="-4.6" y1="-4.6" x2="-3.5" y2="-3.5"/><line x1="3.5" y1="3.5" x2="4.6" y2="4.6"/><line x1="-4.6" y1="4.6" x2="-3.5" y2="3.5"/><line x1="3.5" y1="-3.5" x2="4.6" y2="-4.6"/></g>'
+        icon_home = '<path d="M -6,0 L 0,-6 L 6,0 M -4.5,-1 V 6 H 4.5 V -1" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'
+        icon_bolt = '<path d="M 1.5,-7 L -4,1 L -0.5,1 L -1.5,7 L 4,-1 L 0.5,-1 Z" fill="#fff"/>'
+        icon_batt = '<rect x="-6" y="-3.5" width="10" height="7" rx="1.5" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="4.5" y="-1.8" width="2" height="3.6" rx="0.8" fill="#fff"/>'
+
+        # --- Scene geometry --------------------------------------------------
+        # House: walls + pitched roof, ridge running along the right-facing axis
+        HO = (330, 280)  # house ground-centre
+        HA, HB, WALL_H, ROOF_H = 95, 68, 82, 46
+        h_f = iso(HO, HA, HB)  # front (nearest) corner
+        h_r = iso(HO, HA, -HB)  # right corner
+        h_l = iso(HO, -HA, HB)  # left corner
+        h_ft = iso(HO, HA, HB, WALL_H)
+        h_rt = iso(HO, HA, -HB, WALL_H)
+        h_lt = iso(HO, -HA, HB, WALL_H)
+        ridge_f = iso(HO, HA, 0, WALL_H + ROOF_H)
+        ridge_b = iso(HO, -HA, 0, WALL_H + ROOF_H)
+
+        scene = ""
+        # Ground
+        scene += '<ellipse class="pf-ground" cx="340" cy="342" rx="312" ry="82" />'
+
+        # Grid pylon (behind the house flows)
+        scene += poly("pf-pole", (561, 120), (569, 120), (574, 316), (556, 316))
+        scene += '<rect class="pf-pole" x="531" y="133" width="68" height="6" rx="2" /><rect class="pf-pole" x="541" y="158" width="48" height="5" rx="2" />'
+        scene += '<path class="pf-wire" d="M 536,142 Q 500,190 471,213" /><path class="pf-wire" d="M 594,142 Q 622,162 640,178" />'
+
+        # House walls, roof and gable
+        scene += poly("pf-wall-l", h_l, h_f, h_ft, h_lt)
+        scene += poly("pf-wall-r", h_f, h_r, h_rt, h_ft)
+        scene += poly("pf-wall-r", h_ft, h_rt, ridge_f)  # gable end
+        scene += poly("pf-roof", h_lt, ridge_b, ridge_f, h_ft)
+
+        # Solar panels laid onto the roof plane via a plane-transform
+        roof_e1 = (h_ft[0] - h_lt[0], h_ft[1] - h_lt[1])
+        roof_e2 = (ridge_b[0] - h_lt[0], ridge_b[1] - h_lt[1])
+        scene += '<g transform="{}">'.format(matrix(h_lt, roof_e1, roof_e2))
+        scene += '<rect class="pf-panel" x="0.06" y="0.12" width="0.88" height="0.76" />'
+        scene += '<g class="pf-panel-line">'
+        for gx in (0.28, 0.50, 0.72):
+            scene += '<line x1="{0}" y1="0.12" x2="{0}" y2="0.88" vector-effect="non-scaling-stroke" />'.format(gx)
+        for gy in (0.373, 0.627):
+            scene += '<line x1="0.06" y1="{0}" x2="0.94" y2="{0}" vector-effect="non-scaling-stroke" />'.format(gy)
+        scene += "</g></g>"
+
+        # Door + window on the front-left wall (same plane-transform trick)
+        wall_e1 = (h_f[0] - h_l[0], h_f[1] - h_l[1])
+        wall_e2 = (0, -WALL_H)
+        scene += '<g transform="{}">'.format(matrix(h_l, wall_e1, wall_e2))
+        scene += '<rect class="pf-door" x="0.63" y="0.0" width="0.15" height="0.5" vector-effect="non-scaling-stroke" />'
+        scene += '<rect class="pf-glass" x="0.15" y="0.3" width="0.3" height="0.32" vector-effect="non-scaling-stroke" />'
+        scene += '<line class="pf-panel-line" x1="0.3" y1="0.3" x2="0.3" y2="0.62" vector-effect="non-scaling-stroke" />'
+        scene += "</g>"
+
+        # Attached garage (flat roof) with EV in front
+        GO = (150, 335)
+        GA, GB, GAR_H = 48, 42, 46
+        g_f = iso(GO, GA, GB)
+        g_r = iso(GO, GA, -GB)
+        g_l = iso(GO, -GA, GB)
+        g_ft = iso(GO, GA, GB, GAR_H)
+        g_rt = iso(GO, GA, -GB, GAR_H)
+        g_lt = iso(GO, -GA, GB, GAR_H)
+        g_bt = iso(GO, -GA, -GB, GAR_H)
+        scene += poly("pf-wall-l", g_l, g_f, g_ft, g_lt)
+        scene += poly("pf-wall-r", g_f, g_r, g_rt, g_ft)
+        scene += poly("pf-roof", g_lt, g_bt, g_rt, g_ft)
+        gar_e1 = (g_f[0] - g_l[0], g_f[1] - g_l[1])
+        scene += '<g transform="{}">'.format(matrix(g_l, gar_e1, (0, -GAR_H)))
+        scene += '<rect class="pf-door" x="0.16" y="0.05" width="0.68" height="0.72" vector-effect="non-scaling-stroke" />'
+        scene += '<g class="pf-panel-line"><line x1="0.16" y1="0.29" x2="0.84" y2="0.29" vector-effect="non-scaling-stroke" /><line x1="0.16" y1="0.53" x2="0.84" y2="0.53" vector-effect="non-scaling-stroke" /></g>'
+        scene += "</g>"
+        # EV (stylised) plus charging cable from the garage
+        scene += '<g transform="translate(28,352) skewY(-6)">'
+        scene += '<rect class="pf-car-body" x="14" y="0" width="46" height="18" rx="8" /><rect class="pf-car-body" x="0" y="13" width="84" height="20" rx="9" />'
+        scene += '<circle class="pf-wheel" cx="20" cy="34" r="7" /><circle class="pf-wheel" cx="64" cy="34" r="7" /><circle cx="20" cy="34" r="2.8" fill="#90a4ae" /><circle cx="64" cy="34" r="2.8" fill="#90a4ae" />'
+        scene += "</g>"
+        scene += '<path class="pf-wire" d="M 132,348 Q 122,364 111,368" />'
+
+        # --- Flow lines and labels ------------------------------------------
+        junction = (304, 333)  # in front of the house door, where flows meet
+        solar_pill_c = (200, 84)
+        panel_dot = ((h_lt[0] + h_ft[0]) / 2 + roof_e2[0] * 0.5, (h_lt[1] + h_ft[1]) / 2 + roof_e2[1] * 0.5)  # centre of the panel array
+        d_solar = "M {:.0f},{:.0f} V 130 L {:.1f},{:.1f} L 278,222 V 318 L {},{}".format(solar_pill_c[0], solar_pill_c[1] + 13, panel_dot[0], panel_dot[1], junction[0], junction[1])
+        d_house = "M {},{} L 255,362 V 389".format(junction[0], junction[1])
+        d_grid = "M 556,248 V 290 L 440,311"
+        d_batt = "M 415,275 V 326"
+
+        flows = flow_path(d_solar, SOLAR, pv_generating)
+        flows += flow_path(d_house, HOUSE, house_consuming)
+        flows += flow_path(d_grid, grid_color, grid_importing or grid_exporting, reverse=grid_exporting)
+        flows += flow_path(d_batt, BATT, battery_active, reverse=battery_charging, css="pf-batt")
+
+        flows += dot(panel_dot[0], panel_dot[1], SOLAR)
+        flows += dot(junction[0], junction[1], HOUSE)
+        flows += dot(440, 311, grid_color)
+        flows += dot(415, 275, BATT, css="pf-batt")
+
+        soc_text = "{}%".format(dp0(soc_percent))
+        if battery_active:
+            soc_text += " · {} W".format(dp0(abs(battery_power)))
+        labels = pill(solar_pill_c[0], solar_pill_c[1], SOLAR, icon_sun, "{} W".format(dp0(abs(pv_power))))
+        labels += pill(255, 402, HOUSE, icon_home, "{} W".format(dp0(abs(load_power))))
+        labels += pill(556, 235, grid_color, icon_bolt, "{} W".format(dp0(abs(grid_power))))
+        labels += pill(418, 252, BATT, icon_batt, soc_text, css="pf-batt")
+
+        # --- Accessibility text ---------------------------------------------
         batt_state = "charging" if battery_charging else ("discharging" if battery_discharging else "idle")
         grid_state = "exporting" if grid_exporting else ("importing" if grid_importing else "idle")
-        desc = html_module.escape("Power flow. Solar {} watts. House load {} watts. Battery {} {} watts. Grid {} {} watts.".format(dp0(abs(pv_power)), dp0(abs(load_power)), batt_state, dp0(abs(battery_power)), grid_state, dp0(abs(grid_power))))
+        desc = html_module.escape(
+            "Power flow. Solar {} watts. House load {} watts. Battery {} percent, {} {} watts. Grid {} {} watts.".format(dp0(abs(pv_power)), dp0(abs(load_power)), dp0(soc_percent), batt_state, dp0(abs(battery_power)), grid_state, dp0(abs(grid_power)))
+        )
 
         html = '<div style="margin: 0; text-align: center;">'
-        html += '<svg viewBox="0 0 520 300" role="img" aria-label="{}" style="width:100%; max-width:500px; height:auto; display:block; margin: 0 auto;" xmlns="http://www.w3.org/2000/svg">'.format(desc)
+        html += '<svg class="pf-scene" viewBox="0 0 640 430" role="img" aria-label="{}" xmlns="http://www.w3.org/2000/svg">'.format(desc)
         html += "<title>Power flow</title><desc>{}</desc>".format(desc)
-
-        # Flow connectors (drawn under the nodes)
-        html += flow(260, 100, 260, 125, SOLAR, pv_generating)
-        if battery_discharging:
-            html += flow(143, 227, 227, 188, BATT, True)
-        elif battery_charging:
-            html += flow(143, 227, 227, 188, BATT, True, reverse=True)
-        else:
-            html += flow(143, 227, 227, 188, BATT, False)
-        if grid_exporting:
-            html += flow(293, 188, 377, 227, GRID, True)
-        elif grid_importing:
-            html += flow(293, 188, 377, 227, GRID, True, reverse=True)
-        else:
-            html += flow(293, 188, 377, 227, GRID, False)
-
-        # Power value labels along each connector
-        html += vlabel(286, 116, pv_power)
-        html += vlabel(168, 198, battery_power)
-        html += vlabel(352, 198, grid_power)
-
-        # Nodes (on top)
-        html += node(260, 60, SOLAR, "Solar", pv_power)
-        html += node(260, 165, HOUSE, "House", load_power)
-        html += node(110, 250, BATT, "Battery", battery_power)
-        html += node(410, 250, GRID, "Grid", grid_power)
-
+        html += scene + flows + labels
         html += "</svg></div>"
         return html
 
