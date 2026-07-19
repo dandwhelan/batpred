@@ -1,13 +1,12 @@
-# Custom Dictionary Words
 activepower
 adata
 adbase
 afci
 AIO
-AIO's
 aiofiles
 aiohttp
 aiomqtt
+AIO's
 aios
 Alertfeed
 allclose
@@ -67,6 +66,7 @@ coro
 cprofile
 creds
 crosscharge
+# Custom Dictionary Words
 customisation
 Customise
 cvalue
@@ -126,6 +126,7 @@ evse
 exog
 exportlimit
 exportvalue
+faulthandler
 fdpwr
 fdsoc
 feedin
@@ -365,11 +366,13 @@ Selfuse
 semodbus
 Sergoe
 SFMB
+SIGABRT
 sigcloud
 sigen
 sigencloud
 sigenergy
 sigenstor
+SIGSEGV
 Slee
 snakeviz
 socb
@@ -397,8 +400,8 @@ startt
 stdlib
 stepline
 Stromligning
-strptime
 Strømligning
+strptime
 submessage
 substep
 sunspec
