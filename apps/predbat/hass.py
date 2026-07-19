@@ -99,6 +99,12 @@ async def main():
 
 if __name__ == "__main__":
     set_start_method("fork")
+    # Dump native tracebacks of all threads to a file on SIGSEGV/SIGABRT etc,
+    # so silent crash-restarts leave a diagnosis behind (see /config/faulthandler.log)
+    import faulthandler
+
+    _faulthandler_log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "faulthandler.log"), "a")
+    faulthandler.enable(file=_faulthandler_log, all_threads=True)
     asyncio.run(main())
     sys.exit(0)
 

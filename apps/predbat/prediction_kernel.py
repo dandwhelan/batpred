@@ -431,6 +431,9 @@ def create_kernel_context(pred):
 
         handle = lib.pk_context_create(ctypes.byref(ctx))
         if handle:
+            # Record the context's array length so run_prediction_kernel can refuse to run
+            # if forecast_minutes has changed since (the kernel fills soc_out to this size)
+            pred.kernel_n_steps = n_steps
             weakref.finalize(pred, kernel_context_free, handle)
         return handle
     except (KeyError, TypeError, AttributeError) as error:
@@ -467,7 +470,16 @@ def run_prediction_kernel(pred, charge_limit, charge_window, export_window, expo
     # Remove intersecting windows, mirroring the Python engine - prediction.py:492-493
     charge_limit, charge_window = remove_intersecting_windows(charge_limit, charge_window, export_limits, export_window)
 
+    if len(charge_limit) < len(charge_window) or len(export_limits) < len(export_window):
+        # The kernel indexes limits by window number - a short limits list would read out of bounds
+        return None
+
     n_steps = pred.forecast_minutes // PREDICT_STEP
+    if n_steps != getattr(pred, "kernel_n_steps", n_steps):
+        # forecast_minutes changed since the kernel context was built: the kernel would
+        # write soc_out beyond this allocation (heap corruption) - fall back to Python
+        pred.log("Warn: Prediction kernel n_steps mismatch ({} != {}) - using Python engine".format(n_steps, pred.kernel_n_steps))
+        return None
     scenario = PkScenario()
     scenario.charge_limit = double_array([float(limit) for limit in charge_limit])
     scenario.charge_start = int32_array([window["start"] for window in charge_window])
