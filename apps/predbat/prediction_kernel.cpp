@@ -52,7 +52,8 @@ int32_t calc_percent_limit(double charge_limit, double soc_max)
     if (soc_max <= 0) {
         return 0;
     }
-    return std::min(static_cast<int32_t>((charge_limit / soc_max * 100.0) + 0.5), 100);
+    // Clamp to [0, 100]: a slightly-negative SoC must not index curve[] out of bounds
+    return std::max(std::min(static_cast<int32_t>((charge_limit / soc_max * 100.0) + 0.5), 100), 0);
 }
 
 // Per-plan static context passed from Python, arrays are all n_steps long
@@ -198,7 +199,9 @@ struct ContextStore {
 };
 
 std::mutex g_context_mutex;
-std::map<int64_t, std::unique_ptr<ContextStore>> g_contexts;
+// shared_ptr so pk_run can hold the context alive for the whole run even if
+// pk_context_free (e.g. a GC finaliser on another thread) erases it mid-run
+std::map<int64_t, std::shared_ptr<ContextStore>> g_contexts;
 int64_t g_next_handle = 1;
 
 // Mirror of prediction.py get_diff()
@@ -276,7 +279,7 @@ int64_t pk_context_create(const PkContext *in)
     if (!in || in->n_steps <= 0 || in->num_cars < 0 || in->num_cars > PK_MAX_CARS) {
         return 0;
     }
-    auto store = std::make_unique<ContextStore>();
+    auto store = std::make_shared<ContextStore>();
     size_t n = static_cast<size_t>(in->n_steps);
     store->rate_import.assign(in->rate_import, in->rate_import + n);
     store->rate_export.assign(in->rate_export, in->rate_export + n);
@@ -335,15 +338,16 @@ void pk_context_free(int64_t handle)
 // supported configuration: save=None, debug off, step=5 (cars, iBoost and carbon included).
 int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
 {
-    const PkContext *c;
+    std::shared_ptr<ContextStore> store;
     {
         std::lock_guard<std::mutex> lock(g_context_mutex);
         auto it = g_contexts.find(handle);
         if (it == g_contexts.end()) {
             return 1;
         }
-        c = &it->second->ctx;
+        store = it->second;
     }
+    const PkContext *c = &store->ctx;
     if (!s || !out || s->step != 5) {
         return 2;
     }
