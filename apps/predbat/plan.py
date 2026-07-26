@@ -131,7 +131,8 @@ class Plan:
             minutes_now = self.minutes_now
             minutes_end_slot = int((self.minutes_now + self.plan_interval_minutes) / self.plan_interval_minutes) * self.plan_interval_minutes
             # When dynamic load is enabled we try can do two things
-            # 1. Increase the load prediction in the current self.plan_interval_minutes minute period to match the actual load (if the load is higher than expected)
+            # 1. Increase the load prediction in the current self.plan_interval_minutes minute period to match the actual load (if the load is higher than expected),
+            #    extending into the following period too once the load has been high for two consecutive checks in a row (mirrors the low-load debounce below)
             # 2. If the load is low and car charging is predicted then cancel off future car slots
             # Note never do this just after midnight due to the load sensor reset
             if self.load_last_status == "low" and self.minutes_now > 5:
@@ -146,7 +147,12 @@ class Plan:
 
             if self.load_last_status == "high":
                 have_printed = False
-                for minute_absolute in range(minutes_now, minutes_end_slot, PREDICT_STEP):
+                minutes_end_baseline = minutes_end_slot
+                if prev_last_load_status == "high":
+                    # Load has been high for two consecutive checks, so also predict it will continue
+                    # into the following slot to keep the plan up to date across the slot boundary
+                    minutes_end_baseline = minutes_end_slot + self.plan_interval_minutes
+                for minute_absolute in range(minutes_now, minutes_end_baseline, PREDICT_STEP):
                     if not self.car_energy_reported_load:
                         # If car energy is not reported as load then we should not attempt to adjust the load prediction based on car load.
                         car_load = 0
@@ -3025,7 +3031,7 @@ class Plan:
             if (count % 16) == 0:
                 self.log("Final optimisation type {} window {} metric {} metric_keep {} best_carbon {} best_import {} cost {}".format(typ, window_n, best_metric, dp2(best_keep), dp0(best_carbon), dp2(best_import), dp2(best_cost)))
             count += 1
-        self.log("Second pass optimisation finished metric {} cost {} metric_keep {} cycle {} carbon {} import {}".format(best_metric, dp2(best_cost), dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_carbon)))
+        self.log("Second pass optimisation finished metric {} cost {} metric_keep {} cycle {} carbon {} import {}".format(best_metric, dp2(best_cost), dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_import)))
 
         self.plan_write_debug(debug_mode, "plan_pass2.html", self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
         return best_metric, best_cost, best_keep, best_soc_min, best_cycle, best_carbon, best_import, best_battery_value
@@ -3085,33 +3091,35 @@ class Plan:
         # improvement in an earlier window that a single sweep never revisits - repeating the pair
         # lets those cascade. Acceptance only ever keeps equal-or-better limits so the metric stays
         # monotonic non-increasing and the extra iterations cannot make the plan worse.
-        base_sequence = ["trim", "freeze", "normal", "trim", "low"]
-        refine_sequence = ["trim", "normal"]
+        base_sequence = ["trim_export", "trim_import", "freeze", "normal", "trim_export", "trim_import", "low"]
+        refine_sequence = ["trim_export", "trim_import", "normal"]
         max_refine_iterations = 3
         base_len = len(base_sequence)
         refine_len = len(refine_sequence)
-        price_set_canonical = list(price_set)
         changed_this_iteration = False
 
         for idx, pass_type in enumerate(base_sequence + refine_sequence * max_refine_iterations):
-            # At the start of each refinement pair restore the canonical price band order (the base
-            # "low" sub-pass reverses price_set in place) and stop early once a pair changes nothing.
+            # Stop early once a refinement pair changes nothing. Each pass derives its own iteration order
+            # from price_set (see ordered_price_set below) rather than mutating it, so no restore is needed.
             if idx >= base_len and ((idx - base_len) % refine_len) == 0:
                 if idx > base_len and not changed_this_iteration:
                     break
                 changed_this_iteration = False
-                price_set[:] = price_set_canonical
 
             start_at_low = False
-            if pass_type in ["low"]:
-                price_set.reverse()
+            if pass_type in ["low", "trim_export"]:
+                # Export trim sheds the least valuable (cheapest) export first, so walk price bands low to
+                # high - the high-priced peak is only reduced if the cheaper slots cannot absorb the excess.
+                ordered_price_set = list(reversed(price_set))
                 start_at_low = True
+            else:
+                ordered_price_set = list(price_set)
 
-            for price_key in price_set:
+            for price_key in ordered_price_set:
                 links = price_links[price_key].copy()
 
                 # Freeze/Trim pass should be done in time order (newest first)
-                if pass_type in ["freeze", "trim"]:
+                if pass_type in ["freeze", "trim_export", "trim_import"]:
                     links.reverse()
 
                 printed_set = False
@@ -3126,12 +3134,12 @@ class Plan:
                         window_start = self.charge_window_best[window_n]["start"]
                         price = self.charge_window_best[window_n]["average"]
 
-                        # Freeze pass is just export freeze
-                        if pass_type in ["freeze"]:
+                        # Freeze pass is just export freeze; the export trim pass does not touch charge
+                        if pass_type in ["freeze", "trim_export"]:
                             continue
 
                         # Don't trim a window that is already off
-                        if pass_type in ["trim"] and (self.charge_limit_best[window_n] == 0):
+                        if pass_type in ["trim_import"] and (self.charge_limit_best[window_n] == 0):
                             continue
 
                         # In normal don't do trimming of charge
@@ -3186,7 +3194,9 @@ class Plan:
                                 freeze_only=(typ == "cf"),
                                 allow_freeze=True,
                             )
-                            if n_best_metric < best_metric and n_best_soc != self.charge_limit_best[window_n]:
+                            # The import trim pass may only reduce charge (charge to a lower SoC), never add it
+                            trim_import_ok = pass_type != "trim_import" or n_best_soc < self.charge_limit_best[window_n]
+                            if n_best_metric < best_metric and n_best_soc != self.charge_limit_best[window_n] and trim_import_ok:
                                 # Only a strict improvement drives another full iteration. Equal-metric
                                 # limit flips are still applied once (as before) but must not keep the
                                 # iteration alive - re-running to chase them over-optimises the
@@ -3235,6 +3245,10 @@ class Plan:
                         window_start = self.export_window_best[window_n]["start"]
                         price = self.export_window_best[window_n]["average"]
 
+                        # The import trim pass does not touch export windows
+                        if pass_type in ["trim_import"]:
+                            continue
+
                         # Ignore freeze pass if export freeze disabled
                         if not self.set_export_freeze and pass_type == "freeze":
                             continue
@@ -3244,7 +3258,7 @@ class Plan:
                             continue
 
                         # Don't trim a window that is already off
-                        if pass_type in ["trim"] and (self.export_limits_best[window_n] == 100):
+                        if pass_type in ["trim_export"] and (self.export_limits_best[window_n] == 100):
                             continue
 
                         # In normal don't do trimming of export
@@ -3257,7 +3271,7 @@ class Plan:
                             continue
 
                         # Don't trim freeze, that can be done in the freeze pass
-                        if pass_type == "trim" and self.export_limits_best[window_n] == 99:
+                        if pass_type == "trim_export" and self.export_limits_best[window_n] == 99:
                             continue
 
                         # Ignore prices below the threshold if not already selected during levelling
@@ -3312,7 +3326,14 @@ class Plan:
                                 allow_freeze=True,
                             )
                             self.export_window_best[window_n]["start"] = keep_start
-                            if n_best_metric < best_metric and (n_best_soc != self.export_limits_best[window_n] or n_best_start != self.export_window_best[window_n]["start"]):
+                            # The export trim pass may only reduce export, never add it, so the cheapest slots
+                            # shed any levels over-export before the high-priced peak is touched. A reduction is
+                            # a shallower discharge (higher SoC limit) and/or a smaller window (later start) -
+                            # never a deeper discharge nor an earlier start (a bigger window exports more, even
+                            # when the SoC limit rises). Off/freeze (limit >= 99) export no battery and force the
+                            # start back to the full window, so they are exempt from the earlier-start check.
+                            trim_export_ok = pass_type != "trim_export" or (n_best_soc >= self.export_limits_best[window_n] and (n_best_soc >= 99 or n_best_start >= keep_start))
+                            if n_best_metric < best_metric and (n_best_soc != self.export_limits_best[window_n] or n_best_start != self.export_window_best[window_n]["start"]) and trim_export_ok:
                                 # Only a strict improvement drives another refinement iteration (see
                                 # the charge block above for why equal-metric flips must not).
                                 changed_this_iteration = True
@@ -4245,7 +4266,7 @@ class Plan:
             if save and save == "debug":
                 self.dashboard_item(
                     self.prefix + ".pv_power_debug",
-                    state=dp3(final_soc),
+                    state=dp3(self.filtered_today(predict_pv_power, stamp=self.now_utc) or 0),
                     attributes={
                         "results": self.filtered_times(predict_pv_power),
                         "today": self.filtered_today(predict_pv_power),
@@ -4257,7 +4278,7 @@ class Plan:
                 )
                 self.dashboard_item(
                     self.prefix + ".grid_power_debug",
-                    state=dp3(final_soc),
+                    state=dp3(self.filtered_today(predict_grid_power, stamp=self.now_utc) or 0),
                     attributes={
                         "results": self.filtered_times(predict_grid_power),
                         "today": self.filtered_today(predict_grid_power),
@@ -4269,7 +4290,7 @@ class Plan:
                 )
                 self.dashboard_item(
                     self.prefix + ".load_power_debug",
-                    state=dp3(final_soc),
+                    state=dp3(self.filtered_today(predict_load_power, stamp=self.now_utc) or 0),
                     attributes={
                         "results": self.filtered_times(predict_load_power),
                         "today": self.filtered_today(predict_load_power),
@@ -4281,7 +4302,7 @@ class Plan:
                 )
                 self.dashboard_item(
                     self.prefix + ".battery_power_debug",
-                    state=dp3(final_soc),
+                    state=dp3(self.filtered_today(predict_battery_power, stamp=self.now_utc) or 0),
                     attributes={
                         "results": self.filtered_times(predict_battery_power),
                         "today": self.filtered_today(predict_battery_power),
