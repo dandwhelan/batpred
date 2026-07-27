@@ -432,9 +432,11 @@ class Execute:
 
                 status_freeze_export = " [Freeze exporting]"
 
-            # Car charging from battery disable?
+            # Car charging from battery disable? Applies regardless of car_energy_reported_load - that
+            # switch only controls whether EV energy is included in the CT-clamp house-load model, not
+            # whether we enforce the discharge hold.
             carHolding = False
-            if self.set_charge_window and not self.car_charging_from_battery and self.car_energy_reported_load:
+            if self.set_charge_window and not self.car_charging_from_battery:
                 for car_n in range(self.num_cars):
                     if self.car_charging_slots[car_n]:
                         window = self.car_charging_slots[car_n][0]
@@ -1102,10 +1104,10 @@ class Execute:
 
         for id in range(num_inverters):
             if not balance_reset_charge.get(id, False) and total_charge_rates > 0 and charge_rates[id] == 0:
-                self.log("BALANCE: Inverter {} reset charge rate to {} now balanced".format(id, inverter.battery_rate_max_charge * MINUTE_WATT))
-                inverters[id].adjust_charge_rate(inverter.battery_rate_max_charge * MINUTE_WATT, notify=False)
+                self.log("BALANCE: Inverter {} reset charge rate to {} now balanced".format(id, inverters[id].battery_rate_max_charge * MINUTE_WATT))
+                inverters[id].adjust_charge_rate(inverters[id].battery_rate_max_charge * MINUTE_WATT, notify=False)
             if not balance_reset_discharge.get(id, False) and total_discharge_rates != 0 and discharge_rates[id] == 0:
-                self.log("BALANCE: Inverter {} reset discharge rate to {} now balanced".format(id, inverter.battery_rate_max_discharge * MINUTE_WATT))
-                inverters[id].adjust_discharge_rate(inverter.battery_rate_max_discharge * MINUTE_WATT, notify=False)
+                self.log("BALANCE: Inverter {} reset discharge rate to {} now balanced".format(id, inverters[id].battery_rate_max_discharge * MINUTE_WATT))
+                inverters[id].adjust_discharge_rate(inverters[id].battery_rate_max_discharge * MINUTE_WATT, notify=False)
 
         self.log("BALANCE: Completed this run")

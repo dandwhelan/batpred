@@ -843,6 +843,7 @@ class Fetch:
         m.export_today_kwh.set(self.export_today_now)
         m.pv_today_kwh.set(self.pv_today_now)
         m.data_age_days.set(self.load_minutes_age)
+        m.data_age_required_days.set(max(self.max_days_previous - 1, 0))
 
         if "rates_import_octopus_url" in self.args:
             # Fixed URL for rate import
@@ -1083,7 +1084,10 @@ class Fetch:
             self.load_inday_adjustment = 1.0
 
         force_replan = False
-        if str(prev_octopus_slots) != str(self.octopus_slots):
+        # Compare on the change-detection signature, not the raw slots, so the per-cycle re-clocking
+        # of an in-progress dispatch (start advanced to now, energy scaled to remaining time) does not
+        # force a replan every cycle while a slot is active - only genuine slot changes do
+        if self.octopus_slots_signature(prev_octopus_slots) != self.octopus_slots_signature(self.octopus_slots):
             self.log("Octopus slots changed from {} to {}".format(prev_octopus_slots, self.octopus_slots))
             force_replan = True
         if str(prev_octopus_saving_slots) != str(self.octopus_saving_slots):
@@ -1924,8 +1928,8 @@ class Fetch:
         self.car_charging_slots = [[] for c in range(self.num_cars)]
         self.car_charging_exclusive = [False for c in range(self.num_cars)]
 
-        self.car_charging_planned_response = self.get_arg("car_charging_planned_response", ["yes", "on", "enable", "true"])
-        self.car_charging_now_response = self.get_arg("car_charging_now_response", ["yes", "on", "enable", "true"])
+        self.car_charging_planned_response = [str(response).lower() for response in self.get_arg("car_charging_planned_response", ["yes", "on", "enable", "true"])]
+        self.car_charging_now_response = [str(response).lower() for response in self.get_arg("car_charging_now_response", ["yes", "on", "enable", "true"])]
         self.car_charging_from_battery = self.get_arg("car_charging_from_battery")
 
         # Car charging planned sensor

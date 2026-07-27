@@ -172,16 +172,16 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 | `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
 | `tests/test_infra.py` | FIT defaults (including `metric_fit_enable`) added to test config and `reset_inverter()` |
 | `tests/test_fit.py` | Covers the FIT calculator plus the `metric_fit_enable` master-switch toggle |
-| `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 102) |
+| `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 103) |
 | `tests/test_kernel_parity.py` | FIT deterministic edge cases and FIT rate randomisation in the parity sweep |
 
 ### C++ Kernel Note (fork)
 
-This fork's kernel binaries are built with ABI/parity revision **102** (upstream uses small integers like 2). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.
+This fork's kernel binaries are built with ABI/parity revision **103** (upstream uses small integers like 2). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.
 
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.44.0). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.46.4). Fork changes on top of upstream:
 
 - **FIT support** — see the Feed-in Tariff section above
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)

@@ -43,6 +43,9 @@ OCTOPUS_NIGHT_RATE_WINDOWS = {
 }
 
 OCTOPUS_MAX_RETRIES = 5
+# The EV/charge-point catalogue is static reference data, so it is refreshed daily
+CATALOGUE_FRESH_MINUTES = 24 * 60
+CATALOGUE_STALE_MINUTES = 25 * 60
 OCTOPUS_SLOT_MAX_DEFAULT = 48  # 24 hours with 30-minute slots
 
 BASE_TIME = datetime.strptime("00:00", "%H:%M")
@@ -75,6 +78,51 @@ def parse_date_time(dt_str):
         return datetime.strptime(dt_str, DATE_TIME_STR_FORMAT)
     except (ValueError, TypeError):
         return None
+
+
+CDN_BLOCK_MARKERS = ("cloudfront", "request blocked", "the request could not be satisfied")
+HTML_DOCUMENT_PREFIXES = ("<!doctype", "<html")
+# A generic "403 Forbidden" page is indistinguishable from a WAF page, so after this many
+# consecutive edge blocks fall back to refreshing the token in case the credential really
+# was revoked. Without this the component could never recover from a misclassification.
+EDGE_BLOCK_REFRESH_AFTER = 5
+
+
+def is_edge_block_body(text):
+    """Return True if a 403 body is positively identifiable as a CDN/WAF error page.
+
+    Kraken reports authentication problems as a JSON GraphQL error body (normally with
+    HTTP 200) or as a 401. A 403 carrying an HTML error page - e.g. CloudFront's
+    "Request blocked" - is edge rate limiting, not a credential problem, so the cached
+    token must be kept rather than discarded and immediately re-minted.
+
+    Two conditions must both hold: the body must not parse as JSON (anything the API
+    itself produces is JSON), and it must look like an HTML document or name a known CDN.
+    Matching on wording alone would misclassify a genuine JSON error that happens to say
+    something like "access denied", which would keep an invalid token forever - the same
+    permanent lockout this check exists to prevent, arrived at from the other direction.
+
+    Detection is deliberately conservative: a 403 we cannot identify as a CDN page keeps
+    the existing "refresh the token and retry" behaviour, which recovers genuinely revoked
+    tokens without needing a restart.
+
+    Args:
+        text: The raw response body.
+
+    Returns:
+        bool: True if the body carries a known CDN/WAF block signature.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    try:
+        json.loads(text)
+    except (ValueError, TypeError):
+        pass
+    else:
+        # A parseable JSON body came from the API, not from an edge appliance
+        return False
+    stripped = text.lstrip().lower()
+    return stripped.startswith(HTML_DOCUMENT_PREFIXES) or any(marker in stripped for marker in CDN_BLOCK_MARKERS)
 
 
 api_token_query = """mutation {{
@@ -150,21 +198,27 @@ account_query = """query {{
   }}
 }}"""
 
-intelligent_device_query = """query {{
-  electricVehicles {{
+# The vehicle/charge-point catalogue is global reference data - identical for every
+# account and effectively static - so it is queried separately from the per-account
+# device list and cached, rather than being re-downloaded on every device poll.
+intelligent_catalogue_query = """query {
+  electricVehicles {
 		make
-		models {{
+		models {
 			model
 			batterySize
-		}}
-	}}
-	chargePointVariants {{
+		}
+	}
+	chargePointVariants {
 		make
-		models {{
+		models {
 			model
 			powerInKw
-		}}
-	}}
+		}
+	}
+}"""
+
+intelligent_device_query = """query {{
   devices(accountNumber: "{account_id}") {{
 		id
 		provider
@@ -357,7 +411,9 @@ class OctopusAPI(ComponentBase):
     TARIFF_REFRESH_MINUTES = 30
     DEVICE_REFRESH_MINUTES = 10
     SESSION_REFRESH_MINUTES = 30
-    MINIMUM_REFRESH_MINUTES = 5
+    MINIMUM_REFRESH_MINUTES = 2
+    # Cadence for republishing the dispatch sensor from cached data (no API call), fixed
+    SENSOR_REFRESH_MINUTES = 2
 
     def initialize(self, key, account_id, automatic, tariff_refresh_minutes=None, device_refresh_minutes=None, session_refresh_minutes=None):
         """Initialise the Octopus API component"""
@@ -366,6 +422,7 @@ class OctopusAPI(ComponentBase):
         self.account_id = account_id
         self.graphql_token = None
         self.graphql_expiration = None
+        self.consecutive_edge_blocks = 0
         self.account_data = {}
         self.tariffs = {}
         self.saving_sessions = {}
@@ -374,6 +431,7 @@ class OctopusAPI(ComponentBase):
         self.tariff_fetched_at = None
         self.device_fetched_at = None
         self.session_fetched_at = None
+        self.sensor_updated_at = None
         self.tariff_refresh_minutes = self._sanitise_refresh_minutes(tariff_refresh_minutes, self.TARIFF_REFRESH_MINUTES, "tariff")
         self.device_refresh_minutes = self._sanitise_refresh_minutes(device_refresh_minutes, self.DEVICE_REFRESH_MINUTES, "device")
         self.session_refresh_minutes = self._sanitise_refresh_minutes(session_refresh_minutes, self.SESSION_REFRESH_MINUTES, "session")
@@ -455,10 +513,6 @@ class OctopusAPI(ComponentBase):
             await self.load_octopus_cache()
             self.log("OctopusAPI: Started")
 
-        # Update time every minute
-        now = datetime.now()
-        count_minutes = now.minute + now.hour * 60
-
         # Process any queued commands
         refresh = False
         if not first and (await self.process_commands(self.account_id)):
@@ -473,7 +527,7 @@ class OctopusAPI(ComponentBase):
         tariff_due = self._data_age_minutes(self.tariff_fetched_at) >= self.tariff_refresh_minutes
         device_due = refresh or self._data_age_minutes(self.device_fetched_at) >= self.device_refresh_minutes
         session_due = refresh or self._data_age_minutes(self.session_fetched_at) >= self.session_refresh_minutes
-        sensor_due = first or refresh or (count_minutes % 2) == 0
+        sensor_due = first or refresh or device_due or self._data_age_minutes(self.sensor_updated_at) >= self.SENSOR_REFRESH_MINUTES
 
         if tariff_due:
             # API refresh for account and tariff discovery (default every 30 minutes)
@@ -486,7 +540,9 @@ class OctopusAPI(ComponentBase):
 
         if device_due:
             # API refresh for intelligent device dispatches (default every 10 minutes,
-            # no API call is made unless the account is on an intelligent tariff)
+            # no API call is made unless the account is on an intelligent tariff).
+            # Lower octopus_api_device_refresh_minutes towards the minimum to pick new
+            # Octopus slots up sooner at the cost of more API traffic
             await self.async_update_intelligent_devices(self.account_id)
             self.device_fetched_at = datetime.now()
 
@@ -502,7 +558,13 @@ class OctopusAPI(ComponentBase):
             await self.fetch_tariffs(self.tariffs)
 
         if sensor_due:
-            # 2-minute update for intelligent device sensor
+            # 2-minute republish of the dispatch sensor so the entities track the cached
+            # dispatch data. This is a local publish with no API call, so it is keyed off the
+            # age of the last update rather than wall-clock minute parity - the component
+            # scheduler drifts relative to the wall clock and a parity gate can starve
+            # indefinitely. Stamp before publishing so the publish duration can't slip the
+            # cadence past the next run
+            self.sensor_updated_at = datetime.now()
             await self.async_intelligent_update_sensor(self.account_id)
 
         if tariff_due or device_due or session_due:
@@ -1512,6 +1574,12 @@ class OctopusAPI(ComponentBase):
             if data_as_json is not None:
                 return data_as_json
             else:
+                # 401/403 are definitive for this response. aiohttp caches the body, so
+                # re-reading the same response cannot change the outcome - it would only
+                # duplicate log lines and sleep through the backoff for nothing.
+                if response.status in [401, 403]:
+                    self.failures_total += 1
+                    return None
                 if attempt < max_retries - 1:
                     self.log(f"OctopusAPI: Retrying read response for {url} (attempt {attempt + 2} of {max_retries})")
                     await asyncio.sleep(2**attempt)  # Exponential backoff
@@ -1628,9 +1696,30 @@ class OctopusAPI(ComponentBase):
                 # Check for HTTP-level 401/403 (transport-level auth failure) and retry once.
                 # This handles cases where the JWT has been revoked server-side and the server
                 # returns a bare 401/403 status rather than a GraphQL error body — which would
-                # otherwise loop forever without ever refreshing the token.
+                # otherwise loop forever without ever refreshing the token. The one exception is
+                # a 403 carrying a CDN/WAF block page, handled immediately below.
                 if response.status in [401, 403] and _retry_count == 0:
-                    self.log(f"OctopusAPI: HTTP {response.status} for graphql query {request_context}, forcing token refresh and retry")
+                    # A CDN/WAF block is rate limiting, not an auth failure. Re-minting a token
+                    # here would be rejected by the same block, leaving the component permanently
+                    # locked out, so keep the cached token and let the caller back off instead.
+                    # Only 403 is treated this way: Kraken reports genuine auth problems as HTTP
+                    # 200 with a GraphQL errorCode, or as a 401, so a 403 carrying a non-JSON
+                    # body comes from the edge rather than the API.
+                    if response.status == 403 and is_edge_block_body(await response.text()):
+                        self.consecutive_edge_blocks += 1
+                        if self.consecutive_edge_blocks <= EDGE_BLOCK_REFRESH_AFTER:
+                            record_api_call("octopus", False, "rate_limit")
+                            if not ignore_errors:
+                                self.log(f"Warn: OctopusAPI: HTTP {response.status} edge/WAF block for graphql query {request_context} - rate limited, keeping cached token")
+                                self.failures_total += 1
+                            return None
+                        # Persistently blocked. The body may be a generic 403 page from a revoked
+                        # credential rather than a WAF, so fall through and refresh the token.
+                        if not ignore_errors:
+                            self.log(f"Warn: OctopusAPI: {self.consecutive_edge_blocks} consecutive edge blocks for {request_context} - refreshing token in case the credential was revoked")
+                        self.consecutive_edge_blocks = 0
+                    if not ignore_errors:
+                        self.log(f"OctopusAPI: HTTP {response.status} for graphql query {request_context}, forcing token refresh and retry")
                     record_api_call("octopus", False, "auth_error")
                     self.graphql_token = None
                     retry_token = await self.async_refresh_token()
@@ -1671,6 +1760,7 @@ class OctopusAPI(ComponentBase):
                     return None
 
                 if response_body and ("data" in response_body):
+                    self.consecutive_edge_blocks = 0
                     self.update_success_timestamp()
                     record_api_call("octopus")
                     return response_body["data"]
@@ -1686,6 +1776,36 @@ class OctopusAPI(ComponentBase):
             record_api_call("octopus", False, "connection_error")
 
         return None
+
+    async def async_get_vehicle_catalogue(self):
+        """
+        Get the global EV / charge-point catalogue, cached across polls and instances.
+
+        The catalogue is static reference data shared by every account, so it is stored
+        under the "octopus" storage module. The SaaS KeyDB backend routes that module to
+        a shared namespace, so a single fetch serves the whole fleet; on a local
+        filesystem backend it simply persists between polls.
+
+        Returns:
+            dict: The catalogue, or an empty dict if it could not be obtained.
+        """
+
+        async def _fetch():
+            """Download the catalogue from the GraphQL API."""
+            return await self.async_graphql_query(intelligent_catalogue_query, "get-vehicle-catalogue", ignore_errors=True)
+
+        if not self.storage:
+            return await _fetch() or {}
+
+        catalogue = await self.storage.fetch_cached(
+            "octopus",
+            "vehicle_catalogue",
+            _fetch,
+            fresh_minutes=CATALOGUE_FRESH_MINUTES,
+            stale_minutes=CATALOGUE_STALE_MINUTES,
+            format="json",
+        )
+        return catalogue or {}
 
     async def async_get_intelligent_devices(self, account_id, device_id):
         """
@@ -1706,8 +1826,9 @@ class OctopusAPI(ComponentBase):
             """
 
             if device_result:
-                chargePointVariants = device_result.get("chargePointVariants", [])
-                electricVehicles = device_result.get("electricVehicles", [])
+                catalogue = await self.async_get_vehicle_catalogue()
+                chargePointVariants = catalogue.get("chargePointVariants", [])
+                electricVehicles = catalogue.get("electricVehicles", [])
                 devices = device_result.get("devices", [])
                 if not devices:
                     return None
@@ -2276,6 +2397,55 @@ class Octopus:
             octopus_slots.append(slot)
             self.log("Octopus: Car is charging now - added new IO slot {}".format(slot))
         return octopus_slots
+
+    def octopus_slots_signature(self, octopus_slots):
+        """
+        Build a single change-detection signature value for the intelligent dispatch slots.
+
+        Returns an opaque tuple intended only to be compared for equality against another signature -
+        callers should not index into it. Per-car grouping is preserved inside so a slot moving
+        between cars still registers as a change. Timestamps are normalised to the parsed instant so
+        equivalent values in different formats (+0000 vs +00:00 vs Z) do not register as a change;
+        an unparseable value falls back to its raw string (and never raises) so a genuine change is
+        still detected without breaking the update cycle.
+
+        An in-progress dispatch has its start advanced to now and its charge_in_kwh scaled to the
+        remaining time on every component refresh (see async_get_intelligent_devices). Comparing the
+        raw slots would therefore report a change on every cycle throughout an active charging window
+        and force a needless replan each time. For a currently active slot the signature keeps only
+        the stable fields (window end, source, location); genuine changes - new/removed slots, a
+        moved window end, a revised future slot, a future slot becoming active - still alter it.
+        """
+        signature = []
+        for car_slots in octopus_slots:
+            car_signature = []
+            for slot in car_slots:
+                start = slot.get("start")
+                end = slot.get("end")
+                source = slot.get("source")
+                location = slot.get("location")
+                start_dt = self._parse_slot_time(start)
+                end_dt = self._parse_slot_time(end)
+                # Normalise to the parsed instant where possible, else keep the raw string
+                start_key = start_dt if start_dt is not None else start
+                end_key = end_dt if end_dt is not None else end
+                in_progress = start_dt is not None and end_dt is not None and start_dt <= self.now_utc < end_dt
+                if in_progress:
+                    # start / charge_in_kwh drift as time elapses - exclude them so only genuine changes count
+                    car_signature.append(("active", end_key, source, location))
+                else:
+                    car_signature.append((start_key, end_key, slot.get("charge_in_kwh", slot.get("kwh")), source, location))
+            signature.append(tuple(car_signature))
+        return tuple(signature)
+
+    def _parse_slot_time(self, value):
+        """Parse a slot timestamp string into a datetime, returning None if empty or unparseable."""
+        if not value:
+            return None
+        try:
+            return str2time(value)
+        except (ValueError, TypeError):
+            return None
 
     def load_free_slot(self, octopus_free_slots, export=False, rate_replicate=None):
         """

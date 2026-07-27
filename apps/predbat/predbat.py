@@ -35,7 +35,14 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v712.12"
+THIS_VERSION = "v712.14"
+
+# Restart Predbat if a component stays unhealthy for this long
+COMPONENT_ERROR_RESTART_MINUTES = 10
+# Give up auto-restarting after this many attempts inside the window below
+WATCHDOG_MAX_RESTARTS = 3
+WATCHDOG_RESTART_WINDOW_HOURS = 2
+WATCHDOG_STATE_FILE = ".predbat_watchdog_restarts"
 
 from download import predbat_update_move, predbat_update_download, check_install, DEFAULT_PREDBAT_REPOSITORY
 from const import MINUTE_WATT
@@ -74,7 +81,7 @@ from predheat import PredHeat
 from octopus import Octopus
 from energydataservice import Energidataservice
 from stromligning import Stromligning
-from components import Components
+from components import Components, COMPONENT_LIST
 from execute import Execute
 from marginal import Marginal
 from plan import Plan
@@ -302,6 +309,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.ha_interface = None
         self.num_cars = 0
         self.fatal_error = False
+        self.component_error_since = None
         self.components = None
         self.CONFIG_ITEMS = copy.deepcopy(CONFIG_ITEMS)
         self.comparison = None
@@ -741,6 +749,150 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.plan_valid = True
         self.log("Restored saved plan from {:.0f} minutes ago: {} charge windows, {} export windows".format(age_minutes, len(self.charge_window_best), len(self.export_window_best)))
 
+    def record_final_run_status(self, status, status_extra):
+        """
+        Publish the component health dashboard item and record the final run status for this cycle.
+        Any component that is active but not alive fails the run, even if the plan itself computed successfully.
+        """
+        failed_components = []
+        if self.components:
+            all_components = self.components.get_all()
+            active_components = self.components.get_active()
+            error_count = 0
+            component_status = {}
+            component_error_count = {}
+            all_healthy = True
+            for component_name in all_components:
+                is_active = self.components.is_active(component_name)
+                is_alive = self.components.is_alive(component_name)
+                component_error_count[component_name] = self.components.get_error_count(component_name)
+                if is_active and not is_alive:
+                    # Component is active but not alive - error state
+                    component_status[component_name] = "error"
+                    all_healthy = False
+                    error_count += 1
+                    failed_components.append(COMPONENT_LIST.get(component_name, {}).get("name", component_name))
+                elif is_active:
+                    component_status[component_name] = "running"
+                else:
+                    component_status[component_name] = "disabled"
+            self.dashboard_item(
+                "binary_sensor." + self.prefix + "_components_healthy",
+                state="on" if all_healthy else "off",
+                attributes={
+                    "friendly_name": "Predbat components healthy",
+                    "icon": "mdi:cog-outline" if all_healthy else "mdi:cog-off-outline",
+                    "components": component_status,
+                    "component_error_count": component_error_count,
+                    "active_count": len(active_components),
+                    "total_count": len(all_components),
+                    "error_count": error_count,
+                },
+            )
+
+        self.check_component_watchdog(failed_components)
+
+        if self.had_errors:
+            self.log("Error: Completed run status {} with Errors reported (check log)".format(status))
+        elif failed_components:
+            error_status = "Error: Complete run status {} with component errors: {}".format(status, ", ".join(failed_components))
+            self.log(error_status)
+            self.record_status(
+                error_status,
+                debug="best_charge_limit={} best_charge_window={} best_export_limit= {} best_export_window={}".format(self.charge_limit_best, self.charge_window_best, self.export_limits_best, self.export_window_best),
+                notify=True,
+                had_errors=True,
+            )
+        else:
+            self.log("Info: Completed run status {}".format(status))
+            self.record_status(
+                status,
+                debug="best_charge_limit={} best_charge_window={} best_export_limit= {} best_export_window={}".format(self.charge_limit_best, self.charge_window_best, self.export_limits_best, self.export_window_best),
+                notify=True,
+                extra=status_extra,
+            )
+
+    def check_component_watchdog(self, failed_components):
+        """
+        Restart Predbat when a component has been unhealthy for too long.
+
+        A component whose start() raises stays dead for the life of the process with
+        nothing retrying it, so Predbat can keep planning on stale or missing data
+        indefinitely - a dead database manager with db_primary set left it running on
+        no load history at all. Setting fatal_error makes the supervisor restart the
+        whole process, which does recover it.
+        """
+        if not failed_components:
+            self.component_error_since = None
+            return
+
+        now = datetime.now(timezone.utc)
+        if self.component_error_since is None:
+            self.component_error_since = now
+            return
+
+        failed_for = now - self.component_error_since
+        if failed_for < timedelta(minutes=COMPONENT_ERROR_RESTART_MINUTES):
+            return
+
+        minutes = int(failed_for.total_seconds() / 60)
+        names = ", ".join(failed_components)
+
+        # A restart cannot fix every fault, so stop after a few attempts rather than
+        # cycling for ever. The count has to outlive the process it is protecting.
+        recent = self.watchdog_restart_history()
+        if len(recent) >= WATCHDOG_MAX_RESTARTS:
+            self.log(
+                "Error: Components {} unhealthy for {} minutes, but Predbat has already auto-restarted {} times in the last {} hours - not restarting again, manual intervention needed".format(names, minutes, len(recent), WATCHDOG_RESTART_WINDOW_HOURS)
+            )
+            # Re-arm so the warning repeats rather than firing once and going quiet
+            self.component_error_since = now
+            return
+
+        self.log("Error: Components {} have been unhealthy for {} minutes, restarting Predbat".format(names, minutes))
+        self.call_notify("Predbat: restarting, components unhealthy for {} minutes: {}".format(minutes, names))
+        self.watchdog_record_restart(recent, now)
+        self.component_error_since = None
+        self.fatal_error = True
+
+    def watchdog_state_path(self):
+        """Path of the file holding recent watchdog restart times"""
+        return os.path.join(self.config_root, WATCHDOG_STATE_FILE)
+
+    def watchdog_restart_history(self):
+        """
+        Read the watchdog restart timestamps that fall inside the backoff window.
+
+        Returns an empty list if the file is missing or unreadable - a watchdog that
+        throws would be worse than one that restarts too often.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=WATCHDOG_RESTART_WINDOW_HOURS)
+        recent = []
+        try:
+            with open(self.watchdog_state_path(), "r") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        stamp = datetime.fromisoformat(line)
+                    except ValueError:
+                        continue
+                    if stamp > cutoff:
+                        recent.append(stamp)
+        except OSError:
+            pass
+        return recent
+
+    def watchdog_record_restart(self, recent, now):
+        """Append this restart to the history, dropping entries outside the window"""
+        try:
+            with open(self.watchdog_state_path(), "w") as handle:
+                for stamp in recent + [now]:
+                    handle.write(stamp.isoformat() + "\n")
+        except OSError as e:
+            self.log("Warn: Unable to record watchdog restart: {}".format(e))
+
     def update_pred(self, scheduled=True):
         """
         Update the prediction state, everything is called from here right now
@@ -1022,51 +1174,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         if self.debug_enable:
             self.create_debug_yaml()
 
-        if self.had_errors:
-            self.log("Completed run status {} with Errors reported (check log)".format(status))
-        else:
-            self.log("Completed run status {}".format(status))
-            self.record_status(
-                status,
-                debug="best_charge_limit={} best_charge_window={} best_export_limit= {} best_export_window={}".format(self.charge_limit_best, self.charge_window_best, self.export_limits_best, self.export_window_best),
-                notify=True,
-                extra=status_extra,
-            )
-
-        # Publish component status dashboard item
-        if self.components:
-            all_components = self.components.get_all()
-            active_components = self.components.get_active()
-            error_count = 0
-            component_status = {}
-            component_error_count = {}
-            all_healthy = True
-            for component_name in all_components:
-                is_active = self.components.is_active(component_name)
-                is_alive = self.components.is_alive(component_name)
-                component_error_count[component_name] = self.components.get_error_count(component_name)
-                if is_active and not is_alive:
-                    # Component is active but not alive - error state
-                    component_status[component_name] = "error"
-                    all_healthy = False
-                    error_count += 1
-                elif is_active:
-                    component_status[component_name] = "running"
-                else:
-                    component_status[component_name] = "disabled"
-            self.dashboard_item(
-                "binary_sensor." + self.prefix + "_components_healthy",
-                state="on" if all_healthy else "off",
-                attributes={
-                    "friendly_name": "Predbat components healthy",
-                    "icon": "mdi:cog-outline" if all_healthy else "mdi:cog-off-outline",
-                    "components": component_status,
-                    "component_error_count": component_error_count,
-                    "active_count": len(active_components),
-                    "total_count": len(all_components),
-                    "error_count": error_count,
-                },
-            )
+        self.record_final_run_status(status, status_extra)
 
         self.expose_config("active", False)
         self.save_current_config()

@@ -8,13 +8,16 @@
 # pylint: disable=line-too-long
 # pylint: disable=attribute-defined-outside-init
 
+import os
+import sqlite3
 import tempfile
 import shutil
 import asyncio
 import pytz
 from datetime import datetime, timedelta, timezone
+import db_manager as db_manager_module
 from db_manager import DatabaseManager
-from db_engine import TIME_FORMAT_DB
+from db_engine import DatabaseEngine, TIME_FORMAT_DB
 
 
 def run_async(coro):
@@ -89,6 +92,10 @@ def test_db_manager(my_predbat=None):
         ("error_handling", _test_db_manager_error_handling, "Error handling (corrupted files, missing dirs)"),
         ("persistence", _test_db_manager_persistence, "Data persistence across restarts"),
         ("commit_throttle", _test_db_manager_commit_throttling, "Commit throttling (5 second interval)"),
+        ("retention", _test_db_engine_retention, "Retention pruning (db_days boundary and db_days_daily)"),
+        ("maintenance", _test_db_engine_maintenance, "Nightly prune and vacuum reclaims space"),
+        ("corruption", _test_db_engine_corruption_recovery, "Transient corruption retried, real corruption quarantined"),
+        ("maintenance_schedule", _test_db_manager_maintenance_schedule, "Nightly maintenance runs once per night"),
     ]
 
     print("\n" + "=" * 70)
@@ -687,3 +694,220 @@ def _test_db_manager_commit_throttling(my_predbat=None):
 
     run_async(run_test())
     print("=== test_db_manager_commit_throttling PASSED ===\n")
+
+
+def _seed_states(db_path, rows, now):
+    """Create a states table containing (days_ago, keep) rows for retention tests"""
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE IF NOT EXISTS entities (entity_index INTEGER PRIMARY KEY AUTOINCREMENT, entity_name TEXT KEY UNIQUE)")
+    con.execute("CREATE TABLE IF NOT EXISTS states (id INTEGER PRIMARY KEY AUTOINCREMENT, datetime TEXT KEY, entity_index INTEGER KEY, state TEXT, attributes TEXT, system TEXT, keep TEXT KEY)")
+    con.execute("CREATE TABLE IF NOT EXISTS latest (entity_index INTEGER PRIMARY KEY, datetime TEXT KEY, state TEXT, attributes TEXT, system TEXT, keep TEXT KEY)")
+    con.execute("INSERT OR IGNORE INTO entities (entity_index, entity_name) VALUES (1, 'sensor.test')")
+    for days_ago, keep in rows:
+        stamp = (now - timedelta(days=days_ago)).strftime(TIME_FORMAT_DB)
+        con.execute("INSERT INTO states (datetime, entity_index, state, attributes, system, keep) VALUES (?,1,'1','{}','',?)", (stamp, keep))
+    con.commit()
+    con.close()
+
+
+def _count_states(db_path, keep=None):
+    """Count rows in the states table, optionally filtered by keep level"""
+    con = sqlite3.connect(db_path)
+    if keep:
+        count = con.execute("SELECT COUNT(*) FROM states WHERE keep=?", (keep,)).fetchone()[0]
+    else:
+        count = con.execute("SELECT COUNT(*) FROM states").fetchone()[0]
+    con.close()
+    return count
+
+
+def _test_db_engine_retention(my_predbat=None):
+    """Test that db_days prunes at the right boundary and db_days_daily bounds daily rows"""
+    print("\n=== Testing DatabaseEngine retention ===")
+    mock_base = MockBase()
+    db_path = os.path.join(mock_base.config_root, "predbat.db")
+    now = mock_base.now_utc_real
+    try:
+        # 20/15/14.1 days old must go, 13.9/1 must stay. The 14.1 day row is the
+        # regression guard: binding a datetime gave SQLite "2026-07-13 07:00:00",
+        # which does not sort against the stored "2026-07-13T07:00:00.000000" form.
+        _seed_states(db_path, [(20, "I"), (15, "I"), (14.1, "I"), (13.9, "I"), (1, "I"), (5, "H"), (20, "H")], now)
+        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+        assert _count_states(db_path) == 3, f"Expected 3 rows to survive the 14 day prune, got {_count_states(db_path)}"
+
+        con = sqlite3.connect(db_path)
+        oldest = con.execute("SELECT MIN(datetime) FROM states").fetchone()[0]
+        con.close()
+        cutoff = (now - timedelta(days=14)).strftime(TIME_FORMAT_DB)
+        assert oldest >= cutoff, f"Row older than the cutoff survived: {oldest} < {cutoff}"
+        print("✓ Intra-hour and hourly rows pruned at the correct day boundary")
+        engine._close()
+
+        # Daily rows are exempt from db_days but must be bounded by db_days_daily
+        os.remove(db_path)
+        _seed_states(db_path, [(400, "D"), (200, "D"), (30, "D"), (30, "I")], now)
+        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+        assert _count_states(db_path, "D") == 2, f"Expected 2 daily rows to survive, got {_count_states(db_path, 'D')}"
+        assert _count_states(db_path, "I") == 0, "Old intra-hour row should still be pruned"
+        print("✓ Daily rows survive db_days but are pruned at db_days_daily")
+        engine._close()
+    finally:
+        shutil.rmtree(mock_base.config_root)
+    print("=== test_db_engine_retention PASSED ===\n")
+    return False
+
+
+def _test_db_engine_maintenance(my_predbat=None):
+    """Test that nightly maintenance prunes and vacuums, reclaiming file space"""
+    print("\n=== Testing DatabaseEngine nightly maintenance ===")
+    import db_engine as db_engine_module
+
+    original_threshold = db_engine_module.VACUUM_MIN_FREE_BYTES
+    mock_base = MockBase()
+    db_path = os.path.join(mock_base.config_root, "predbat.db")
+    try:
+        _seed_states(db_path, [(20, "I")] * 4000 + [(1, "I")] * 200, mock_base.now_utc_real)
+        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+        size_before = os.path.getsize(db_path)
+
+        # A small free list must not trigger a vacuum - rewriting the file evicts a
+        # database-sized amount of page cache, which is what pushes small machines to swap
+        engine._maintenance_db()
+        assert os.path.getsize(db_path) == size_before, "Vacuum should be skipped below the reclaim threshold"
+        assert any("skipping vacuum" in m for m in mock_base.log_messages), "Skipped vacuum should be logged"
+        print("✓ Vacuum skipped when there is little to reclaim")
+
+        # Above the threshold it runs and the file shrinks
+        db_engine_module.VACUUM_MIN_FREE_BYTES = 0
+        try:
+            engine._maintenance_db()
+        finally:
+            db_engine_module.VACUUM_MIN_FREE_BYTES = original_threshold
+
+        size_after = os.path.getsize(db_path)
+        assert size_after < size_before, f"VACUUM should shrink the file, {size_before} -> {size_after}"
+        assert _count_states(db_path) == 200, f"Surviving rows should be intact, got {_count_states(db_path)}"
+        assert any("vacuumed" in m for m in mock_base.log_messages), "Maintenance should log a summary"
+        print(f"✓ Maintenance vacuumed {size_before} -> {size_after} bytes with 200 rows intact")
+        engine._close()
+    finally:
+        shutil.rmtree(mock_base.config_root)
+    print("=== test_db_engine_maintenance PASSED ===\n")
+    return False
+
+
+def _test_db_engine_corruption_recovery(my_predbat=None):
+    """Test that transient corruption is retried and real corruption is quarantined"""
+    print("\n=== Testing DatabaseEngine corruption recovery ===")
+    import db_engine as db_engine_module
+
+    original_wait = db_engine_module.DB_OPEN_RETRY_WAIT
+    db_engine_module.DB_OPEN_RETRY_WAIT = 0
+
+    # A transient malformed error must not kill the engine or discard the database
+    mock_base = MockBase()
+    db_path = os.path.join(mock_base.config_root, "predbat.db")
+    real_cleanup = DatabaseEngine._cleanup_db
+    calls = {"count": 0}
+
+    def flaky_cleanup(self):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        return real_cleanup(self)
+
+    try:
+        _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+        DatabaseEngine._cleanup_db = flaky_cleanup
+        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+        assert _count_states(db_path) == 1, "Data should survive a transient error"
+        assert not any(f.startswith("predbat.db.corrupt") for f in os.listdir(mock_base.config_root)), "Database should not be quarantined after a transient error"
+        print("✓ Transient malformed error retried, database preserved")
+        engine._close()
+    finally:
+        DatabaseEngine._cleanup_db = real_cleanup
+        shutil.rmtree(mock_base.config_root)
+
+    # A genuinely corrupt file must be moved aside so Predbat does not restart-loop
+    mock_base = MockBase()
+    db_path = os.path.join(mock_base.config_root, "predbat.db")
+    try:
+        with open(db_path, "wb") as handle:
+            handle.write(b"SQLite format 3\x00" + os.urandom(60000))
+        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+        quarantined = [f for f in os.listdir(mock_base.config_root) if f.startswith("predbat.db.corrupt")]
+        assert len(quarantined) == 1, f"Corrupt database should be moved aside, found {quarantined}"
+        assert _count_states(db_path) == 0, "A fresh database should have been created"
+        assert any("Alert:" in m for m in mock_base.log_messages), "User should be notified about the data loss"
+        print(f"✓ Corrupt database quarantined as {quarantined[0]} and a fresh one started")
+        engine._close()
+    finally:
+        db_engine_module.DB_OPEN_RETRY_WAIT = original_wait
+        shutil.rmtree(mock_base.config_root)
+    print("=== test_db_engine_corruption_recovery PASSED ===\n")
+    return False
+
+
+def _test_db_manager_maintenance_schedule(my_predbat=None):
+    """Test that nightly maintenance runs once per day, in the maintenance hour"""
+    print("\n=== Testing DatabaseManager maintenance schedule ===")
+
+    class FakeEngine:
+        def __init__(self):
+            self.runs = 0
+
+        def _maintenance_db(self):
+            self.runs += 1
+
+    mock_base = MockBase()
+    try:
+        db_mgr = MockDatabaseManager()
+        db_mgr.base = mock_base
+        db_mgr.log = mock_base.log
+        db_mgr.last_maintenance_date = None
+        db_mgr.db_engine = FakeEngine()
+
+        real_datetime = db_manager_module.datetime
+
+        class FrozenDatetime(real_datetime):
+            frozen = None
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.frozen
+
+        db_manager_module.datetime = FrozenDatetime
+        try:
+            tz = mock_base.local_tz
+            FrozenDatetime.frozen = real_datetime(2026, 7, 27, 14, 0, 0, tzinfo=tz)
+            for _ in range(5):
+                db_mgr.run_maintenance()
+            assert db_mgr.db_engine.runs == 0, "Maintenance must not run outside the maintenance hour"
+
+            FrozenDatetime.frozen = real_datetime(2026, 7, 27, db_manager_module.MAINTENANCE_HOUR, 5, 0, tzinfo=tz)
+            for _ in range(20):
+                db_mgr.run_maintenance()
+            assert db_mgr.db_engine.runs == 1, f"Maintenance should run exactly once a night, ran {db_mgr.db_engine.runs}"
+
+            FrozenDatetime.frozen = real_datetime(2026, 7, 28, db_manager_module.MAINTENANCE_HOUR, 5, 0, tzinfo=tz)
+            db_mgr.run_maintenance()
+            assert db_mgr.db_engine.runs == 2, "Maintenance should run again the following night"
+            print("✓ Maintenance runs once per night, in the maintenance hour")
+
+            # A failing vacuum must be logged rather than killing the database thread
+            class BoomEngine(FakeEngine):
+                def _maintenance_db(self):
+                    raise RuntimeError("disk full")
+
+            db_mgr.db_engine = BoomEngine()
+            db_mgr.last_maintenance_date = None
+            FrozenDatetime.frozen = real_datetime(2026, 7, 29, db_manager_module.MAINTENANCE_HOUR, 5, 0, tzinfo=tz)
+            db_mgr.run_maintenance()
+            assert any("Nightly maintenance failed" in m for m in mock_base.log_messages), "A failing vacuum should be logged"
+            print("✓ A failing vacuum is logged, not raised")
+        finally:
+            db_manager_module.datetime = real_datetime
+    finally:
+        shutil.rmtree(mock_base.config_root)
+    print("=== test_db_manager_maintenance_schedule PASSED ===\n")
+    return False

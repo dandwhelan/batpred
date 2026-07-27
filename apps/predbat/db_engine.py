@@ -17,9 +17,20 @@ data and deduplication of unchanged states.
 
 import sqlite3
 import json
+import os
+import time
 from datetime import datetime, timedelta
 
 TIME_FORMAT_DB = "%Y-%m-%dT%H:%M:%S.%f"
+
+# Number of times to retry opening/pruning the database before treating it as corrupt
+DB_OPEN_RETRIES = 3
+# Seconds to wait between open retries
+DB_OPEN_RETRY_WAIT = 5
+# Only vacuum when at least this much space would be reclaimed. VACUUM rewrites the
+# whole file, evicting a database-sized amount of page cache, so it is not worth doing
+# for a small saving on a memory-constrained machine.
+VACUUM_MIN_FREE_BYTES = 256 * 1024 * 1024
 
 
 class DatabaseEngine:
@@ -30,17 +41,102 @@ class DatabaseEngine:
     (Intra-hour, Hourly, Daily).
     """
 
-    def __init__(self, base, db_days):
+    def __init__(self, base, db_days, db_days_daily=365):
         self.base = base
         self.log = base.log
         self.db_days = db_days
+        self.db_days_daily = db_days_daily
+        self.db_path = self.base.config_root + "/predbat.db"
+        self.db = None
+        self.db_cursor = None
+        self.entity_id_cache = {}
+        self.last_maintenance_date = None
 
-        self.db = sqlite3.connect(self.base.config_root + "/predbat.db")
+        self._connect()
+        self._cleanup_db_retry()
+        self.log("db_engine: Started")
+
+    def _connect(self):
+        """
+        Open (or re-open) the database connection
+        """
+        self.db = sqlite3.connect(self.db_path)
         self.db_cursor = self.db.cursor()
+        # The cache maps entity names to row indexes in the open connection, so it
+        # must not survive a reconnect
         self.entity_id_cache = {}
 
+    def _cleanup_db_retry(self):
+        """
+        Run _cleanup_db(), retrying on SQLite corruption errors before giving up.
+
+        A "database disk image is malformed" error at startup is usually transient -
+        it is normally the previous Predbat process still closing the database while
+        the restarted one opens it. Letting that exception escape kills the database
+        thread for the whole life of the process, and with db_primary set that leaves
+        Predbat running with no history at all, so retry with a fresh connection first.
+
+        If the image really is damaged the file is moved aside and a new one started,
+        because looping on a permanently corrupt file would just restart Predbat for ever.
+        """
+        for attempt in range(1, DB_OPEN_RETRIES + 1):
+            try:
+                self._cleanup_db()
+                if attempt > 1:
+                    self.log("Info: db_engine: Database opened successfully on attempt {}".format(attempt))
+                return
+            except sqlite3.DatabaseError as e:
+                self.log("Warn: db_engine: Database error on open attempt {} of {}: {}".format(attempt, DB_OPEN_RETRIES, e))
+                try:
+                    self.db.close()
+                except sqlite3.Error:
+                    pass
+                if attempt < DB_OPEN_RETRIES:
+                    time.sleep(DB_OPEN_RETRY_WAIT)
+                    self._connect()
+
+        # Out of retries - decide whether the file itself is actually damaged
+        self._connect()
+        corrupt = True
+        try:
+            result = self.db_cursor.execute("PRAGMA quick_check(10)").fetchone()
+            corrupt = not (result and result[0] == "ok")
+            if not corrupt:
+                self.log("Warn: db_engine: quick_check reports the database is OK, retrying cleanup once more")
+                self._cleanup_db()
+                self.log("Info: db_engine: Database recovered after quick_check")
+                return
+        except sqlite3.DatabaseError as e:
+            self.log("Warn: db_engine: quick_check failed: {}".format(e))
+
+        if corrupt:
+            self._quarantine_db()
+
+    def _quarantine_db(self):
+        """
+        Move a corrupt database out of the way and start a fresh one.
+
+        History is lost, but Predbat keeps running and rebuilds from new data rather
+        than restart-looping on a file that will never open.
+        """
+        try:
+            self.db.close()
+        except sqlite3.Error:
+            pass
+        bad_path = "{}.corrupt-{}".format(self.db_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
+        try:
+            os.rename(self.db_path, bad_path)
+            self.log("Error: db_engine: Database is corrupt, moved to {} and starting a new empty database - history has been lost".format(bad_path))
+            try:
+                # Runs during startup, so notification config may not be loaded yet
+                self.base.call_notify("Predbat: database was corrupt, moved to {} and started a new one. History has been lost.".format(bad_path))
+            except Exception as e:
+                self.log("Warn: db_engine: Unable to send corruption notification: {}".format(e))
+        except OSError as e:
+            self.log("Error: db_engine: Unable to move corrupt database aside: {}".format(e))
+            raise
+        self._connect()
         self._cleanup_db()
-        self.log("db_engine: Started")
 
     def _close(self):
         """
@@ -61,15 +157,91 @@ class DatabaseEngine:
         self.db_cursor.execute("CREATE TABLE IF NOT EXISTS latest (entity_index INTEGER PRIMARY KEY, datetime TEXT KEY, state TEXT, attributes TEXT, system TEXT, keep TEXT KEY)")
         # Create index for fast history queries (critical for performance)
         self.db_cursor.execute("CREATE INDEX IF NOT EXISTS idx_states_entity_datetime ON states(entity_index, datetime)")
-        # Delete old data from states table
+        # Delete old data from states table. The cut-off must be formatted the same way
+        # as the stored values - binding a datetime gives SQLite a space separator
+        # ("2026-07-13 07:00:00") which does not sort against the stored "T" form.
+        cutoff = (self.base.now_utc_real - timedelta(days=self.db_days)).strftime(TIME_FORMAT_DB)
         self.db_cursor.execute(
             "DELETE FROM states WHERE datetime < ? AND keep != ?",
             (
-                self.base.now_utc_real - timedelta(days=self.db_days),
+                cutoff,
                 "D",
             ),
         )
+        deleted = self.db_cursor.rowcount
+
+        # Daily-keep rows are exempt from the prune above, so they grow without limit
+        # unless they get a (much longer) retention of their own
+        cutoff_daily = (self.base.now_utc_real - timedelta(days=self.db_days_daily)).strftime(TIME_FORMAT_DB)
+        self.db_cursor.execute(
+            "DELETE FROM states WHERE datetime < ? AND keep = ?",
+            (
+                cutoff_daily,
+                "D",
+            ),
+        )
+        deleted_daily = self.db_cursor.rowcount
         self._commit_db()
+        return deleted, deleted_daily
+
+    def _maintenance_db(self):
+        """
+        Nightly housekeeping: prune expired rows and reclaim the free pages left behind.
+
+        Deleting rows only moves pages onto SQLite's free list, so the file never shrinks
+        on its own. VACUUM rebuilds it compactly, but it rewrites the whole file, which
+        evicts a database-sized amount of kernel page cache - enough to push a small
+        machine into swapping. So it only runs when there is enough free space to be
+        worth the churn, which in steady state means rarely rather than every night.
+        """
+        start_time = time.time()
+        size_before = self._db_size()
+        deleted, deleted_daily = self._cleanup_db()
+
+        free_bytes = self._freelist_bytes()
+        if free_bytes < VACUUM_MIN_FREE_BYTES:
+            self.log(
+                "Info: db_engine: Nightly maintenance pruned {} rows ({} daily) in {} seconds, skipping vacuum ({} MB reclaimable, threshold {} MB)".format(
+                    deleted, deleted_daily, round(time.time() - start_time, 1), round(free_bytes / (1024 * 1024), 1), round(VACUUM_MIN_FREE_BYTES / (1024 * 1024), 1)
+                )
+            )
+            return
+
+        # VACUUM cannot run inside a transaction
+        self.db.commit()
+        isolation_level = self.db.isolation_level
+        self.db.isolation_level = None
+        try:
+            self.db_cursor.execute("VACUUM")
+        finally:
+            self.db.isolation_level = isolation_level
+
+        size_after = self._db_size()
+        self.log(
+            "Info: db_engine: Nightly maintenance pruned {} rows ({} daily) and vacuumed, database {} MB -> {} MB in {} seconds".format(
+                deleted, deleted_daily, round(size_before / (1024 * 1024), 1), round(size_after / (1024 * 1024), 1), round(time.time() - start_time, 1)
+            )
+        )
+
+    def _freelist_bytes(self):
+        """
+        Bytes that a VACUUM would reclaim, or 0 if it cannot be determined
+        """
+        try:
+            page_size = self.db_cursor.execute("PRAGMA page_size").fetchone()[0]
+            free_pages = self.db_cursor.execute("PRAGMA freelist_count").fetchone()[0]
+            return page_size * free_pages
+        except (sqlite3.DatabaseError, TypeError, IndexError):
+            return 0
+
+    def _db_size(self):
+        """
+        Current size of the database file in bytes, or 0 if it cannot be read
+        """
+        try:
+            return os.path.getsize(self.db_path)
+        except OSError:
+            return 0
 
     def _get_state_db(self, entity_id):
         """
