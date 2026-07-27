@@ -161,6 +161,7 @@ fontweight
 Forestfire
 foxess
 foxesscloud
+freelist
 freephase
 fronius
 funcs
@@ -485,6 +486,7 @@ unconfigured
 unparseable
 unsmoothed
 unstaged
+urandom
 urlsafe
 useid
 userinterface

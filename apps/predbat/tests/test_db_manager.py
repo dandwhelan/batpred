@@ -95,7 +95,7 @@ def test_db_manager(my_predbat=None):
         ("retention", _test_db_engine_retention, "Retention pruning (db_days boundary and db_days_daily)"),
         ("maintenance", _test_db_engine_maintenance, "Nightly prune and vacuum reclaims space"),
         ("corruption", _test_db_engine_corruption_recovery, "Transient corruption retried, real corruption quarantined"),
-        ("maint_schedule", _test_db_manager_maintenance_schedule, "Nightly maintenance runs once per night"),
+        ("maintenance_schedule", _test_db_manager_maintenance_schedule, "Nightly maintenance runs once per night"),
     ]
 
     print("\n" + "=" * 70)
