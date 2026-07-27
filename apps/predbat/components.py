@@ -60,6 +60,7 @@ COMPONENT_LIST = {
         "args": {
             "db_enable": {"required_true": True, "config": "db_enable"},
             "db_days": {"required": False, "config": "db_days", "default": 30},
+            "db_days_daily": {"required": False, "config": "db_days_daily", "default": 365},
         },
         "can_restart": False,
         "phase": 0,

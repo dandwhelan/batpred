@@ -59,6 +59,7 @@ Stores and manages all historical data for Predbat, including energy usage, sens
 | ------ | ---- | -------- | ------- | ---------- | ----------- |
 | `db_enable` | Boolean | Yes | - | `db_enable` | Set to `true` to enable the database, `false` to disable |
 | `db_days` | Integer | No | 30 | `db_days` | Number of days of historical data to keep in the database |
+| `db_days_daily` | Integer | No | 365 | `db_days_daily` | Number of days to keep daily-summary rows, which are exempt from `db_days`. Pruned during nightly maintenance |
 
 ---
 

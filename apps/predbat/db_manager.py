@@ -24,6 +24,8 @@ from db_engine import DatabaseEngine, TIME_FORMAT_DB
 from component_base import ComponentBase
 
 IPC_TIMEOUT = 60.0  # Seconds to wait for IPC response
+MAINTENANCE_HOUR = 3  # Local hour at which nightly database maintenance runs
+IDLE_WAIT = 30.0  # Seconds to wait for new work before re-checking housekeeping
 
 
 class DatabaseManager(ComponentBase):
@@ -34,8 +36,11 @@ class DatabaseManager(ComponentBase):
     get_state commands from the queue.
     """
 
-    def initialize(self, db_enable, db_days):
+    def initialize(self, db_enable, db_days, db_days_daily=365):
         self.db_days = db_days
+        self.db_days_daily = db_days_daily
+        self.engine_failed = False
+        self.last_maintenance_date = None
         self.db_queue = []
         self.queue_id = 0
         self.queue_results = {}
@@ -57,12 +62,43 @@ class DatabaseManager(ComponentBase):
             self.sync_event.clear()  # Clear the event to allow the loop to continue
             loop.call_soon_threadsafe(self.async_event.set)
 
+    def start_engine(self):
+        """
+        Construct the database engine, reporting failure rather than raising.
+
+        An exception here would escape the component task and leave the database
+        thread gone for the life of the process, while every caller kept paying the
+        full IPC_TIMEOUT for a reply that would never come.
+        """
+        try:
+            self.db_engine = DatabaseEngine(self.base, self.db_days, db_days_daily=self.db_days_daily)
+            return True
+        except Exception as e:
+            self.engine_failed = True
+            self.log("Error: db_manager: Failed to start database engine: {}".format(e))
+            self.log("Error: " + traceback.format_exc())
+            return False
+
+    async def wait_for_work(self):
+        """
+        Wait for the next queued command, giving up after IDLE_WAIT.
+
+        The bounded wait is what lets nightly housekeeping get a look in on a quiet
+        queue, rather than blocking until the next database operation arrives.
+        """
+        try:
+            await asyncio.wait_for(self.async_event.wait(), timeout=IDLE_WAIT)
+        except asyncio.TimeoutError:
+            pass
+        self.async_event.clear()
+
     async def start(self):
         """
         Initialise the database and clean up old data
         """
 
-        self.db_engine = DatabaseEngine(self.base, self.db_days)
+        if not self.start_engine():
+            return
 
         loop = asyncio.get_running_loop()
 
@@ -74,8 +110,8 @@ class DatabaseManager(ComponentBase):
 
         while not self.api_stop:
             if not self.db_queue:
-                await self.async_event.wait()
-                self.async_event.clear()
+                await self.wait_for_work()
+                self.run_maintenance()
                 continue
             else:
                 item = self.db_queue.pop(0)
@@ -116,10 +152,33 @@ class DatabaseManager(ComponentBase):
         self.log("db_manager: Stopped cleanly")
         self.api_started = False
 
+    def run_maintenance(self):
+        """
+        Run the nightly prune and vacuum once per day, in the small hours.
+
+        Called from the queue loop so it can never run alongside another database
+        operation on the same connection.
+        """
+        now = datetime.now(self.local_tz)
+        if now.hour != MAINTENANCE_HOUR or self.last_maintenance_date == now.date():
+            return
+        self.last_maintenance_date = now.date()
+        try:
+            self.db_engine._maintenance_db()
+        except Exception as e:
+            self.log("Error: db_manager: Nightly maintenance failed: {}".format(e))
+            self.log("Error: " + traceback.format_exc())
+
     def send_via_ipc(self, command, info, expect_response=False):
         """
         Send a command to the database manager thread via IPC
         """
+        if self.engine_failed:
+            # Nothing is serving the queue, so waiting the full timeout would only
+            # stall the caller. This is what turned a dead database thread into
+            # 20-minute Predbat run cycles.
+            return None
+
         queue_id = self.queue_id
         self.queue_id += 1
         self.db_queue.append((queue_id, command, info))
