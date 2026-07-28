@@ -427,6 +427,9 @@ class OctopusAPI(ComponentBase):
         self.tariffs = {}
         self.saving_sessions = {}
         self.saving_sessions_to_join = []
+        # Events Octopus refused to let us join (e.g. region-targeted events), keyed by event code
+        self.saving_session_join_rejected = {}
+        self.last_graphql_errors = None
         self.intelligent_devices = {}
         self.tariff_fetched_at = None
         self.device_fetched_at = None
@@ -650,6 +653,7 @@ class OctopusAPI(ComponentBase):
         if data:
             self.account_data = data.get("account_data", {})
             self.saving_sessions = data.get("saving_sessions", {})
+            self.saving_session_join_rejected = data.get("saving_session_join_rejected", {})
             self.intelligent_devices = data.get("intelligent_devices", {})
             self.graphql_token = data.get("kraken_token")
             self.tariff_fetched_at = data.get("tariff_fetched_at")
@@ -662,6 +666,8 @@ class OctopusAPI(ComponentBase):
             self.account_data = {}
         if self.saving_sessions is None:
             self.saving_sessions = {}
+        if not isinstance(self.saving_session_join_rejected, dict):
+            self.saving_session_join_rejected = {}
         if not isinstance(self.intelligent_devices, dict):
             self.intelligent_devices = {}
 
@@ -670,6 +676,7 @@ class OctopusAPI(ComponentBase):
         octopus_cache = {
             "account_data": self.account_data,
             "saving_sessions": self.saving_sessions,
+            "saving_session_join_rejected": self.saving_session_join_rejected,
             "intelligent_devices": self.intelligent_devices,
             "kraken_token": self.graphql_token,
             "tariff_fetched_at": self.tariff_fetched_at,
@@ -897,14 +904,41 @@ class OctopusAPI(ComponentBase):
         else:
             self.log("Warn: OctopusAPI: Try to set target schedule, but no intelligent device ID {} found".format(device_id))
 
+    def describe_graphql_errors(self):
+        """
+        Turn the errors from the last failed GraphQL request into a readable one-line reason
+        """
+        parts = []
+        for error in self.last_graphql_errors or []:
+            extensions = error.get("extensions", {}) or {}
+            text = " ".join([str(item) for item in [error.get("message", ""), extensions.get("reason", "")] if item]).strip()
+            code = extensions.get("errorCode", "")
+            if code:
+                text = "{} [{}]".format(text, code) if text else str(code)
+            if text:
+                parts.append(text)
+        return "; ".join(parts) if parts else "no reason given"
+
     async def async_join_saving_session_events(self, account_id, event_code):
         """
         Join the saving session events
+
+        Octopus can refuse a join (e.g. region-targeted events the account is not eligible for).
+        A refused event is recorded so it is neither retried nor offered as joinable again, which
+        stops Predbat reporting a join that never happened.
         """
         if event_code:
             # Join the saving sessions
             self.log("OctopusAPI: Joining saving session event {}".format(event_code))
-            await self.async_graphql_query(octoplus_saving_session_join_mutation.format(account_id=account_id, event_code=event_code), "join-saving-session-event", returns_data=False, use_backend=True)
+            self.last_graphql_errors = None
+            joined = await self.async_graphql_query(octoplus_saving_session_join_mutation.format(account_id=account_id, event_code=event_code), "join-saving-session-event", returns_data=False, use_backend=True)
+            if joined is None:
+                reason = self.describe_graphql_errors()
+                self.saving_session_join_rejected[event_code] = {"time": self.now_utc.strftime(TIME_FORMAT), "reason": reason}
+                self.log("Warn: OctopusAPI: Octopus refused to join saving session event {} - {} - it will not be retried or offered as joinable".format(event_code, reason))
+            else:
+                self.saving_session_join_rejected.pop(event_code, None)
+                self.log("OctopusAPI: Joined saving session event {}".format(event_code))
             # Re-fetch the saving sessions if we have joined any
             self.saving_sessions = await self.async_get_saving_sessions(account_id)
 
@@ -1042,6 +1076,13 @@ class OctopusAPI(ComponentBase):
             if event_id:
                 joined_ids[event_id] = True
 
+        # Forget refused joins for events Octopus no longer advertises, so the record cannot grow forever
+        if available_events:
+            advertised = {event.get("code", None) for event in available_events}
+            for code in list(self.saving_session_join_rejected):
+                if code not in advertised:
+                    self.saving_session_join_rejected.pop(code, None)
+
         for event in available_events:
             start = event.get("startAt", None)
             end = event.get("endAt", None)
@@ -1053,7 +1094,7 @@ class OctopusAPI(ComponentBase):
             if event_id:
                 event_reward[event_id] = reward
                 event_code[event_id] = code
-            if start and end and event_id not in joined_ids:
+            if start and end and event_id not in joined_ids and code not in self.saving_session_join_rejected:
                 endDataTime = parse_date_time(end)
                 if endDataTime > self.now_utc_exact:
                     return_available_events.append({"start": start, "end": end, "octopoints_per_kwh": reward, "code": code, "id": event_id})
@@ -1068,7 +1109,8 @@ class OctopusAPI(ComponentBase):
             if start and end:
                 return_joined_events.append({"start": start, "end": end, "octopoints_per_kwh": reward, "rewarded_octopoints": event.get("rewardGivenInOctoPoints", None), "id": event_id, "code": event_code.get(event_id, None)})
 
-        saving_attributes = {"friendly_name": "Octopus Intelligent Saving Sessions", "icon": "mdi:currency-usd", "joined_events": return_joined_events, "available_events": return_available_events}
+        rejected_events = [{"code": code, "time": detail.get("time", ""), "reason": detail.get("reason", "")} for code, detail in self.saving_session_join_rejected.items() if isinstance(detail, dict)]
+        saving_attributes = {"friendly_name": "Octopus Intelligent Saving Sessions", "icon": "mdi:currency-usd", "joined_events": return_joined_events, "available_events": return_available_events, "rejected_events": rejected_events}
 
         # Check if currently in an active saving session
         # Handle both old API keys (start/end) and new API keys (startAt/endAt)
@@ -1087,9 +1129,10 @@ class OctopusAPI(ComponentBase):
                     pass
         self.dashboard_item(self.get_entity_name("binary_sensor", "saving_session"), "on" if active_event else "off", attributes=saving_attributes, app="octopus")
 
-        # Create joiner dropdown for available events
+        # Create joiner dropdown for available events - only events that can actually still be joined,
+        # so events already joined, already finished or refused by Octopus are not offered
         possible_codes = []
-        for event in available_events:
+        for event in return_available_events:
             code = event.get("code", None)
             if code:
                 possible_codes.append(code)
@@ -1752,6 +1795,8 @@ class OctopusAPI(ComponentBase):
 
                 # Check for other errors (non-auth)
                 if response_body and "errors" in response_body and not ignore_errors:
+                    # Keep the errors so the caller can report why the request was refused
+                    self.last_graphql_errors = response_body["errors"]
                     msg = f'Warn: OctopusAPI: Errors in request ({url}): {response_body["errors"]}'
                     self.log(msg)
                     self.failures_total += 1
@@ -1761,6 +1806,7 @@ class OctopusAPI(ComponentBase):
 
                 if response_body and ("data" in response_body):
                     self.consecutive_edge_blocks = 0
+                    self.last_graphql_errors = None
                     self.update_success_timestamp()
                     record_api_call("octopus")
                     return response_body["data"]
@@ -2984,8 +3030,10 @@ class Octopus:
                         if self._saving_event_conflicts_axle(start_time, end_time, axle_sessions):
                             self.log("Octopus: Skipping saving event code {} {}-{} - conflicts with an Axle VPP session".format(code, start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M")))
                             continue
-                        if code:  # Join the new Octopus saving event and send an alert
-                            self.log("Octopus: Joining Octopus saving event code {} {}-{} at rate {} p/kWh".format(code, start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), saving_rate))
+                        if code:  # Request to join the new Octopus saving event
+                            # The join is asynchronous and can be refused (e.g. region-targeted events), so
+                            # nothing is claimed here - the alert is sent once the event appears as joined below
+                            self.log("Octopus: Requesting to join Octopus saving event code {} {}-{} at rate {} p/kWh".format(code, start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), saving_rate))
                             entity_id_join = self.get_arg("octopus_saving_session_join", indirect=False)
                             if entity_id_join:
                                 # Join via selector
@@ -2993,8 +3041,6 @@ class Octopus:
                             else:
                                 # Join via octopus event (Bottle Cap Dave)
                                 self.call_service_wrapper("octopus_energy/join_octoplus_saving_session_event", event_code=code, entity_id=entity_id)
-                            if self.get_arg("set_event_notify"):
-                                self.call_notify("Predbat: Joined Octopus saving event {}-{}, {} p/kWh".format(start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), saving_rate))
                             self.octopus_last_joined_try = self.now_utc
 
             # Default saving session rate for when octopoints_per_kwh is not available
@@ -3019,6 +3065,13 @@ class Octopus:
                             diff_time = start_time - self.now_utc
                             if abs(diff_time.days) <= 3:
                                 self.log("Octopus: Joined Octopus saving session: {}-{} at rate {} p/kWh state {}".format(start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), saving_rate, state))
+
+                                # Alert on a confirmed join of an event that has not finished yet, once only
+                                event_key = event.get("code", None) or start
+                                if end_time > self.now_utc and event_key not in self.octopus_saving_notified:
+                                    self.octopus_saving_notified[event_key] = True
+                                    if self.get_arg("set_event_notify"):
+                                        self.call_notify("Predbat: Joined Octopus saving event {}-{}, {} p/kWh".format(start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), saving_rate))
 
                                 # Save the slot
                                 octopus_saving_slot = {}
