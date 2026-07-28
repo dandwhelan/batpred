@@ -28,6 +28,7 @@ from const import (
     TIME_FORMAT,
     PREDBAT_MODE_OPTIONS,
     PREDBAT_MODE_MONITOR,
+    ENTITY_NO_VALUE_STATES,
 )
 from config import CONFIG_API_OVERRIDE
 from predbat import THIS_VERSION
@@ -178,6 +179,15 @@ class UserInterface:
             else:
                 self.args[arg] = value
 
+    def entity_has_no_value(self, value):
+        """
+        Is this an entity state that means "no value right now" rather than a bad value?
+
+        Home Assistant reports unavailable/unknown for an entity that exists but cannot be read at the
+        moment, e.g. a car that is asleep, which is expected and transient rather than an error.
+        """
+        return isinstance(value, str) and value.strip().lower() in ENTITY_NO_VALUE_STATES
+
     def get_arg(self, arg, default=None, indirect=True, combine=False, attribute=None, index=None, domain=None, can_override=True, required_unit=None):
         """
         Argument getter that can use HA state as well as fixed values
@@ -258,16 +268,24 @@ class UserInterface:
             try:
                 value = float(value)
             except (ValueError, TypeError):
-                self.log("Warn: Return bad float value {} from {} using default {}".format(value, arg, default))
-                self.record_status("Warn: Return bad float value {} from {}".format(value, arg), had_errors=True)
+                if self.entity_has_no_value(value):
+                    # An entity that is temporarily without a value, e.g. a car that is asleep, is not an
+                    # error - reporting it as one would leave the status stuck and mask genuine failures
+                    self.log("Info: Value {} from {} is not available, using default {}".format(value, arg, default))
+                else:
+                    self.log("Warn: Return bad float value {} from {} using default {}".format(value, arg, default))
+                    self.record_status("Warn: Return bad float value {} from {}".format(value, arg), had_errors=True)
                 value = default
         elif isinstance(default, int) and not isinstance(default, bool):
             # Convert to int?
             try:
                 value = int(float(value))
             except (ValueError, TypeError):
-                self.log("Warn: Return bad int value {} from {} using default {}".format(value, arg, default))
-                self.record_status("Warn: Return bad int value {} from {}".format(value, arg), had_errors=True)
+                if self.entity_has_no_value(value):
+                    self.log("Info: Value {} from {} is not available, using default {}".format(value, arg, default))
+                else:
+                    self.log("Warn: Return bad int value {} from {} using default {}".format(value, arg, default))
+                    self.record_status("Warn: Return bad int value {} from {}".format(value, arg), had_errors=True)
                 value = default
         elif isinstance(default, bool) and isinstance(value, str):
             # Convert to Boolean

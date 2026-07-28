@@ -676,8 +676,13 @@ def load_axle_slot(base, axle_sessions, export, rate_replicate=None):
 
         if start_minutes is not None and end_minutes is not None and start_minutes < (base.forecast_minutes + base.minutes_now):
             if (export and import_export == "export") or (not export and import_export == "import"):
-                base.log("Setting Axle VPP session in range {} - {} export {} pence_per_kwh {}".format(base.time_abs_str(start_minutes), base.time_abs_str(end_minutes), export, pence_per_kwh))
-                for minute in range(start_minutes, end_minutes):
+                rates = base.rate_export if export else base.rate_import
+                # The sensor keeps past events, so only apply the minutes the rates still cover - a session
+                # that has scrolled out of the rate data would otherwise be re-applied on every run
+                applied = [minute for minute in range(start_minutes, end_minutes) if minute in rates]
+                if applied:
+                    base.log("Setting Axle VPP session in range {} - {} export {} pence_per_kwh {}".format(base.time_abs_str(applied[0]), base.time_abs_str(applied[-1] + 1), export, pence_per_kwh))
+                for minute in applied:
                     if export:
                         base.rate_export[minute] = base.rate_export.get(minute, 0) + pence_per_kwh
                         base.load_scaling_dynamic[minute] = base.load_scaling_saving

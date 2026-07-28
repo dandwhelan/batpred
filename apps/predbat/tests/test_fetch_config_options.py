@@ -11,6 +11,74 @@
 from tests.test_infra import MockConfigProvider
 
 
+def test_get_arg_unavailable(my_predbat):
+    """
+    Test that an entity without a value right now falls back to the default without recording an error
+
+    Home Assistant reports unavailable/unknown for an entity that exists but cannot be read, e.g. a car
+    that is asleep. Treating that as an error leaves the Predbat status stuck reporting it, which masks
+    genuine failures.
+    """
+    print("**** Running get_arg unavailable entity test ****")
+    failed = False
+
+    original_args = my_predbat.args
+    original_record_status = my_predbat.record_status
+    recorded = []
+
+    def mock_record_status(message, debug="", had_errors=False, **kwargs):
+        recorded.append({"message": message, "had_errors": had_errors})
+
+    my_predbat.record_status = mock_record_status
+    my_predbat.args = dict(my_predbat.args)
+
+    try:
+        # Test 1: an entity that has no value right now falls back quietly
+        for state in ["unavailable", "unknown", "none", ""]:
+            recorded.clear()
+            my_predbat.args["test_soc_arg"] = state
+            value = my_predbat.get_arg("test_soc_arg", default=0.0)
+            if value != 0.0:
+                print("ERROR: Expected the default 0.0 for state '{}', got {}".format(state, value))
+                failed = True
+            elif recorded:
+                print("ERROR: State '{}' should not record an error, got {}".format(state, recorded))
+                failed = True
+        if not failed:
+            print("PASS: Unavailable entity states fall back to the default without an error")
+
+        # Test 2: a genuinely bad value is still reported as an error
+        recorded.clear()
+        my_predbat.args["test_soc_arg"] = "twenty"
+        value = my_predbat.get_arg("test_soc_arg", default=0.0)
+        if value != 0.0:
+            print("ERROR: Expected the default 0.0 for a bad value, got {}".format(value))
+            failed = True
+        elif not recorded or not recorded[0]["had_errors"]:
+            print("ERROR: A bad value should still record an error, got {}".format(recorded))
+            failed = True
+        else:
+            print("PASS: A bad value is still reported as an error")
+
+        # Test 3: the same applies to integer configuration items
+        recorded.clear()
+        my_predbat.args["test_int_arg"] = "unavailable"
+        value = my_predbat.get_arg("test_int_arg", default=5)
+        if value != 5:
+            print("ERROR: Expected the default 5 for an unavailable int, got {}".format(value))
+            failed = True
+        elif recorded:
+            print("ERROR: Unavailable int should not record an error, got {}".format(recorded))
+            failed = True
+        else:
+            print("PASS: Unavailable entity state for an integer item handled the same way")
+    finally:
+        my_predbat.record_status = original_record_status
+        my_predbat.args = original_args
+
+    return failed
+
+
 def test_fetch_config_options(my_predbat):
     """
     Test the fetch_config_options function in isolation with mocked dependencies

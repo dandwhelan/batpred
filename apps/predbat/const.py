@@ -52,3 +52,8 @@ PREDBAT_MODE_MONITOR = 0
 PREDBAT_MODE_CONTROL_SOC = 1
 PREDBAT_MODE_CONTROL_CHARGE = 2
 PREDBAT_MODE_CONTROL_CHARGEDISCHARGE = 3
+
+# States Home Assistant reports for an entity that exists but has no value right now, e.g. a car that
+# is asleep. These are transient rather than a configuration problem, so they fall back to the default
+# without recording an error
+ENTITY_NO_VALUE_STATES = ("", "unavailable", "unknown", "none")

@@ -693,6 +693,51 @@ friendly_name: Octoplus Saving Session Events
     return failed
 
 
+def test_saving_session_bad_slot(my_predbat):
+    """
+    Test that a saving slot which cannot be decoded does not re-apply the previous slot's window
+    """
+    print("Test saving session with an undecodable slot")
+    failed = False
+
+    old_forecast_minutes = my_predbat.forecast_minutes
+    old_rate_import = my_predbat.rate_import
+    old_load_scaling_dynamic = my_predbat.load_scaling_dynamic
+
+    my_predbat.forecast_minutes = 24 * 60
+    plan_end = my_predbat.forecast_minutes + my_predbat.minutes_now
+    my_predbat.rate_import = {n: 20.0 for n in range(0, plan_end)}
+    my_predbat.load_scaling_dynamic = {n: 1.0 for n in range(0, plan_end)}
+
+    midnight = my_predbat.midnight_utc
+    good_start = (midnight + timedelta(minutes=600)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    good_end = (midnight + timedelta(minutes=660)).strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    slots = [
+        {"start": good_start, "end": good_end, "rate": 10.0, "state": False},
+        {"start": "not-a-time", "end": "also-not-a-time", "rate": 30.0, "state": False},
+    ]
+
+    rate_replicate = {}
+    my_predbat.load_saving_slot(slots, export=False, rate_replicate=rate_replicate)
+
+    # The good slot adds its rate once, and the undecodable slot must not add its own rate on top
+    if my_predbat.rate_import[600] != 30.0 or my_predbat.rate_import[659] != 30.0:
+        print("ERROR: Expected the good slot to add 10p once (30.0), got {}".format(my_predbat.rate_import[600]))
+        failed = True
+    elif my_predbat.rate_import[660] != 20.0 or my_predbat.rate_import[599] != 20.0:
+        print("ERROR: Saving slot applied outside its own window")
+        failed = True
+    else:
+        print("PASS: Undecodable slot ignored without re-applying the previous window")
+
+    my_predbat.forecast_minutes = old_forecast_minutes
+    my_predbat.rate_import = old_rate_import
+    my_predbat.load_scaling_dynamic = old_load_scaling_dynamic
+
+    return failed
+
+
 def test_saving_session_join_rejected(my_predbat):
     """
     Test that a saving session event Octopus refuses to join is recorded and no longer offered
