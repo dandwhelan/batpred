@@ -35,7 +35,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v712.14"
+THIS_VERSION = "v712.15"
 
 # Restart Predbat if a component stays unhealthy for this long
 COMPONENT_ERROR_RESTART_MINUTES = 10
@@ -601,6 +601,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.config_root = "./"
         self.inverter_can_charge_during_export = True
         self.octopus_last_joined_try = None
+        self.octopus_saving_notified = {}
         self.calculate_savings_max_charge_slots = 1
         self.inverter_data_last_fetch = None
         self.octopus_url_cache_loaded = False

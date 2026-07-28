@@ -7,9 +7,13 @@
 # pylint: disable=consider-using-f-string
 # pylint: disable=line-too-long
 # pylint: disable=attribute-defined-outside-init
+import asyncio
 import yaml
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+from octopus import OctopusAPI
 
 
 def test_saving_session(my_predbat):
@@ -90,11 +94,15 @@ friendly_name: Octoplus Saving Session Events (A-12345678)
     if "octopus_free_url" in my_predbat.args:
         del my_predbat.args["octopus_free_url"]
     my_predbat.args["octopus_saving_session_octopoints_per_penny"] = 10
+    # Notifications are covered by test_saving_session_notify_config; keeping them off here makes the
+    # expected service calls independent of the wall clock (a joined event that has not finished yet alerts)
+    my_predbat.expose_config("set_event_notify", False, quiet=True)
 
     ha.service_store_enable = True
     octopus_free_slots, octopus_saving_slots = my_predbat.fetch_octopus_sessions()
     service_result = ha.get_service_store()
     ha.service_store_enable = False
+    my_predbat.expose_config("set_event_notify", True, quiet=True)
 
     expected_saving = [
         {"start": "{}T17:30:00+{}:00".format(date_yesterday, tz_offset), "end": "{}T18:30:00+{}:00".format(date_yesterday, tz_offset), "rate": 19.2, "state": False},
@@ -102,11 +110,8 @@ friendly_name: Octoplus Saving Session Events (A-12345678)
         {"start": "{}T23:30:00+{}:00".format(date_before_yesterday, tz_offset), "end": "{}T10:30:00+{}:00".format(date_yesterday, tz_offset), "rate": 44.8, "state": False},
     ]
 
-    # Example format Sat 25/01
-    date_today_service = datetime.now().strftime("%a %d/%m")
     expected_service = [
         ["octopus_energy/join_octoplus_saving_session_event", {"event_code": 987654, "entity_id": "event.octopus_energy_a_12345678_octoplus_saving_session_event"}],
-        ["notify/notify", {"message": "Predbat: Joined Octopus saving event {} 18:30-19:30, 50.0 p/kWh".format(date_today_service)}],
     ]
 
     if json.dumps(octopus_saving_slots) != json.dumps(expected_saving):
@@ -232,6 +237,9 @@ friendly_name: Octopus Intelligent Saving Sessions
 def test_saving_session_notify_config(my_predbat):
     """
     Test that set_event_notify configuration controls Octopus saving session notifications
+
+    The alert is raised when an event is confirmed as joined (it appears in joined_events), not when
+    the join is requested, because Octopus can refuse a join - see test_saving_session_join_rejected.
     """
     print("Test saving session notification configuration")
     ha = my_predbat.ha_interface
@@ -239,6 +247,9 @@ def test_saving_session_notify_config(my_predbat):
     date_today = datetime.now().strftime("%Y-%m-%d")
     tz_offset = int(my_predbat.midnight_utc.tzinfo.utcoffset(my_predbat.midnight_utc).total_seconds() / 3600)
     tz_offset = f"{tz_offset:02d}"
+    # A joined event that has not finished yet, so the confirmation alert is due
+    joined_start = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:00")
+    joined_end = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:00")
 
     session_binary = f"""
 state: off
@@ -265,7 +276,14 @@ available_events:
       rewarded_octopoints: null
       octopoints_per_kwh: 500
       code: TEST123
-joined_events: []
+joined_events:
+    - id: 8888
+      start: '{joined_start}+{tz_offset}:00'
+      end: '{joined_end}+{tz_offset}:00'
+      duration_in_minutes: 60
+      rewarded_octopoints: null
+      octopoints_per_kwh: 500
+      code: JOINED456
 friendly_name: Octoplus Saving Session Events
 """
 
@@ -283,8 +301,10 @@ friendly_name: Octoplus Saving Session Events
     # Don't set set_event_notify - should default to True
     if "set_event_notify" in my_predbat.args:
         del my_predbat.args["set_event_notify"]
-    # Reset the last joined try timer so it will attempt to join
+    # Reset the last joined try timer so it will attempt to join, and the alerted-events record so the
+    # confirmed join alerts again rather than being suppressed as a repeat
     my_predbat.octopus_last_joined_try = None
+    my_predbat.octopus_saving_notified = {}
 
     ha.service_store_enable = True
     ha.service_store = []
@@ -308,8 +328,10 @@ friendly_name: Octoplus Saving Session Events
     ha.dummy_items["event.octopus_energy_test_octoplus_saving_session_event"] = yaml.safe_load(session_sensor)
     ha.dummy_items["sensor.octopus_free_session"] = {}
     my_predbat.args["set_event_notify"] = True
-    # Reset the last joined try timer so it will attempt to join
+    # Reset the last joined try timer so it will attempt to join, and the alerted-events record so the
+    # confirmed join alerts again rather than being suppressed as a repeat
     my_predbat.octopus_last_joined_try = None
+    my_predbat.octopus_saving_notified = {}
 
     ha.service_store_enable = True
     ha.service_store = []
@@ -334,8 +356,10 @@ friendly_name: Octoplus Saving Session Events
     ha.dummy_items["sensor.octopus_free_session"] = {}
     # Update config_index to set the value to False
     my_predbat.expose_config("set_event_notify", False, quiet=True)
-    # Reset the last joined try timer so it will attempt to join
+    # Reset the last joined try timer so it will attempt to join, and the alerted-events record so the
+    # confirmed join alerts again rather than being suppressed as a repeat
     my_predbat.octopus_last_joined_try = None
+    my_predbat.octopus_saving_notified = {}
 
     ha.service_store_enable = True
     ha.service_store = []
@@ -665,5 +689,106 @@ friendly_name: Octoplus Saving Session Events
             failed = True
         else:
             print(f"PASS: Default rate correctly injected for null octopoints: {expected_rate} p/kWh")
+
+    return failed
+
+
+def test_saving_session_join_rejected(my_predbat):
+    """
+    Test that a saving session event Octopus refuses to join is recorded and no longer offered
+
+    Octopus can refuse a join for an event it advertises, e.g. a region-targeted event, returning
+    HTTP 200 with a GraphQL error. Predbat must not report that event as joined or keep retrying it.
+    """
+    print("Test saving session join rejection")
+    failed = False
+
+    api = OctopusAPI(my_predbat, key="", account_id="A-TEST", automatic=False)
+    fixed_time = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    api.saving_sessions = {
+        "account": {"hasJoinedCampaign": True, "joinedEvents": []},
+        "events": [
+            {"id": 1, "code": "REGION_ONLY", "startAt": "2026-06-16T17:00:00+00:00", "endAt": "2026-06-16T18:00:00+00:00", "rewardPerKwhInOctoPoints": 100},
+            {"id": 2, "code": "JOINABLE", "startAt": "2026-06-17T17:00:00+00:00", "endAt": "2026-06-17T18:00:00+00:00", "rewardPerKwhInOctoPoints": 150},
+        ],
+    }
+
+    # Test 1: Both advertised events are offered before any rejection
+    print("\n*** Test 1: Both events offered before a rejection ***")
+    with patch.object(type(api), "now_utc_exact", new_callable=lambda: property(lambda self: fixed_time)):
+        available, joined = api.get_saving_session_data()
+    codes = sorted([event["code"] for event in available])
+    if codes != ["JOINABLE", "REGION_ONLY"]:
+        print("ERROR: Expected both events to be available, got {}".format(codes))
+        failed = True
+    else:
+        print("PASS: Both events offered as joinable")
+
+    # Test 2: A refused join is recorded along with the reason Octopus gave
+    print("\n*** Test 2: Refused join is recorded with the reason ***")
+    octopus_errors = [
+        {
+            "message": "Account ineligible to join Saving Sessions event.",
+            "extensions": {"errorCode": "OE-1308", "reason": "Account's region is outside of the target regions for this event."},
+        }
+    ]
+
+    async def refused_query(*args, **kwargs):
+        api.last_graphql_errors = octopus_errors
+        return None
+
+    async def unchanged_sessions(account_id):
+        return api.saving_sessions
+
+    api.async_graphql_query = refused_query
+    api.async_get_saving_sessions = unchanged_sessions
+    asyncio.run(api.async_join_saving_session_events("A-TEST", "REGION_ONLY"))
+
+    rejected = api.saving_session_join_rejected.get("REGION_ONLY", None)
+    if not rejected:
+        print("ERROR: Expected the refused event to be recorded, got {}".format(api.saving_session_join_rejected))
+        failed = True
+    elif "OE-1308" not in rejected.get("reason", "") or "region" not in rejected.get("reason", ""):
+        print("ERROR: Expected the rejection reason to quote Octopus, got {}".format(rejected))
+        failed = True
+    else:
+        print("PASS: Refused join recorded as {}".format(rejected))
+
+    # Test 3: The refused event is no longer offered as joinable
+    print("\n*** Test 3: Refused event is no longer offered ***")
+    with patch.object(type(api), "now_utc_exact", new_callable=lambda: property(lambda self: fixed_time)):
+        available, joined = api.get_saving_session_data()
+    codes = [event["code"] for event in available]
+    if codes != ["JOINABLE"]:
+        print("ERROR: Expected only the joinable event to be offered, got {}".format(codes))
+        failed = True
+    else:
+        print("PASS: Refused event dropped from the joinable events")
+
+    # Test 4: A successful join clears a previous rejection
+    print("\n*** Test 4: Successful join clears the rejection ***")
+
+    async def accepted_query(*args, **kwargs):
+        return {"joinSavingSessionsEvent": {"joinedEventCodes": ["REGION_ONLY"]}}
+
+    api.async_graphql_query = accepted_query
+    asyncio.run(api.async_join_saving_session_events("A-TEST", "REGION_ONLY"))
+    if "REGION_ONLY" in api.saving_session_join_rejected:
+        print("ERROR: Expected a successful join to clear the rejection, got {}".format(api.saving_session_join_rejected))
+        failed = True
+    else:
+        print("PASS: Successful join cleared the rejection")
+
+    # Test 5: With no errors recorded the reason is reported as unknown rather than blank
+    print("\n*** Test 5: Missing error detail is described ***")
+    api.last_graphql_errors = None
+    if api.describe_graphql_errors() != "no reason given":
+        print("ERROR: Expected 'no reason given', got '{}'".format(api.describe_graphql_errors()))
+        failed = True
+    else:
+        print("PASS: Missing error detail described as 'no reason given'")
+
+    if not failed:
+        print("PASS: All saving session join rejection tests passed")
 
     return failed
