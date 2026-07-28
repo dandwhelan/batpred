@@ -50,7 +50,15 @@ from tests.test_alert_feed import test_alert_feed
 from tests.test_solax import run_solax_tests
 from tests.test_sigenergy import run_sigenergy_tests
 from tests.test_single_debug import run_single_debug
-from tests.test_saving_session import test_saving_session, test_saving_session_null_octopoints, test_saving_session_notify_config, test_saving_session_default_rate, test_saving_session_axle_conflict, test_saving_session_auto_join_toggle, test_saving_session_join_rejected
+from tests.test_saving_session import (
+    test_saving_session,
+    test_saving_session_null_octopoints,
+    test_saving_session_notify_config,
+    test_saving_session_default_rate,
+    test_saving_session_axle_conflict,
+    test_saving_session_auto_join_toggle,
+    test_saving_session_join_rejected,
+)
 from tests.test_secrets import run_secrets_tests
 from tests.test_ge_cloud import test_ge_cloud
 from tests.test_teslemetry import test_teslemetry
