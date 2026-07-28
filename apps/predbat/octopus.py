@@ -1202,13 +1202,14 @@ class OctopusAPI(ComponentBase):
         if response_data is None:
             return self.saving_sessions
         else:
-            self.log("OctopusAPI: Fetched saving sessions data from GraphQL API: {}".format(response_data))
             savingSessions = response_data.get("savingSessions", {})
             if savingSessions is None:
                 savingSessions = {}
             if "account" in savingSessions:
                 if savingSessions["account"] is None:
                     savingSessions["account"] = {}
+            # Log a summary only - the full payload is already logged by the GraphQL query itself
+            self.log("OctopusAPI: Fetched {} saving session events, {} joined".format(len(savingSessions.get("events", []) or []), len((savingSessions.get("account", {}) or {}).get("joinedEvents", []) or [])))
             return savingSessions
 
     async def async_get_flexibility_events(self, account_id):
@@ -2499,13 +2500,14 @@ class Octopus:
         """
         if rate_replicate is None:
             rate_replicate = {}
-        start_minutes = 0
-        end_minutes = 0
+        plan_end_minutes = self.forecast_minutes + self.minutes_now
 
         for octopus_free_slot in octopus_free_slots:
             start = octopus_free_slot["start"]
             end = octopus_free_slot["end"]
             rate = octopus_free_slot["rate"]
+            start_minutes = None
+            end_minutes = None
 
             if start and end:
                 try:
@@ -2518,17 +2520,21 @@ class Octopus:
 
             if start and end:
                 start_minutes = minutes_to_time(start, self.midnight_utc)
-                end_minutes = min(minutes_to_time(end, self.midnight_utc), self.forecast_minutes)
+                # The plan runs to forecast_minutes from now, so that is the end of the window in minutes from midnight
+                end_minutes = min(minutes_to_time(end, self.midnight_utc), plan_end_minutes)
 
-            if start_minutes >= 0 and end_minutes != start_minutes and start_minutes < self.forecast_minutes:
+            if start_minutes is not None and start_minutes >= 0 and end_minutes != start_minutes and start_minutes < plan_end_minutes:
                 self.log("Setting Octopus free session in range {} - {} export {} rate {}".format(self.time_abs_str(start_minutes), self.time_abs_str(end_minutes), export, rate))
                 for minute in range(start_minutes, end_minutes):
                     if export:
-                        self.rate_export[minute] = rate
+                        if minute in self.rate_export:
+                            self.rate_export[minute] = rate
+                            rate_replicate[minute] = "saving"
                     else:
-                        self.rate_import[minute] = min(rate, self.rate_import[minute])
-                        self.load_scaling_dynamic[minute] = self.load_scaling_free
-                    rate_replicate[minute] = "saving"
+                        if minute in self.rate_import:
+                            self.rate_import[minute] = min(rate, self.rate_import[minute])
+                            self.load_scaling_dynamic[minute] = self.load_scaling_free
+                            rate_replicate[minute] = "saving"
 
     def load_saving_slot(self, octopus_saving_slots, export=False, rate_replicate=None):
         """
@@ -2536,14 +2542,14 @@ class Octopus:
         """
         if rate_replicate is None:
             rate_replicate = {}
-        start_minutes = 0
-        end_minutes = 0
 
         for octopus_saving_slot in octopus_saving_slots:
             start = octopus_saving_slot["start"]
             end = octopus_saving_slot["end"]
             rate = octopus_saving_slot["rate"]
             state = octopus_saving_slot["state"]
+            start_minutes = None
+            end_minutes = None
 
             if start and end:
                 try:
@@ -2561,7 +2567,7 @@ class Octopus:
                 start_minutes = minutes_to_time(start, self.midnight_utc)
                 end_minutes = min(minutes_to_time(end, self.midnight_utc), self.forecast_minutes + self.minutes_now)
 
-            if start_minutes < (self.forecast_minutes + self.minutes_now):
+            if start_minutes is not None and start_minutes < (self.forecast_minutes + self.minutes_now):
                 self.log("Octopus: Setting Octopus saving session in range {} - {} export {} rate {}".format(self.time_abs_str(start_minutes), self.time_abs_str(end_minutes), export, rate))
                 for minute in range(start_minutes, end_minutes):
                     if export:

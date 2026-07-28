@@ -9,27 +9,56 @@
 # pylint: disable=attribute-defined-outside-init
 
 import os
+import shutil
 import yaml
 import tempfile
 from hass import Hass
 
 
+# Locations load_secrets falls back to outside the working directory. These belong to the installation,
+# so the tests must never write to or delete them
+INSTALL_SECRETS_FILES = ["/homeassistant/secrets.yaml", "/conf/secrets.yaml", "/config/secrets.yaml"]
+
+
 def test_secrets_loading():
     """
     Test secrets loading mechanism
+
+    Runs in a temporary working directory because the tests create and delete secrets.yaml, and the
+    working directory is the user's own config directory when the suite is run against an install.
     """
     print("**** Running test_secrets_loading ****")
 
+    original_dir = os.getcwd()
+    working_dir = tempfile.mkdtemp(prefix="predbat_test_secrets_")
+    os.chdir(working_dir)
+    try:
+        # Hass() reads apps.yaml from the working directory, so give it a minimal one
+        with open("apps.yaml", "w") as f:
+            f.write("pred_bat:\n  module: predbat\n  class: PredBat\n")
+        _test_secrets_loading()
+    finally:
+        os.chdir(original_dir)
+        shutil.rmtree(working_dir, ignore_errors=True)
+
+    print("**** test_secrets_loading PASSED ****")
+    return False  # False = success in Predbat test framework
+
+
+def _test_secrets_loading():
+    """
+    Body of the secrets tests, run from a temporary working directory
+    """
     # Test 1: No secrets file - should work without error
     print("  Test 1: No secrets file")
-    if os.path.exists("secrets.yaml"):
-        os.remove("secrets.yaml")
-    if os.path.exists("/config/secrets.yaml"):
-        os.remove("/config/secrets.yaml")
-
-    h = Hass()
-    assert h.secrets == {}, "Expected empty secrets dict"
-    print("    PASS - No secrets file handled correctly")
+    installed = [location for location in INSTALL_SECRETS_FILES if os.path.isfile(location)]
+    if installed:
+        # load_secrets would find the installation's own file, which must not be removed to test this
+        print("    SKIP - {} exists on this machine".format(", ".join(installed)))
+    else:
+        h = Hass()
+        assert h.secrets == {}, "Expected empty secrets dict"
+        print("    PASS - No secrets file handled correctly")
 
     # Test 2: Secrets file in current directory
     print("  Test 2: Secrets file in current directory")
@@ -101,9 +130,6 @@ def test_secrets_loading():
     del os.environ["PREDBAT_APPS_FILE"]
     os.remove("test_apps.yaml")
     os.remove("secrets.yaml")
-
-    print("**** test_secrets_loading PASSED ****")
-    return False  # False = success in Predbat test framework
 
 
 def run_secrets_tests(my_predbat=None):

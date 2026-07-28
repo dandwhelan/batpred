@@ -23,7 +23,7 @@ from tests.test_kernel_parity import run_kernel_parity_tests, run_model_kernel_t
 from tests.test_execute import run_execute_tests
 from tests.test_octopus_slots import run_load_octopus_slots_tests
 from tests.test_multi_car_iog import run_multi_car_iog_tests
-from tests.test_fetch_config_options import test_fetch_config_options
+from tests.test_fetch_config_options import test_fetch_config_options, test_get_arg_unavailable
 from tests.test_multi_inverter import run_inverter_multi_tests
 from tests.test_window2minutes import test_window2minutes
 from tests.test_history_attribute import test_history_attribute
@@ -58,6 +58,7 @@ from tests.test_saving_session import (
     test_saving_session_axle_conflict,
     test_saving_session_auto_join_toggle,
     test_saving_session_join_rejected,
+    test_saving_session_bad_slot,
 )
 from tests.test_secrets import run_secrets_tests
 from tests.test_ge_cloud import test_ge_cloud
@@ -276,6 +277,7 @@ def main():
         ("fetch_tariffs", test_fetch_tariffs, "Fetch tariffs tests", False),
         ("fetch_url_cached", test_fetch_url_cached, "Fetch URL cached tests", False),
         ("fetch_config_options", test_fetch_config_options, "Fetch config options tests", False),
+        ("get_arg_unavailable", test_get_arg_unavailable, "get_arg handling of entities with no value", False),
         ("load_free_slot", test_load_free_slot, "Load free slot tests", False),
         ("add_now_to_octopus_slot", test_add_now_to_octopus_slot, "Add now to Octopus slot tests", False),
         ("octopus_slots_change", test_octopus_slots_change, "Octopus slots change-detection signature tests (in-progress re-clock vs genuine change)", False),
@@ -312,6 +314,7 @@ def main():
         ("saving_session_null", test_saving_session_null_octopoints, "Saving session null octopoints test (issue #3079)", False),
         ("saving_session_notify", test_saving_session_notify_config, "Saving session notification config tests", False),
         ("saving_session_join_rejected", test_saving_session_join_rejected, "Saving session join rejection tests (Octopus refuses the join)", False),
+        ("saving_session_bad_slot", test_saving_session_bad_slot, "Saving session undecodable slot test", False),
         ("saving_session_default_rate", test_saving_session_default_rate, "Saving session default rate injection test", False),
         ("saving_session_axle_conflict", test_saving_session_axle_conflict, "Saving session Axle conflict avoidance test (issue #4120)", False),
         ("saving_session_auto_join_toggle", test_saving_session_auto_join_toggle, "Saving session auto-join toggle test (issue #4120)", False),

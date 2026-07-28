@@ -145,6 +145,7 @@ def test_axle(my_predbat=None):
         ("fetch_sessions", _test_axle_fetch_sessions, "Fetch sessions from API"),
         ("load_slot_export", _test_axle_load_slot_export, "Load slot export integration"),
         ("load_slot_import", _test_axle_load_slot_import, "Load slot import integration"),
+        ("load_slot_stale", _test_axle_load_slot_stale, "Load slot ignores sessions outside the rate data"),
         ("active_function", _test_axle_active_function, "Active status checking"),
         ("managed_init", _test_axle_managed_initialization, "Managed mode initialisation"),
         ("managed_price_curve", _test_axle_managed_price_curve_processing, "Managed mode price curve processing"),
@@ -1003,6 +1004,76 @@ def _test_axle_fetch_sessions(my_predbat=None):
 
     print("  ✓ Fetch sessions returns current + history correctly")
     return False
+
+
+def _test_axle_load_slot_stale(my_predbat=None):
+    """
+    Test that load_axle_slot ignores a session that has scrolled out of the rate data
+
+    The Axle sensor keeps past events, so without this the same old session is applied and logged on
+    every run, writing rates at minutes the plan does not cover.
+    """
+    from axle import load_axle_slot
+    from datetime import datetime, timezone
+
+    print("Testing load_axle_slot with a session outside the rate data...")
+    failed = False
+
+    class MockBase:
+        def __init__(self):
+            self.midnight_utc = datetime(2024, 1, 8, 0, 0, 0, tzinfo=timezone.utc)
+            self.now_utc = datetime(2024, 1, 8, 10, 0, 0, tzinfo=timezone.utc)
+            self.minutes_now = 10 * 60
+            self.forecast_minutes = 24 * 60
+            self.prefix = "predbat"
+            # Rates cover yesterday through the end of the plan, as they do in a real run
+            self.rate_export = {minute: 5.0 for minute in range(-24 * 60, self.forecast_minutes + self.minutes_now)}
+            self.rate_import = {}
+            self.load_scaling_dynamic = {}
+            self.load_scaling_saving = 0.5
+            self.load_scaling_free = 0.0
+            self.log_messages = []
+
+        def log(self, message):
+            self.log_messages.append(message)
+
+        def time_abs_str(self, minutes):
+            return "{:02d}:{:02d}".format(minutes // 60, minutes % 60)
+
+        def get_arg(self, name, indirect=True):
+            return None
+
+    base = MockBase()
+
+    # A session from six days ago, long out of the rate data
+    axle_sessions = [
+        {
+            "start_time": "2024-01-02T20:00:00+00:00",
+            "end_time": "2024-01-02T21:00:00+00:00",
+            "import_export": "export",
+            "pence_per_kwh": 100.0,
+        }
+    ]
+
+    rate_replicate = {}
+    load_axle_slot(base, axle_sessions, export=True, rate_replicate=rate_replicate)
+
+    if rate_replicate:
+        print("ERROR: Stale session should not have marked any minutes, got {}".format(len(rate_replicate)))
+        failed = True
+    elif any(rate != 5.0 for rate in base.rate_export.values()):
+        print("ERROR: Stale session should not have changed any rates")
+        failed = True
+    elif len(base.rate_export) != (24 * 60 + base.forecast_minutes + base.minutes_now):
+        print("ERROR: Stale session added rates outside the plan window")
+        failed = True
+    elif any("Setting Axle VPP session" in message for message in base.log_messages):
+        print("ERROR: Stale session should not be logged as applied, got {}".format(base.log_messages))
+        failed = True
+    else:
+        print("PASS: Stale session ignored without logging or writing rates")
+
+    return failed
 
 
 def _test_axle_load_slot_export(my_predbat=None):

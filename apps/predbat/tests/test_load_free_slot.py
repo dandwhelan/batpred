@@ -326,6 +326,61 @@ def test_load_free_slot(my_predbat):
     else:
         print("Test 11 passed - slots with None start/end ignored")
 
+    # Test 12: A slot that fails to decode must not re-apply the previous slot's window
+    print("*** Test 12: Bad slot does not re-apply the previous window")
+
+    # Reset
+    my_predbat.rate_import = {n: 20.0 for n in range(0, my_predbat.forecast_minutes)}
+    my_predbat.load_scaling_dynamic = {n: 1.0 for n in range(0, my_predbat.forecast_minutes)}
+
+    # A good slot at 10:00-11:00 followed by one that cannot be decoded, with a different rate
+    mixed_slots = [
+        {"start": "2025-01-15T10:00:00+00:00", "end": "2025-01-15T11:00:00+00:00", "rate": 0.0},
+        {"start": "not-a-time", "end": "also-not-a-time", "rate": 15.0},
+    ]
+
+    rate_replicate = {}
+    my_predbat.load_free_slot(mixed_slots, export=False, rate_replicate=rate_replicate)
+
+    # The good slot applies, and the bad slot must not touch that window a second time
+    if my_predbat.rate_import[10 * 60] != 0.0 or my_predbat.rate_import[10 * 60 + 30] != 0.0:
+        print("ERROR: Good slot should still have been applied, got {}".format(my_predbat.rate_import[10 * 60]))
+        failed = True
+    elif my_predbat.rate_import[12 * 60] != 20.0:
+        print("ERROR: Bad slot should not have changed any other rates")
+        failed = True
+    else:
+        print("Test 12 passed - bad slot ignored without re-applying the previous window")
+
+    # Test 13: The window runs to the end of the plan, not to forecast_minutes from midnight
+    print("*** Test 13: Slot late in the plan is still applied")
+
+    # Reset, with rates covering the whole plan window as they do in a real run
+    old_minutes_now = my_predbat.minutes_now
+    my_predbat.minutes_now = 12 * 60  # Midday, so the plan runs to minute 2880 + 720
+    plan_end = my_predbat.forecast_minutes + my_predbat.minutes_now
+    my_predbat.rate_import = {n: 20.0 for n in range(0, plan_end)}
+    my_predbat.load_scaling_dynamic = {n: 1.0 for n in range(0, plan_end)}
+
+    # 2025-01-17 10:00-11:00 is minute 3480-3540, beyond forecast_minutes but inside the plan
+    late_start = 2 * 24 * 60 + 10 * 60
+    late_end = late_start + 60
+    late_slot = [{"start": "2025-01-17T10:00:00+00:00", "end": "2025-01-17T11:00:00+00:00", "rate": 0.0}]
+
+    rate_replicate = {}
+    my_predbat.load_free_slot(late_slot, export=False, rate_replicate=rate_replicate)
+
+    if my_predbat.rate_import[late_start] != 0.0 or my_predbat.rate_import[late_end - 1] != 0.0:
+        print("ERROR: Free slot late in the plan should be applied, got {}".format(my_predbat.rate_import[late_start]))
+        failed = True
+    elif my_predbat.rate_import[late_start - 1] != 20.0 or my_predbat.rate_import[late_end] != 20.0:
+        print("ERROR: Free slot late in the plan applied outside its window")
+        failed = True
+    else:
+        print("Test 13 passed - slot late in the plan applied")
+
+    my_predbat.minutes_now = old_minutes_now
+
     # Restore original values
     my_predbat.forecast_minutes = old_forecast_minutes
     my_predbat.midnight_utc = old_midnight_utc
