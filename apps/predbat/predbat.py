@@ -35,7 +35,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v712.16"
+THIS_VERSION = "v712.17"
 
 # Restart Predbat if a component stays unhealthy for this long
 COMPONENT_ERROR_RESTART_MINUTES = 10
@@ -772,7 +772,9 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
                     component_status[component_name] = "error"
                     all_healthy = False
                     error_count += 1
-                    failed_components.append(COMPONENT_LIST.get(component_name, {}).get("name", component_name))
+                    component = self.components.get_component(component_name)
+                    if not component.is_calculating():
+                        failed_components.append(COMPONENT_LIST.get(component_name, {}).get("name", component_name))
                 elif is_active:
                     component_status[component_name] = "running"
                 else:

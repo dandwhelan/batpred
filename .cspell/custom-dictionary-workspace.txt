@@ -12,6 +12,7 @@ aiomqtt
 aios
 Alertfeed
 allclose
+annualform
 Anson
 apexcharts
 apikey
@@ -50,6 +51,7 @@ cadata
 calib
 Cantarell
 cdn
+Cerbo
 cexxxx
 ceyyyy
 chargedischarge
@@ -61,6 +63,7 @@ Chrg
 citem
 cloudfront
 Codespaces
+COEFF
 collapsable
 compareform
 configform
@@ -68,6 +71,8 @@ connack
 Consolas
 cooldown
 coro
+corruptleg
+corruptplans
 cprofile
 creds
 crosscharge
@@ -87,6 +92,7 @@ datalog
 datap
 datapoints
 datas
+dataviz
 dateutil
 dayname
 daynumber
@@ -95,6 +101,7 @@ dedup
 dedupe
 dend
 denorm
+derate
 derating
 devcontainer
 devcontainers
@@ -159,6 +166,8 @@ FLOMASTA
 fontsize
 fontweight
 Forestfire
+formaction
+formmethod
 foxess
 foxesscloud
 freelist
@@ -246,6 +255,7 @@ labelcolor
 labelnames
 larr
 libc
+LIFEPO
 linebreak
 linecap
 linejoin
@@ -281,6 +291,7 @@ minmax
 minsoc
 minsocongrid
 minuteb
+misclick
 Mixergy
 mkdocs
 mlugg
@@ -306,9 +317,12 @@ njpwerner
 nobat
 nocharge
 nodischarge
+noopener
 nord
 nordpool
+noreferrer
 nosc
+nosuchrun
 nrgheat
 numpy
 OCPP
@@ -317,6 +331,7 @@ octoplus
 octopoints
 Ohme
 ohmepy
+Okabe
 onblur
 onchange
 oncharge
@@ -380,9 +395,12 @@ regname
 relogin
 remainings
 remotecontrol
+renderable
 resetmidnight
 resultid
 resultmid
+reweight
+reweighted
 rname
 Roboto
 rowspan
@@ -474,6 +492,7 @@ timezone
 tmrw
 tojson
 tottime
+trapezoidally
 trapz
 Trefor
 treforsiphone
@@ -483,6 +502,7 @@ twinx
 tzfile
 tzpath
 unconfigured
+unnormalised
 unparseable
 unsmoothed
 unstaged
