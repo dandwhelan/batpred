@@ -174,6 +174,8 @@ class Inverter:
         self.rest_v3 = False
         self.serial_number = "Unknown"
         self.count_register_writes = 0
+        # Export target we gave up writing over REST because the register never read it back
+        self.rest_discharge_target_unwritable = None
         self.created_attributes = {}
         self.track_charge_start = "00:00:00"
         self.track_charge_end = "00:00:00"
@@ -2505,7 +2507,10 @@ class Inverter:
                         current = 0
 
                     if current != target_soc:
-                        self.rest_setDischargeTarget(target_soc)
+                        if self.rest_discharge_target_unwritable == target_soc:
+                            self.log("Inverter {} export target register does not read back {}, leaving it alone".format(self.id, target_soc))
+                        else:
+                            self.rest_setDischargeTarget(target_soc)
                     else:
                         self.log("Inverter {} Current discharge target is already set to {}".format(self.id, current))
             elif "discharge_target_soc" in self.base.args:
@@ -3385,12 +3390,23 @@ class Inverter:
         for retry in range(INVERTER_MAX_RETRY_REST):
             r = self.rest_postCommand(url, json=data)
             self.rest_data = self.rest_runAll(self.rest_data)
-            if self.rest_data["raw"]["invertor"]["discharge_target_soc_1"] == target:
+            # GivTCP reports this register as a string on some builds, so compare numerically
+            current = self.rest_data.get("raw", {}).get("invertor", {}).get("discharge_target_soc_1")
+            try:
+                current = int(float(current))
+            except (ValueError, TypeError):
+                current = None
+            if current == target:
                 self.count_register_writes += 1
+                self.rest_discharge_target_unwritable = None
                 self.base.log("Inverter {} Set export target slot 1 {} via REST successful after retry {}".format(self.id, data, retry))
                 return True
             self.sleep(2)
 
+        # Some inverters accept the write but never read the register back (it stays at 0), so
+        # retrying it every cycle just floods the log and holds predbat.status in a warning state.
+        # Report it once, then leave this target alone until a different one is asked for.
+        self.rest_discharge_target_unwritable = target
         self.base.log("Warn: Inverter {} Set export target slot 1 {} via REST failed".format(self.id, data))
         self.base.record_status("Warn: Inverter {} REST failed to setExportTarget".format(self.id), had_errors=True)
         return False
