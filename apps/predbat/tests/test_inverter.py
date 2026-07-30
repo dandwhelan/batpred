@@ -1632,6 +1632,102 @@ def test_discharge_target_tracks_reserve(test_name, ha, inv, dummy_rest):
     return failed
 
 
+def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
+    """
+    Regression test: an export target register that never reads the write back is reported once,
+    not on every cycle.
+
+    GivTCP returns discharge_target_soc_1 as a string on some builds, and on an inverter without
+    that register it accepts the write and keeps reading back 0. The verify compared the raw value
+    with an int target, so a good write looked like a failure, and every cycle of a timed export
+    then re-wrote the register, retried five times and left predbat.status flagged with an error.
+    """
+    failed = False
+    print("Test: {}".format(test_name))
+
+    saved_reserve_percent = inv.reserve_percent
+    saved_rest_data = inv.rest_data
+    saved_rest_api = inv.rest_api
+    saved_rest_v3 = inv.rest_v3
+    saved_sleep = inv.sleep
+    inv.sleep = lambda seconds: None
+    inv.rest_discharge_target_unwritable = None
+
+    start_time = "03:33:00"
+    end_time = "04:44:00"
+    ts = datetime.strptime(start_time, "%H:%M:%S")
+    te = datetime.strptime(end_time, "%H:%M:%S")
+
+    def setup_rest_case(current_target, reserve_percent=4):
+        """REST v3 path with the register reading back current_target."""
+        inv.rest_api = "dummy"
+        inv.rest_v3 = True
+        inv.reserve_percent = reserve_percent
+        inv.rest_data = {
+            "Control": {"Enable_Discharge_Schedule": "on", "Mode": "Timed Export"},
+            "Timeslots": {"Discharge_start_time_slot_1": start_time, "Discharge_end_time_slot_1": end_time},
+            "raw": {"invertor": {"discharge_target_soc_1": current_target}},
+        }
+        dummy_rest.clear_queue()
+        dummy_rest.rest_data = copy.deepcopy(inv.rest_data)
+        dummy_rest.get_commands()
+        inv.base.had_errors = False
+
+    def wrote_target(commands):
+        return any(url.endswith("setDischargeTarget") for url, _data in commands)
+
+    try:
+        # A string register that reads the target back is a successful write, not a failure
+        setup_rest_case("0")
+        polled = copy.deepcopy(inv.rest_data)
+        polled["raw"]["invertor"]["discharge_target_soc_1"] = "4"
+        dummy_rest.queue_rest_data(polled)
+        inv.adjust_force_export(True, ts, te)
+        if inv.base.had_errors:
+            print("ERROR: {}: a string register reading the target back must count as a successful write".format(test_name))
+            failed = True
+        if inv.rest_discharge_target_unwritable is not None:
+            print("ERROR: {}: a successful write must not mark the register unwritable".format(test_name))
+            failed = True
+
+        # A register that never reads the value back is reported on the first cycle
+        setup_rest_case("0")
+        inv.adjust_force_export(True, ts, te)
+        if not wrote_target(dummy_rest.get_commands()):
+            print("ERROR: {}: the first cycle must attempt the write".format(test_name))
+            failed = True
+        if not inv.base.had_errors:
+            print("ERROR: {}: a write that cannot be verified must be reported the first time".format(test_name))
+            failed = True
+
+        # ... and then left alone, rather than re-written and re-flagged every cycle
+        inv.base.had_errors = False
+        inv.adjust_force_export(True, ts, te)
+        if wrote_target(dummy_rest.get_commands()):
+            print("ERROR: {}: the same unwritable target must not be re-written every cycle".format(test_name))
+            failed = True
+        if inv.base.had_errors:
+            print("ERROR: {}: the same unwritable target must not flag the status every cycle".format(test_name))
+            failed = True
+
+        # A different target is a different question, so it is tried again
+        inv.reserve_percent = 10
+        inv.base.had_errors = False
+        inv.adjust_force_export(True, ts, te)
+        if not wrote_target(dummy_rest.get_commands()):
+            print("ERROR: {}: a changed export target must be attempted again".format(test_name))
+            failed = True
+    finally:
+        inv.reserve_percent = saved_reserve_percent
+        inv.rest_data = saved_rest_data
+        inv.rest_api = saved_rest_api
+        inv.rest_v3 = saved_rest_v3
+        inv.sleep = saved_sleep
+        inv.rest_discharge_target_unwritable = None
+
+    return failed
+
+
 def test_force_export_unchanged_times_HM_format(test_name, ha, inv):
     """
     Regression test for GS_fb00 (Solis) 'count register writes 0' bug.
@@ -2754,6 +2850,11 @@ charge_start_service:
 
     # Regression test: export target SoC must track the minimum reserve SoC in both directions
     failed |= test_discharge_target_tracks_reserve("discharge_target_tracks_reserve", ha, inv, dummy_rest)
+    if failed:
+        return failed
+
+    # Regression test: an export target register that never reads back must be reported once, not every cycle
+    failed |= test_discharge_target_unreadable_register("discharge_target_unreadable_register", ha, inv, dummy_rest)
     if failed:
         return failed
 
