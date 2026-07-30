@@ -1677,14 +1677,14 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
         return any(url.endswith("setDischargeTarget") for url, _data in commands)
 
     try:
-        # A string readback that matches the target is a successful write, not a failure
+        # A string register that reads the target back is a successful write, not a failure
         setup_rest_case("0")
         polled = copy.deepcopy(inv.rest_data)
         polled["raw"]["invertor"]["discharge_target_soc_1"] = "4"
         dummy_rest.queue_rest_data(polled)
         inv.adjust_force_export(True, ts, te)
         if inv.base.had_errors:
-            print("ERROR: {}: a string readback matching the target must count as a successful write".format(test_name))
+            print("ERROR: {}: a string register reading the target back must count as a successful write".format(test_name))
             failed = True
         if inv.rest_discharge_target_unwritable is not None:
             print("ERROR: {}: a successful write must not mark the register unwritable".format(test_name))
