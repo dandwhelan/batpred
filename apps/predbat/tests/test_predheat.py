@@ -919,39 +919,61 @@ def _test_minute_data_entity_multiple_entities(_my_predbat):
 
 
 def _test_simulation_multiple_adjustment_points(_my_predbat):
-    """Two scheduled temperature rises in one day are both recorded and the run completes.
+    """Every scheduled temperature rise gets its own pre-heat window, not just the last one.
 
-    Note this only asserts that the multi-adjustment path runs to completion. The pointer advance
-    and the pre-heat window in run_simulation both index the loop variable left over from building
-    the adjustment list (the last point) rather than the point currently pointed at, so with more
-    than one rise the earlier ones are not pre-heated. That behaviour is deliberately not asserted
-    here so a future fix does not have to rewrite this test.
+    Regression test for the smart thermostat indexing the adjustment list by the loop variable
+    left over from building it (always the final rise) rather than the rise currently being
+    tracked. With two rises that meant the first one was never pre-heated, because the window
+    checked belonged to the second. The first rise here is the one that must show a pre-heat.
     """
-    print("Test: run_simulation handles a schedule with two temperature rises")
+    print("Test: run_simulation pre-heats each of two scheduled temperature rises")
 
     # Two rises: 17 -> 19 at minute 360, then 19 -> 20 at minute 900
+    first_step = 6 * 60
+    second_step = 15 * 60
     target_series = {}
     for index in range(0, 24 * 60 + 1):
         forecast_minute = 24 * 60 - index
-        if forecast_minute >= 900:
+        if forecast_minute >= second_step:
             target_series[index] = 20.0
-        elif forecast_minute >= 360:
+        elif forecast_minute >= first_step:
             target_series[index] = 19.0
         else:
             target_series[index] = 17.0
 
-    ph, base = make_predheat()
-    volume_temp = configure_simulation(ph, base, internal_temp=17.0, target_temp=17.0, smart_thermostat=True, target_temperature=target_series)
+    def run(smart):
+        """Run the two pass simulation with the smart thermostat on or off."""
+        ph, base = make_predheat()
+        volume_temp = configure_simulation(ph, base, internal_temp=17.0, target_temp=17.0, smart_thermostat=smart, target_temperature=target_series)
+        _next_volume, predict_minute = ph.run_simulation(volume_temp, heating_active=False, save="none")
+        ph.run_simulation(volume_temp, heating_active=False, last_predict_minute=predict_minute, save="best")
+        return base
 
-    _next_volume, predict_minute = ph.run_simulation(volume_temp, heating_active=False, save="none")
-    ph.run_simulation(volume_temp, heating_active=False, last_predict_minute=predict_minute, save="best")
+    base_plain = run(False)
+    base_smart = run(True)
 
-    if "predheat.internal_temp" not in base.states:
+    if "predheat.internal_temp" not in base_smart.states:
         print("ERROR: the two-rise schedule did not produce a prediction")
         return 1
-    if base.states["predheat.heat_energy_h8"]["state"] <= 0:
-        print("ERROR: expected the heating to run at some point over the day")
+
+    # The first rise is at +6hrs, so pre-heating for it has to show up before then
+    energy_plain_h2 = base_plain.states["predheat.heat_energy_h2"]["state"]
+    energy_smart_h2 = base_smart.states["predheat.heat_energy_h2"]["state"]
+    if energy_plain_h2 != 0:
+        print("ERROR: expected no heating before the first rise without the smart thermostat, got {}".format(energy_plain_h2))
         return 1
+    if energy_smart_h2 <= 0:
+        print("ERROR: the first of two rises was not pre-heated, got {} kWh by +2hrs".format(energy_smart_h2))
+        return 1
+
+    # And the house is warmer than the plain run at both step boundaries
+    chart_plain = list(base_plain.states["predheat.internal_temp"]["attributes"]["results"].values())
+    chart_smart = list(base_smart.states["predheat.internal_temp"]["attributes"]["results"].values())
+    for step_minute, label in ((first_step, "first"), (second_step, "second")):
+        index = step_minute // 10
+        if chart_smart[index] <= chart_plain[index]:
+            print("ERROR: the {} rise was not pre-heated: {} vs {}".format(label, chart_smart[index], chart_plain[index]))
+            return 1
     return 0
 
 
@@ -1089,28 +1111,36 @@ def _test_update_pred_missing_weather(_my_predbat):
 
 
 def _test_update_pred_reports_errors(_my_predbat):
-    """update_pred logs a distinct completion line when the run flagged an error.
+    """A run that hit a real problem logs the error completion line, not a clean one.
 
-    Nothing in predheat.py currently sets ``had_errors`` back to True after the reset at the top of
-    update_pred, so this branch is only reachable if a future change starts raising the flag. The
-    test pins the reporting behaviour so that change does not go unnoticed.
+    Regression test for had_errors only ever being cleared and never set: record_status was bound
+    straight to the base's, so PredHeat's own flag stayed False and a run whose weather fetch had
+    failed still reported a clean completion.
     """
-    print("Test: update_pred reports a run that flagged errors")
+    print("Test: update_pred reports a run that hit an error")
     ph, base = _make_update_pred_predheat()
+    base.service_response["weather/get_forecasts"] = None
     ph.reset()
 
-    real_run_simulation = ph.run_simulation
-
-    def flagging_run_simulation(*args, **kwargs):
-        """Run the real simulation but flag an error, as a failing sub-step would."""
-        ph.had_errors = True
-        return real_run_simulation(*args, **kwargs)
-
-    ph.run_simulation = flagging_run_simulation
     ph.update_pred(scheduled=False)
 
+    if not ph.had_errors:
+        print("ERROR: a failed weather fetch should leave the run flagged as errored")
+        return 1
     if not any("with Errors reported" in message for message in base.log_messages):
         print("ERROR: expected the error completion log line")
+        return 1
+
+    # A clean run reports a clean completion and leaves the flag clear
+    ph_ok, base_ok = _make_update_pred_predheat()
+    ph_ok.reset()
+    ph_ok.update_pred(scheduled=False)
+
+    if ph_ok.had_errors:
+        print("ERROR: a clean run should not be flagged as errored")
+        return 1
+    if any("with Errors reported" in message for message in base_ok.log_messages):
+        print("ERROR: a clean run logged the error completion line")
         return 1
     return 0
 
