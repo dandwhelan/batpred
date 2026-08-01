@@ -26,13 +26,13 @@ jobs:
         pip install coverage
         python3 -m coverage run ../apps/predbat/unit_test.py --quick
 
-    # Coverage floor, not a target - it only ever ratchets upwards. Deliberately set
-    # well below the real figure to start with (the full suite measures 80%, and this
-    # quick run skips the slow tests). Raise it once a green run reports the actual
-    # quick-mode number, then keep raising it as coverage improves.
+    # Coverage floor, not a target - it only ever ratchets upwards. Quick mode currently
+    # measures 79% (the full suite, including the slow tests skipped here, measures a
+    # little more). The floor sits just under that to leave room for ordinary churn;
+    # raise it as coverage improves.
     - name: Check coverage has not regressed
       env:
-        MIN_COVERAGE: "70"
+        MIN_COVERAGE: "78"
       run: |
         cd coverage
         python3 -m coverage report \

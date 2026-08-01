@@ -209,6 +209,9 @@ from tests.test_annual_costs import test_annual_costs
 from tests.test_predheat import test_predheat
 from tests.test_web_mcp import test_web_mcp
 from tests.test_fetch_sensor_data import test_fetch_sensor_data
+from tests.test_update_time import test_update_time
+from tests.test_output_publish import test_output_publish
+from tests.test_web_apps_post import test_web_apps_post
 
 # Mock the components and plugin system
 
@@ -491,6 +494,9 @@ def main():
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
         ("predheat", test_predheat, "PredHeat heat pump/gas prediction tests (tables, physics loop, scheduling)", False),
         ("web_mcp", test_web_mcp, "MCP server tests (OAuth flow, JWT tokens, PKCE, endpoint auth, tool dispatch)", False),
+        ("web_apps_post", test_web_apps_post, "apps.yaml web write handler tests (paths, type coercion, rejections)", False),
+        ("output_publish", test_output_publish, "output.py publishing tests (today_cost, rate windows, car plan, export limit)", False),
+        ("update_time", test_update_time, "update_time clock frame tests (naive/aware agreement, manual slot round trip)", False),
         ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
     ]
 
