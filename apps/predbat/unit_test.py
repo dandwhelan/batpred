@@ -208,6 +208,7 @@ from tests.test_annual_store import test_annual_store
 from tests.test_annual_costs import test_annual_costs
 from tests.test_predheat import test_predheat
 from tests.test_web_mcp import test_web_mcp
+from tests.test_fetch_sensor_data import test_fetch_sensor_data
 
 # Mock the components and plugin system
 
@@ -490,6 +491,7 @@ def main():
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
         ("predheat", test_predheat, "PredHeat heat pump/gas prediction tests (tables, physics loop, scheduling)", False),
         ("web_mcp", test_web_mcp, "MCP server tests (OAuth flow, JWT tokens, PKCE, endpoint auth, tool dispatch)", False),
+        ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
     ]
 
     # Parse command line arguments
