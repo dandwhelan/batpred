@@ -73,7 +73,10 @@ class Output:
                 self.dashboard_item(
                     "binary_sensor." + self.prefix + "_car_charging_slot" + postfix,
                     state="off",
-                    attributes={"planned": plan, "cost": None, "kWh": None, "friendly_name": "Predbat car charging slot" + postfix, "icon": "mdi:home-lightning-bolt-outline"},
+                    # "kwh" matches the key used when there are slots to publish; this branch used
+                    # to spell it "kWh", so a template sensor reading either name lost its value
+                    # whenever the plan flipped between empty and populated
+                    attributes={"planned": plan, "cost": None, "kwh": None, "friendly_name": "Predbat car charging slot" + postfix, "icon": "mdi:home-lightning-bolt-outline"},
                 )
                 self.dashboard_item(
                     self.prefix + ".car_charging_start" + postfix,

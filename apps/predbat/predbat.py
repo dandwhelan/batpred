@@ -626,7 +626,13 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
             self.log("Warn: Clock skew is set to {} minutes".format(skew))
         self.now_utc_real = datetime.now(self.local_tz)
         now_utc = self.now_utc_real + timedelta(minutes=skew)
-        now = datetime.now() + timedelta(minutes=skew)
+        # Take the naive clock from now_utc rather than datetime.now() so both describe the same
+        # wall clock. They only agree when the host's timezone matches the configured one; where
+        # they differ (a container running UTC with timezone: Europe/London, say) self.midnight and
+        # self.midnight_utc could land on different dates, and anything comparing a time measured
+        # from one against a time measured from the other - manual_times and manual_rates both do -
+        # would be a day out for the hour before local midnight.
+        now = now_utc.replace(tzinfo=None)
         now = now.replace(second=0, microsecond=0, minute=(now.minute - (now.minute % PREDICT_STEP)))
         now_utc = now_utc.replace(second=0, microsecond=0, minute=(now_utc.minute - (now_utc.minute % PREDICT_STEP)))
 

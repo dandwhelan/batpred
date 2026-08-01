@@ -115,7 +115,8 @@ class PredHeat:
     def __init__(self, base):
         self.base = base
         self.log = base.log
-        self.record_status = base.record_status
+        self.base_record_status = base.record_status
+        self.had_errors = False
         self.get_arg = base.get_arg
         self.set_state = base.set_state_wrapper
         self.call_service = base.call_service_wrapper
@@ -164,6 +165,19 @@ class PredHeat:
 
         if self.weather_compensation_enabled:
             self.log("Predheat: Weather compensation {}".format(self.weather_compensation))
+
+    def record_status(self, message, debug="", had_errors=False, notify=False, extra=""):
+        """
+        Record a status message, tracking whether this run has reported any errors
+
+        The base's record_status tracks errors for the Predbat run as a whole, so PredHeat needs
+        its own flag as well. Without it self.had_errors was only ever cleared and never set, and
+        update_pred always logged a clean completion even when the weather forecast or a history
+        read had failed.
+        """
+        if had_errors:
+            self.had_errors = True
+        return self.base_record_status(message, debug=debug, had_errors=had_errors, notify=notify, extra=extra)
 
     def minutes_to_time(self, updated, now):
         """
@@ -347,7 +361,7 @@ class PredHeat:
             next_adjust = None
             if adjust_ptr >= 0:
                 next_adjust = adjustment_points[adjust_ptr]
-            if next_adjust and minute > adjust["end"]:
+            if next_adjust and minute > next_adjust["end"]:
                 adjust_ptr += 1
                 if adjust_ptr >= len(adjustment_points):
                     adjust_ptr = -1
@@ -356,8 +370,8 @@ class PredHeat:
                     next_adjust = adjustment_points[adjust_ptr]
 
             if self.smart_thermostat:
-                if next_adjust and minute >= adjust["start"] and minute < adjust["end"]:
-                    target_temp = adjust["to"]
+                if next_adjust and minute >= next_adjust["start"] and minute < next_adjust["end"]:
+                    target_temp = next_adjust["to"]
                     # self.log("Predheat: Adjusted target temperature for smart heating to {} at minute {}".format(target_temp, minute))
 
             temp_diff_outside = internal_temp - external_temp

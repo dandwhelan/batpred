@@ -23,7 +23,21 @@ jobs:
         PREDBAT_KERNEL_REQUIRED: "1"
       run: |
         cd coverage
-        python3 ../apps/predbat/unit_test.py --quick
+        pip install coverage
+        python3 -m coverage run ../apps/predbat/unit_test.py --quick
+
+    # Coverage floor, not a target - it only ever ratchets upwards. Quick mode currently
+    # measures 79% (the full suite, including the slow tests skipped here, measures a
+    # little more). The floor sits just under that to leave room for ordinary churn;
+    # raise it as coverage improves.
+    - name: Check coverage has not regressed
+      env:
+        MIN_COVERAGE: "78"
+      run: |
+        cd coverage
+        python3 -m coverage report \
+          --omit='../apps/predbat/tests/*,../apps/predbat/unit_test.py' \
+          --fail-under="$MIN_COVERAGE"
     - name: Verify checked-in x86_64 kernel binary
       run: |
         cd coverage
