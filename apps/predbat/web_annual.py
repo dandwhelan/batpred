@@ -25,8 +25,26 @@ import sys
 import yaml
 from aiohttp import web
 
-from annual import AnnualConfigError, validate_config
+from annual import RESULTS_SCHEMA_VERSION, AnnualConfigError, validate_config
 from annual_costs import DEFAULT_COSTS, build_costs, resolve_costs
+from annual_heat import (
+    DEFAULT_ANNUAL_GAS_KWH,
+    DEFAULT_BASE_TEMP_C,
+    DEFAULT_BOILER_EFFICIENCY,
+    DEFAULT_COLD_MAINS_C,
+    DEFAULT_CYLINDER_STANDING_LOSS_KWH,
+    DEFAULT_CYLINDER_VOLUME_L,
+    DEFAULT_DHW_KW,
+    DEFAULT_HOT_WATER_TARGET_C,
+    DEFAULT_WATER_BOILER_EFFICIENCY,
+    DEFAULT_WATER_CHARGES_PER_DAY,
+    DEFAULT_FLOW_TEMP_C,
+    DEFAULT_GAS_P_PER_KWH,
+    DEFAULT_GAS_STANDING_CHARGE_P_PER_DAY,
+    DEFAULT_SCOP,
+    DEFAULT_WATER_FLOW_TEMP_C,
+    DEFAULT_WATER_GAS_KWH,
+)
 from annual_job import AnnualJob
 from annual_store import backfill_summaries, list_runs, load_plan, load_run, save_run
 from tariff_catalogue import CUSTOM_ID, merged_catalogue
@@ -54,6 +72,32 @@ DEFAULT_CONFIG = {
     "load": {"annual_kwh": 3800, "shape": "flat", "car_charging_kwh": 0, "car_rate_kw": 7.4},
     "tariff": {"rates_import": [{"rate": 24.86}], "rates_export": [{"rate": 4.1}], "standing_charge_p_per_day": 60.0},
     "samples_per_month": 2,
+}
+
+# The heating section's own defaults, kept beside DEFAULT_CONFIG so the form has
+# something to show before the box is ticked. Sourced from annual_heat rather than
+# repeated, so the form and the engine cannot drift apart. ``enable`` is False: the
+# heat pump comparison roughly doubles a run's length, so it is always opt-in.
+DEFAULT_HEAT = {
+    "enable": False,
+    "annual_gas_kwh": DEFAULT_ANNUAL_GAS_KWH,
+    "water_gas_kwh": DEFAULT_WATER_GAS_KWH,
+    "boiler_efficiency": DEFAULT_BOILER_EFFICIENCY,
+    "gas_p_per_kwh": DEFAULT_GAS_P_PER_KWH,
+    "gas_standing_charge_p_per_day": DEFAULT_GAS_STANDING_CHARGE_P_PER_DAY,
+    "scop": DEFAULT_SCOP,
+    "flow_temp_c": DEFAULT_FLOW_TEMP_C,
+    "water_flow_temp_c": DEFAULT_WATER_FLOW_TEMP_C,
+    "base_temp_c": DEFAULT_BASE_TEMP_C,
+    "remove_gas_supply": True,
+    "water_boiler_efficiency": DEFAULT_WATER_BOILER_EFFICIENCY,
+    "smart_hot_water": False,
+    "cylinder_volume_l": DEFAULT_CYLINDER_VOLUME_L,
+    "hot_water_target_c": DEFAULT_HOT_WATER_TARGET_C,
+    "cold_mains_c": DEFAULT_COLD_MAINS_C,
+    "water_charges_per_day": DEFAULT_WATER_CHARGES_PER_DAY,
+    "dhw_kw": DEFAULT_DHW_KW,
+    "cylinder_standing_loss_kwh_per_day": DEFAULT_CYLINDER_STANDING_LOSS_KWH,
 }
 
 CONFIG_FILENAME = "annual.yaml"
@@ -476,6 +520,8 @@ class AnnualPage:
         text += "</div>\n"
         text += "</fieldset>\n"
 
+        text += self._render_heat_fieldset(config)
+
         text += "<fieldset><legend>Tariff</legend>\n"
         text += '<div class="annual-field"><label for="tariff_id">Tariff</label><select id="tariff_id" name="tariff_id" onchange="annualTariffChanged()">\n'
         catalogue = self.catalogue()
@@ -530,6 +576,8 @@ class AnnualPage:
         text += '<p class="annual-note">Most quotes cover the whole installation, so the second box is usually the one you want. The battery price is taken as the difference between the two, and the solar-only figure is what the PV-only payback is worked out from — leave it at 0 and that row uses the estimate instead.</p>\n'
         text += self._number_field("cost_quoted_pv_gbp", "Quoted price for solar only", costs_config.get("quoted_pv_gbp", 0), suffix="£")
         text += self._number_field("cost_quoted_total_gbp", "Quoted price for solar &amp; battery", costs_config.get("quoted_total_gbp", 0), suffix="£")
+        text += self._number_field("cost_quoted_heat_pump_gbp", "Quoted price for the heat pump", costs_config.get("quoted_heat_pump_gbp", 0), suffix="£")
+        text += '<p class="annual-note">The heat pump price before any grant — the grant is taken off separately below. Only used when the heating comparison is switched on.</p>\n'
         text += "</fieldset>\n"
 
         text += "<details><summary>Advanced</summary>\n"
@@ -551,8 +599,20 @@ class AnnualPage:
             ("pv_rate_medium_gbp_per_kwp", "PV £/kWp for a medium system (about 7 kWp)"),
             ("pv_rate_large_gbp_per_kwp", "PV £/kWp for a large system (about 30 kWp)"),
             ("predbat_annual_gbp", "Predbat cost per year"),
+            ("heat_pump_install_gbp", "Heat pump install cost"),
+            ("heat_pump_grant_gbp", "Heat pump grant (Boiler Upgrade Scheme)"),
         ]:
             text += self._number_field("cost_{}".format(key), label, costs_config.get(key, DEFAULT_COSTS[key]), suffix="£")
+
+        heat_advanced = config.get("heat") or {}
+        text += self._number_field("heat_boiler_efficiency", "Gas boiler seasonal efficiency", heat_advanced.get("boiler_efficiency", DEFAULT_HEAT["boiler_efficiency"]))
+        text += self._number_field("heat_water_flow_temp_c", "Hot water cylinder flow temperature", heat_advanced.get("water_flow_temp_c", DEFAULT_HEAT["water_flow_temp_c"]), suffix="°C")
+        text += self._number_field("heat_base_temp_c", "Degree-day base temperature", heat_advanced.get("base_temp_c", DEFAULT_HEAT["base_temp_c"]), suffix="°C")
+        text += self._number_field("heat_water_boiler_efficiency", "Gas efficiency for hot water", heat_advanced.get("water_boiler_efficiency", DEFAULT_HEAT["water_boiler_efficiency"]))
+        text += self._number_field("heat_hot_water_target_c", "Cylinder target temperature", heat_advanced.get("hot_water_target_c", DEFAULT_HEAT["hot_water_target_c"]), suffix="°C")
+        text += self._number_field("heat_cold_mains_c", "Cold mains temperature", heat_advanced.get("cold_mains_c", DEFAULT_HEAT["cold_mains_c"]), suffix="°C")
+        text += self._number_field("heat_dhw_kw", "Heat pump output into the cylinder", heat_advanced.get("dhw_kw", DEFAULT_HEAT["dhw_kw"]), suffix="kW")
+        text += self._number_field("heat_cylinder_standing_loss_kwh_per_day", "Cylinder standing loss", heat_advanced.get("cylinder_standing_loss_kwh_per_day", DEFAULT_HEAT["cylinder_standing_loss_kwh_per_day"]), suffix="kWh/day")
         text += "</details>\n"
 
         # Marks THIS tab as the one that started the run, so only it navigates to the
@@ -560,6 +620,42 @@ class AnnualPage:
         # tab, and a tab sitting on a half-filled form must not be reloaded out from
         # under whoever is typing in it.
         text += "</form>\n</div>\n"
+        return text
+
+    def _render_heat_fieldset(self, config):
+        """Return the heat pump / gas boiler section of the form.
+
+        Off by default. Turning it on roughly doubles how long a run takes, because every
+        scenario has to be planned twice - once with the house on gas and once with the
+        heat pump - so the cost is stated on the form rather than discovered afterwards.
+        """
+        heat = config.get("heat") or {}
+        enabled = bool(heat.get("enable"))
+
+        text = "<fieldset><legend>Heating</legend>\n"
+        text += '<div class="annual-field"><label for="heat_enable">Compare a heat pump against my gas boiler</label><input type="checkbox" id="heat_enable" name="heat_enable" onchange="annualHeatChanged()" {}></div>\n'.format("checked" if enabled else "")
+        text += '<p class="annual-note">Models a year of heating from the same real weather the solar uses, then prices it both ways: gas today, or a heat pump running as ordinary electrical load your PV, battery and Predbat can help with.</p>\n'
+        text += '<p class="annual-note"><strong>This roughly doubles how long a run takes</strong>, because every scenario is planned twice.</p>\n'
+        text += '<div id="heat-fields" style="display:{}">\n'.format("block" if enabled else "none")
+
+        text += self._number_field("heat_annual_gas_kwh", "Gas used per year", heat.get("annual_gas_kwh", DEFAULT_HEAT["annual_gas_kwh"]), suffix="kWh")
+        text += '<p class="annual-note">From your gas bill or your smart meter. The UK average is about 11,500 kWh.</p>\n'
+        text += self._number_field("heat_water_gas_kwh", "…of which hot water and cooking", heat.get("water_gas_kwh", DEFAULT_HEAT["water_gas_kwh"]), suffix="kWh")
+        text += '<p class="annual-note">The part that does not depend on the weather, so it is spread evenly through the year rather than following the cold. About 2,500 kWh is typical.</p>\n'
+        text += self._number_field("heat_gas_p_per_kwh", "Gas unit rate", heat.get("gas_p_per_kwh", DEFAULT_HEAT["gas_p_per_kwh"]), suffix="p/kWh")
+        text += self._number_field("heat_gas_standing_charge_p_per_day", "Gas standing charge", heat.get("gas_standing_charge_p_per_day", DEFAULT_HEAT["gas_standing_charge_p_per_day"]), suffix="p/day")
+        text += self._number_field("heat_scop", "Heat pump SCOP", heat.get("scop", DEFAULT_HEAT["scop"]))
+        text += '<p class="annual-note">Units of heat per unit of electricity, averaged over the year. Field results for UK retrofits cluster around 3.0–3.5; an MCS design certificate usually quotes a more optimistic figure. Efficiency still varies with the outdoor temperature around this average.</p>\n'
+        text += self._number_field("heat_flow_temp_c", "Radiator flow temperature", heat.get("flow_temp_c", DEFAULT_HEAT["flow_temp_c"]), suffix="°C")
+        text += '<p class="annual-note">About 35 °C for underfloor heating, 45 °C with upsized radiators, 55 °C for an untouched radiator circuit. Lower is more efficient.</p>\n'
+        text += '<div class="annual-field"><label for="heat_smart_hot_water">Smart hot water cylinder (Mixergy or similar)</label><input type="checkbox" id="heat_smart_hot_water" name="heat_smart_hot_water" {}></div>\n'.format("checked" if heat.get("smart_hot_water", DEFAULT_HEAT["smart_hot_water"]) else "")
+        text += '<p class="annual-note">Charges the cylinder on the cheapest half-hours that still finish before you need the water, instead of at a fixed time. On a tariff with a cheap overnight band this is usually worth more than anything else on this page. Leave it clear for a plain timer.</p>\n'
+        text += self._number_field("heat_cylinder_volume_l", "Cylinder size", heat.get("cylinder_volume_l", DEFAULT_HEAT["cylinder_volume_l"]), suffix="litres")
+        text += self._number_field("heat_water_charges_per_day", "Times the cylinder is reheated per day", heat.get("water_charges_per_day", DEFAULT_HEAT["water_charges_per_day"]), step="1")
+        text += '<p class="annual-note">One overnight charge is the usual heat pump pattern. A charge is scheduled to <em>finish</em> before the water is wanted, not start then.</p>\n'
+        text += '<div class="annual-field"><label for="heat_remove_gas_supply">Gas supply disconnected entirely</label><input type="checkbox" id="heat_remove_gas_supply" name="heat_remove_gas_supply" {}></div>\n'.format("checked" if heat.get("remove_gas_supply", True) else "")
+        text += '<p class="annual-note">Tick this to stop paying the gas standing charge too. Leave it clear if you are keeping a gas hob — the standing charge is often most of a summer gas bill.</p>\n'
+        text += "</div>\n</fieldset>\n"
         return text
 
     def config_from_post(self, postdata):
@@ -695,6 +791,36 @@ class AnnualPage:
                 costs[key] = submitted
         if costs:
             config["costs"] = costs
+
+        # A checkbox absent from postdata means unchecked, so the enable flag is written
+        # out either way rather than only when ticked: without it, unticking the box on a
+        # saved config would leave the previous heat block untouched on disk and silently
+        # keep running the (much slower) heat pump comparison.
+        heat = {
+            "enable": postdata.get("heat_enable") is not None,
+            "remove_gas_supply": postdata.get("heat_remove_gas_supply") is not None,
+            "smart_hot_water": postdata.get("heat_smart_hot_water") is not None,
+        }
+        for key, default in [
+            ("annual_gas_kwh", DEFAULT_HEAT["annual_gas_kwh"]),
+            ("water_gas_kwh", DEFAULT_HEAT["water_gas_kwh"]),
+            ("gas_p_per_kwh", DEFAULT_HEAT["gas_p_per_kwh"]),
+            ("gas_standing_charge_p_per_day", DEFAULT_HEAT["gas_standing_charge_p_per_day"]),
+            ("scop", DEFAULT_HEAT["scop"]),
+            ("flow_temp_c", DEFAULT_HEAT["flow_temp_c"]),
+            ("boiler_efficiency", DEFAULT_HEAT["boiler_efficiency"]),
+            ("water_flow_temp_c", DEFAULT_HEAT["water_flow_temp_c"]),
+            ("base_temp_c", DEFAULT_HEAT["base_temp_c"]),
+            ("water_boiler_efficiency", DEFAULT_HEAT["water_boiler_efficiency"]),
+            ("cylinder_volume_l", DEFAULT_HEAT["cylinder_volume_l"]),
+            ("hot_water_target_c", DEFAULT_HEAT["hot_water_target_c"]),
+            ("cold_mains_c", DEFAULT_HEAT["cold_mains_c"]),
+            ("water_charges_per_day", DEFAULT_HEAT["water_charges_per_day"]),
+            ("dhw_kw", DEFAULT_HEAT["dhw_kw"]),
+            ("cylinder_standing_loss_kwh_per_day", DEFAULT_HEAT["cylinder_standing_loss_kwh_per_day"]),
+        ]:
+            heat[key] = numeric("heat_{}".format(key), default)
+        config["heat"] = heat
 
         return config
 
@@ -1028,6 +1154,44 @@ class AnnualPage:
                 return "{} rates, {}p to {}p".format(len(values), min(values), max(values)), ""
         return "not set", ""
 
+    def _render_schema_notice(self, results):
+        """Return a warning when a stored run predates the current engine, or nothing.
+
+        A run stored before 2026-08-02 carries no ``schema_version``, and its import and
+        export energy covers the whole 48 hour plan rather than the billed day, so it
+        reads roughly double (see ``_billed_result()`` in ``annual.py``). Its money is
+        fine, which is exactly why this has to be said out loud: the run looks entirely
+        healthy, and a user flipping between an old and a new run in the selector would
+        otherwise read the difference in the kWh columns as a real change in their
+        modelled system.
+
+        Battery throughput is deliberately NOT named here. It came from
+        ``final_battery_cycle``, which was already bounded to the billed day, so it is
+        identical before and after the fix - listing it would send someone hunting for a
+        discrepancy that does not exist.
+
+        Anything newer than this build is reported too rather than assumed compatible -
+        that only happens if a run made by a later version is loaded from storage, and
+        guessing which of the two is right is not this function's job.
+
+        A marker that is present but not a plain integer falls through to the stale
+        notice rather than to silence: a document whose provenance cannot be read is
+        exactly the case where "re-run this" is the right advice, and staying quiet
+        would be indistinguishable from a clean current run.
+        """
+        version = results.get("schema_version", 1)
+        if isinstance(version, int) and not isinstance(version, bool):
+            if version == RESULTS_SCHEMA_VERSION:
+                return ""
+            if version > RESULTS_SCHEMA_VERSION:
+                return "<p class='annual-note'>This run was made by a newer version of Predbat than the one running now, so some of its figures may not mean what this page assumes.</p>\n"
+        return (
+            "<p class='annual-note'>This run was made before 2 August 2026, when the energy figures were "
+            "corrected. Its Import and Export columns cover the 48 hour plan rather than the billed day, so "
+            "they read roughly double. Costs, savings and payback for this run are correct and are unchanged "
+            "by the fix. Re-run to get energy figures comparable with newer runs.</p>\n"
+        )
+
     def _render_run_details(self, results):
         """Return a small table of the key settings this run actually used.
 
@@ -1131,6 +1295,7 @@ class AnnualPage:
             return text
 
         text += self._render_run_details(results)
+        text += self._render_schema_notice(results)
 
         annual = results.get("annual", {}) or {}
         scenarios = annual.get("scenarios")
@@ -1157,6 +1322,7 @@ class AnnualPage:
         text += "</p>\n"
 
         text += self._render_payback(results)
+        text += self._render_heat(results)
         text += self._render_chart(results)
         text += self._render_month_table(results)
         selected_entry = next((run for run in (runs or []) if run.get("id") == selected_id), None)
@@ -1232,6 +1398,86 @@ class AnnualPage:
             text += "<tr><td>{}</td><td>£{:,.0f}</td><td>{}</td><td>{}</td></tr>\n".format(label, row.get("capital_gbp", 0), saving, years)
         text += "</table>\n"
         text += "<p class='annual-note'>Simple payback: capital divided by the modelled annual saving. It ignores panel degradation, price inflation, battery replacement and finance costs.</p>\n"
+        return text
+
+    def _render_heat(self, results):
+        """Return the heat pump versus gas boiler comparison, or nothing when none was run.
+
+        A run stored before this feature existed has no ``heat`` key at all, so it renders
+        exactly as it did before rather than gaining an empty section.
+        """
+        annual = results.get("annual") or {}
+        heat = annual.get("heat")
+        if not heat:
+            return ""
+
+        summary = heat.get("summary") or {}
+        costs = heat.get("costs") or {}
+
+        text = "<h2>Heat pump versus gas boiler</h2>\n"
+        if not heat.get("available"):
+            reason = html.escape(str(heat.get("reason", "The heat pump comparison could not be completed.")), quote=True)
+            text += "<p class='annual-unavailable'>{}</p>\n".format(reason)
+            return text
+
+        text += "<p class='annual-note'>Your boiler burns <strong>{:,.0f} kWh</strong> of gas a year to deliver <strong>{:,.0f} kWh</strong> of heat ({:,.0f} kWh space heating, {:,.0f} kWh hot water). ".format(
+            heat.get("gas_kwh", 0), heat.get("heat_kwh", 0), heat.get("space_heat_kwh", 0), heat.get("water_heat_kwh", 0)
+        )
+        text += "A heat pump at a realised SCOP of <strong>{}</strong> would need about <strong>{:,.0f} kWh</strong> of electricity for the same heat.</p>\n".format(summary.get("realised_scop", 0), heat.get("heat_pump_kwh_estimate", 0))
+
+        if summary.get("cylinder_volume_l"):
+            charges = summary.get("water_charges_per_day", 1)
+            if summary.get("smart_hot_water"):
+                cylinder = "Your <strong>{:,.0f} L smart cylinder</strong> is charged {} time(s) a day, each charge placed in the cheapest window that still finishes before you need the water.".format(summary["cylinder_volume_l"], charges)
+            else:
+                cylinder = "Your <strong>{:,.0f} L cylinder</strong> is charged {} time(s) a day on a fixed timer. Switching it to a smart cylinder, so it charges on the cheapest rates, is usually the biggest single improvement available here.".format(summary["cylinder_volume_l"], charges)
+            text += "<p class='annual-note'>{} A full charge to {:.0f} °C is {:.1f} kWh of heat; the day's hot water needs {:.1f} kWh including {:.1f} kWh of cylinder standing loss.</p>\n".format(
+                cylinder, summary.get("hot_water_target_c", 0), summary.get("full_charge_kwh", 0), summary.get("water_charge_per_day_kwh", 0), summary.get("cylinder_standing_loss_kwh_per_day", 0)
+            )
+
+        text += "<table class='comparison-table'>\n<tr><th>Gas bill today</th><th>Amount</th></tr>\n"
+        text += "<tr><td>Gas used</td><td>{}</td></tr>\n".format(self._pounds(heat.get("gas_unit_cost_p", 0)))
+        text += "<tr><td>Gas standing charge</td><td>{}</td></tr>\n".format(self._pounds(heat.get("gas_standing_charge_p", 0)))
+        text += "<tr><td><strong>Total</strong></td><td><strong>{}</strong></td></tr>\n".format(self._pounds(heat.get("gas_total_p", 0)))
+        text += "</table>\n"
+        if summary.get("remove_gas_supply"):
+            text += "<p class='annual-note'>The gas supply is disconnected, so the standing charge stops too — {} a year of the figure above is avoided.</p>\n".format(self._pounds(heat.get("gas_avoided_p", 0)))
+        else:
+            text += "<p class='annual-note'>You are keeping the gas supply, so the {} standing charge carries on being paid and only the {} of gas used is avoided.</p>\n".format(
+                self._pounds(heat.get("gas_standing_charge_p", 0)), self._pounds(heat.get("gas_unit_cost_p", 0))
+            )
+
+        text += "<p class='annual-note'>The heat pump's extra electricity depends on what else you have: PV and a battery can cover part of it, so the saving differs by scenario.</p>\n"
+        text += "<table class='comparison-table'>\n<tr><th>Scenario</th><th>Gas avoided</th><th>Extra electricity</th><th>Net saving a year</th><th>Pays back in</th></tr>\n"
+
+        payback = (heat.get("payback") or {}).get("scenarios") or {}
+        for key in SCENARIO_ORDER:
+            entry = (heat.get("scenarios") or {}).get(key)
+            if not entry:
+                continue
+            row = payback.get(key) or {}
+            if row.get("pays_back") and row.get("years") is not None:
+                years = "{:.1f} years".format(row["years"])
+            elif (heat.get("payback") or {}).get("available"):
+                years = "<span class='annual-unavailable'>does not pay back</span>"
+            else:
+                years = "n/a"
+            saving = entry.get("annual_saving_p", 0)
+            saving_cell = self._pounds(saving) if saving >= 0 else "<span class='annual-unavailable'>{}</span>".format(self._pounds(saving))
+            text += "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n".format(
+                SCENARIO_LABELS[key], self._pounds(heat.get("gas_avoided_p", 0)), self._pounds(entry.get("extra_electricity_p", 0)), saving_cell, years
+            )
+        text += "</table>\n"
+
+        quoted = " (your quote)" if costs.get("quoted") else " (estimated)"
+        text += "<p class='annual-note'>Heat pump capital: £{:,.0f}{} less a £{:,.0f} grant, so <strong>£{:,.0f}</strong> to pay.</p>\n".format(costs.get("install_gbp", 0), quoted, costs.get("grant_gbp", 0), costs.get("net_gbp", 0))
+
+        if not (heat.get("payback") or {}).get("available"):
+            reason = html.escape(str((heat.get("payback") or {}).get("reason", "")), quote=True)
+            if reason:
+                text += "<p class='annual-unavailable'>{}</p>\n".format(reason)
+
+        text += "<p class='annual-note'>Heat demand follows heating degree days from the same year's real hourly temperatures, and the heat pump's efficiency falls as it gets colder — so its worst efficiency lands on the days it is working hardest. Hot water is modelled separately: at any given moment it runs at a lower COP than space heating, because the cylinder needs a higher flow temperature than the radiators. Averaged over the year the two can still come out close, since hot water is drawn all year round including mild weather while space heating is concentrated in the cold.</p>\n"
         return text
 
     def _render_chart(self, results):
@@ -1653,6 +1899,12 @@ function annualTariffChanged() {
   document.getElementById('tariff_export_url').value = option.getAttribute('data-export') || '';
   var custom = document.getElementById('tariff-custom-urls');
   if (custom) { custom.style.display = (select.value === 'custom') ? 'block' : 'none'; }
+}
+function annualHeatChanged() {
+  // The heating inputs mean nothing with the comparison switched off, and leaving them
+  // on screen invites someone to fill in a gas bill that is then never used.
+  var fields = document.getElementById('heat-fields');
+  if (fields) { fields.style.display = document.getElementById('heat_enable').checked ? 'block' : 'none'; }
 }
 function annualCancel() { fetch('./annual_cancel', {method: 'POST'}); }
 function annualSolarModeChanged(index) {

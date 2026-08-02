@@ -11,6 +11,7 @@
 
 import asyncio
 import builtins
+import datetime
 import copy
 import json
 import re
@@ -18,7 +19,7 @@ from unittest.mock import patch
 
 from aiohttp import web as aiohttp_web
 
-from annual import AnnualConfigError, validate_config
+from annual import RESULTS_SCHEMA_VERSION, AnnualConfigError, validate_config
 from annual_store import list_runs, load_run, save_run
 from tariff_catalogue import CUSTOM_ID
 from web import WebInterface
@@ -1258,6 +1259,8 @@ def sample_run_results():
     }
     return {
         "year": 2025,
+        # A run made by the current engine, so the results view shows no stale-run notice.
+        "schema_version": RESULTS_SCHEMA_VERSION,
         # The run's OWN settings, as scrub_secrets left them - what the details table
         # must describe, rather than whatever the live form happens to hold.
         "config": {
@@ -1326,6 +1329,52 @@ def test_web_annual_results(my_predbat):
     nav = page.render_nav("view")
     if "annual-nav-current" not in nav:
         print("  ERROR: the nav should mark the viewer page as current")
+        failed = True
+
+    print("Test: a current run carries no stale-schema notice")
+    if "before 2 August 2026" in html:
+        print("  ERROR: a run stamped with the current schema version should not be flagged as stale")
+        failed = True
+
+    print("Test: a run stored before the energy fix says so, and says which figures are affected")
+    # The dangerous case: such a run looks entirely healthy, its money is correct, and only
+    # its kWh columns are wrong - so a user flipping between an old and a new run in the
+    # selector would read the difference as a real change in their modelled system.
+    stale = copy.deepcopy(results)
+    del stale["schema_version"]
+    stale_html = page.render_results(stale, runs, "20260726-101500")
+    if "before 2 August 2026" not in stale_html:
+        print("  ERROR: a run with no schema version should be flagged as predating the energy fix")
+        failed = True
+    for expected in ["Import", "Export", "roughly double", "Costs, savings and payback"]:
+        if expected not in stale_html:
+            print("  ERROR: the stale-run notice should mention {}, got {}".format(expected, stale_html))
+            failed = True
+    # battery_throughput_kwh came from final_battery_cycle, which was already bounded to
+    # the billed day, so it is identical before and after the fix. Naming it would send
+    # someone hunting for a discrepancy that does not exist.
+    if "battery throughput" in stale_html:
+        print("  ERROR: the stale-run notice must not claim battery throughput was affected - it was already bounded")
+        failed = True
+
+    print("Test: an unreadable schema marker is treated as stale, not as a clean current run")
+    # Silence on a document whose provenance cannot be read is indistinguishable from a
+    # healthy run, which is the one outcome this notice exists to prevent.
+    garbled = copy.deepcopy(results)
+    garbled["schema_version"] = "two"
+    if "before 2 August 2026" not in page.render_results(garbled, runs, "20260726-101500"):
+        print("  ERROR: a non-integer schema version should fall through to the stale notice")
+        failed = True
+
+    print("Test: a run from a newer Predbat is reported rather than assumed compatible")
+    newer = copy.deepcopy(results)
+    newer["schema_version"] = RESULTS_SCHEMA_VERSION + 1
+    newer_html = page.render_results(newer, runs, "20260726-101500")
+    if "newer version of Predbat" not in newer_html:
+        print("  ERROR: a run from a newer schema version should be flagged")
+        failed = True
+    if "before 2 August 2026" in newer_html:
+        print("  ERROR: a newer run must not be described as predating the energy fix")
         failed = True
 
     print("Test: a run states the key settings it actually used")
@@ -2192,4 +2241,195 @@ def test_web_annual_plan_route(my_predbat):
         print("  ERROR: an absent run parameter should 404, got {}".format(response.status))
         failed = True
 
+    return failed
+
+
+def heat_results():
+    """Return a results document whose run included the heat pump comparison."""
+    results = sample_run_results()
+    results["annual"]["months_included"] = 12
+    results["annual"]["heat"] = {
+        "available": True,
+        "summary": {
+            "annual_gas_kwh": 12000.0,
+            "realised_scop": 3.19,
+            "configured_scop": 3.2,
+            "remove_gas_supply": True,
+            "flow_temp_c": 45.0,
+            "water_flow_temp_c": 52.0,
+        },
+        "costs": {"install_gbp": 13000.0, "grant_gbp": 7500.0, "net_gbp": 5500.0, "quoted": False},
+        "months_included": 12,
+        "heat_kwh": 10200.0,
+        "space_heat_kwh": 8160.0,
+        "water_heat_kwh": 2040.0,
+        "gas_kwh": 12000.0,
+        "gas_unit_cost_p": 76800.0,
+        "gas_standing_charge_p": 11680.0,
+        "gas_total_p": 88480.0,
+        "gas_avoided_p": 88480.0,
+        "heat_pump_kwh_estimate": 3197.5,
+        "scenarios": {
+            "no_pvbat": {"electricity_gas_p": 18000.0, "electricity_heatpump_p": 105000.0, "extra_electricity_p": 87000.0, "annual_saving_p": 1480.0},
+            "pv_only": {"electricity_gas_p": 13000.0, "electricity_heatpump_p": 95000.0, "extra_electricity_p": 82000.0, "annual_saving_p": 6480.0},
+            "without_predbat": {"electricity_gas_p": 9000.0, "electricity_heatpump_p": 78000.0, "extra_electricity_p": 69000.0, "annual_saving_p": 19480.0},
+            "with_predbat": {"electricity_gas_p": 6600.0, "electricity_heatpump_p": 61000.0, "extra_electricity_p": 54400.0, "annual_saving_p": 34080.0},
+        },
+        "payback": {
+            "available": True,
+            "scenarios": {
+                "no_pvbat": {"capital_gbp": 5500.0, "annual_saving_gbp": 14.8, "pays_back": True, "years": 371.62},
+                "pv_only": {"capital_gbp": 5500.0, "annual_saving_gbp": 64.8, "pays_back": True, "years": 84.88},
+                "without_predbat": {"capital_gbp": 5500.0, "annual_saving_gbp": 194.8, "pays_back": True, "years": 28.23},
+                "with_predbat": {"capital_gbp": 5500.0, "annual_saving_gbp": 340.8, "pays_back": True, "years": 16.14},
+            },
+        },
+    }
+    return results
+
+
+def test_web_annual_heat(my_predbat):
+    """Verify the heating form section, its post round-trip, and the results rendering."""
+    failed = False
+    print("**** Testing web_annual heating section ****")
+
+    page = make_page(my_predbat)
+
+    print("Test: the form shows a Heating group, unticked by default")
+    config = page.prefill_config()
+    form = page.render_form(config)
+    if "Heating" not in form:
+        print("  ERROR: the form is missing the 'Heating' group")
+        failed = True
+    for field in ["heat_enable", "heat_annual_gas_kwh", "heat_water_gas_kwh", "heat_gas_p_per_kwh", "heat_gas_standing_charge_p_per_day", "heat_scop", "heat_flow_temp_c", "heat_remove_gas_supply"]:
+        if 'id="{}"'.format(field) not in form:
+            print("  ERROR: the form is missing the '{}' field".format(field))
+            failed = True
+
+    print("Test: the form warns that the comparison doubles the run time")
+    if "doubles how long a run takes" not in form:
+        print("  ERROR: the form should say the heat pump comparison doubles the run time")
+        failed = True
+
+    print("Test: an unticked box means no heat pump is modelled")
+    posted = page.config_from_post(valid_postdata())
+    if posted["heat"]["enable"]:
+        print("  ERROR: an absent heat_enable checkbox should not enable the heat pump")
+        failed = True
+    validated = validate_config(posted, today=datetime.date(2026, 7, 25))
+    if validated["heat"] is not None:
+        print("  ERROR: a disabled heat block should validate to None, got {}".format(validated["heat"]))
+        failed = True
+
+    print("Test: a ticked box round-trips every heating field through validation")
+    postdata = valid_postdata()
+    postdata.update(
+        {
+            "heat_enable": "on",
+            "heat_annual_gas_kwh": "14200",
+            "heat_water_gas_kwh": "2600",
+            "heat_gas_p_per_kwh": "6.1",
+            "heat_gas_standing_charge_p_per_day": "31.5",
+            "heat_scop": "3.4",
+            "heat_flow_temp_c": "40",
+            "heat_remove_gas_supply": "on",
+        }
+    )
+    posted = page.config_from_post(postdata)
+    validated = validate_config(posted, today=datetime.date(2026, 7, 25))
+    heat = validated["heat"]
+    if heat is None:
+        print("  ERROR: a ticked heat_enable should produce a heat block")
+        failed = True
+    else:
+        for field, expected in [("annual_gas_kwh", 14200.0), ("water_gas_kwh", 2600.0), ("gas_p_per_kwh", 6.1), ("gas_standing_charge_p_per_day", 31.5), ("scop", 3.4), ("flow_temp_c", 40.0)]:
+            if abs(heat[field] - expected) > 1e-6:
+                print("  ERROR: {} should round-trip as {}, got {}".format(field, expected, heat[field]))
+                failed = True
+        if not heat["remove_gas_supply"]:
+            print("  ERROR: a ticked heat_remove_gas_supply should be True")
+            failed = True
+        # (14200 - 2600) * 0.85
+        if abs(heat["space_heat_kwh"] - 9860.0) > 1.0:
+            print("  ERROR: space heat should be 9860 kWh, got {}".format(heat["space_heat_kwh"]))
+            failed = True
+
+    print("Test: an unticked 'gas disconnected' box is carried through as False")
+    postdata.pop("heat_remove_gas_supply")
+    validated = validate_config(page.config_from_post(postdata), today=datetime.date(2026, 7, 25))
+    if validated["heat"]["remove_gas_supply"]:
+        print("  ERROR: an absent heat_remove_gas_supply checkbox should be False")
+        failed = True
+
+    print("Test: a bad heating value is reported as a validation error, not a crash")
+    postdata["heat_scop"] = "not a number"
+    message = page.validation_error(page.config_from_post(postdata))
+    if not message or "scop" not in message.lower():
+        print("  ERROR: a non-numeric SCOP should produce a validation error naming it, got '{}'".format(message))
+        failed = True
+
+    print("Test: a saved heat config is reflected back into the form")
+    saved = page.prefill_config()
+    saved["heat"] = {"enable": True, "annual_gas_kwh": 9100, "scop": 4.1, "remove_gas_supply": False}
+    form = page.render_form(saved)
+    if 'id="heat_enable" name="heat_enable" onchange="annualHeatChanged()" checked' not in form:
+        print("  ERROR: an enabled heat config should tick the box")
+        failed = True
+    if 'value="9100"' not in form:
+        print("  ERROR: the saved gas figure should show in the form")
+        failed = True
+    if 'id="heat-fields" style="display:block"' not in form:
+        print("  ERROR: an enabled heat config should show the heating fields")
+        failed = True
+
+    print("Test: a run with no heating renders no heating section at all")
+    if page._render_heat(sample_run_results()):
+        print("  ERROR: a run without a heat block should render nothing")
+        failed = True
+
+    print("Test: the heating results render the gas bill, the per-scenario saving and the payback")
+    rendered = page._render_heat(heat_results())
+    for fragment in ["Heat pump versus gas boiler", "Gas bill today", "£768.00", "£116.80", "£884.80"]:
+        if fragment not in rendered:
+            print("  ERROR: the heating results are missing '{}'".format(fragment))
+            failed = True
+    for label in ["No PV/Battery", "PV only", "Without Predbat", "With Predbat"]:
+        if label not in rendered:
+            print("  ERROR: the heating results are missing the '{}' scenario row".format(label))
+            failed = True
+    if "16.1 years" not in rendered:
+        print("  ERROR: the heating results should show the with-Predbat payback period")
+        failed = True
+    if "£5,500" not in rendered:
+        print("  ERROR: the heating results should show the net capital after the grant")
+        failed = True
+
+    print("Test: a scenario the heat pump loses money on is not shown as a payback")
+    losing = heat_results()
+    losing["annual"]["heat"]["scenarios"]["no_pvbat"]["annual_saving_p"] = -5000.0
+    losing["annual"]["heat"]["payback"]["scenarios"]["no_pvbat"] = {"capital_gbp": 5500.0, "annual_saving_gbp": -50.0, "pays_back": False, "years": None}
+    rendered = page._render_heat(losing)
+    if "does not pay back" not in rendered:
+        print("  ERROR: a losing scenario should say it does not pay back")
+        failed = True
+
+    print("Test: an unavailable heat block renders its reason rather than an empty table")
+    unavailable = sample_run_results()
+    unavailable["annual"]["heat"] = {"available": False, "reason": "No month produced a usable heat pump result.", "summary": {}, "costs": {}}
+    rendered = page._render_heat(unavailable)
+    if "No month produced a usable heat pump result." not in rendered:
+        print("  ERROR: an unavailable heat block should render its reason")
+        failed = True
+
+    print("Test: keeping the gas supply is explained rather than silently ignored")
+    kept = heat_results()
+    kept["annual"]["heat"]["summary"]["remove_gas_supply"] = False
+    kept["annual"]["heat"]["gas_avoided_p"] = 76800.0
+    rendered = page._render_heat(kept)
+    if "keeping the gas supply" not in rendered:
+        print("  ERROR: keeping the gas supply should be spelled out in the results")
+        failed = True
+
+    if failed:
+        print("**** ERROR: web_annual heating tests failed ****")
     return failed

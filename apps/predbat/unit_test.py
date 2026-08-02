@@ -88,6 +88,7 @@ from tests.test_web_annual import (
     test_web_annual_error_isolation,
     test_web_annual_form,
     test_web_annual_pages,
+    test_web_annual_heat,
     test_web_annual_plan_route,
     test_web_annual_post_numeric_coercion,
     test_web_annual_results,
@@ -196,11 +197,12 @@ from tests.test_savings_stability import test_savings_stability
 from tests.test_calculate_yesterday import test_calculate_yesterday
 from tests.test_load_today_comparison import test_load_today_comparison
 from tests.test_annual_config import test_annual_config
+from tests.test_annual_heat import test_annual_heat
 from tests.test_annual_bootstrap import test_annual_bootstrap
 from tests.test_annual_sampling import test_annual_sampling
 from tests.test_annual_scenarios import test_annual_scenarios
 from tests.test_annual_results import test_annual_results
-from tests.test_annual_integration import test_annual_integration
+from tests.test_annual_integration import test_annual_integration, test_annual_heat_integration
 from tests.test_annual_cli import test_annual_cli, test_annual_cli_machine, test_annual_cli_machine_end_to_end
 from tests.test_annual_job import test_annual_job
 from tests.test_tariff_catalogue import test_tariff_catalogue
@@ -353,6 +355,7 @@ def main():
         ("web_annual_post_numeric_coercion", test_web_annual_post_numeric_coercion, "Annual web tab posted-form numeric coercion tests", False),
         ("web_annual_plan_route", test_web_annual_plan_route, "Annual web tab captured-plan route tests", False),
         ("web_annual_pages", test_web_annual_pages, "Annual web tab config/viewer/compare page split and nav tests", False),
+        ("web_annual_heat", test_web_annual_heat, "Annual web tab heat pump / gas heating section tests", False),
         ("web_history_table", run_web_history_table_tests, "Web /entity history table bucketing tests", False),
         ("web_charts", run_web_charts_tests, "Web chart rendering tests (percent/special-character units)", False),
         ("web_chart_grouping", run_web_chart_grouping_tests, "Web /entity chart numeric vs timeline grouping tests", False),
@@ -480,11 +483,13 @@ def main():
         ("optimise_swap_charge", run_optimise_swap_charge_tests, "Optimise pairwise charge-window swap tests", False),
         ("debug_cases", run_debug_cases, "Debug case file tests", True),
         ("annual_config", test_annual_config, "Annual prediction config validation tests", False),
+        ("annual_heat", test_annual_heat, "Annual prediction heat pump / gas boiler model tests", False),
         ("annual_bootstrap", test_annual_bootstrap, "Annual prediction bootstrap and state reset tests", False),
         ("annual_sampling", test_annual_sampling, "Annual prediction sample selection tests", False),
         ("annual_scenarios", test_annual_scenarios, "Annual prediction scenario helper tests", False),
         ("annual_results", test_annual_results, "Annual prediction results assembly tests", False),
         ("annual_integration", test_annual_integration, "Annual prediction integration tests", True),
+        ("annual_heat_integration", test_annual_heat_integration, "Annual prediction heat pump integration tests", True),
         ("annual_cli", test_annual_cli, "Annual prediction CLI output tests", False),
         ("annual_cli_machine", test_annual_cli_machine, "Annual CLI machine mode tests", False),
         ("annual_cli_machine_end_to_end", test_annual_cli_machine_end_to_end, "Annual CLI machine mode end-to-end tests", False),
