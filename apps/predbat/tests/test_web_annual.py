@@ -23,7 +23,7 @@ from annual import RESULTS_SCHEMA_VERSION, AnnualConfigError, validate_config
 from annual_store import list_runs, load_run, save_run
 from tariff_catalogue import CUSTOM_ID
 from web import WebInterface
-from web_annual import DEFAULT_CONFIG, AnnualPage, _json_for_script
+from web_annual import DEFAULT_CONFIG, UK_TEMPERATURE_MEAN_C, AnnualPage, _json_for_script
 
 
 class FakeRequest:
@@ -2432,4 +2432,127 @@ def test_web_annual_heat(my_predbat):
 
     if failed:
         print("**** ERROR: web_annual heating tests failed ****")
+    return failed
+
+
+# The COP and weather-compensation curves from a real Daikin install, as they appear in a
+# working predheat block. Used rather than round numbers so the arithmetic is exercised
+# against something with the awkward shape real curves have.
+PREDHEAT_COP_CURVE = {-20: 2.10, -18: 2.15, -16: 2.2, -14: 2.25, -12: 2.3, -10: 2.4, -8: 2.5, -6: 2.6, -4: 2.7, -2: 2.8, 0: 2.9, 2: 3.1, 4: 3.3, 6: 3.6, 8: 3.8, 10: 3.9, 12: 4.1, 14: 4.3, 16: 4.3, 18: 4.3, 20: 4.3}
+PREDHEAT_COMPENSATION = {-20: 45.0, 0: 45.0, 5: 36.0, 10: 30.0, 20: 30.0}
+
+
+def test_web_annual_predheat_prefill(my_predbat):
+    """Verify the heating section is prefilled from Predbat's own Predheat configuration."""
+    failed = False
+    print("**** Testing web_annual Predheat prefill ****")
+
+    page = make_page(my_predbat)
+    saved_args = copy.deepcopy(my_predbat.args)
+    try:
+        print("Test: with no predheat block the heating section is left at the example values")
+        my_predbat.args.pop("predheat", None)
+        if page._heat_from_args() is not None:
+            print("  ERROR: no predheat block should prefill nothing, got {}".format(page._heat_from_args()))
+            failed = True
+        form = page.render_form(page.prefill_config())
+        if "Predbat already has you on a heat pump" in form:
+            print("  ERROR: the heat pump banner must not show without a predheat block")
+            failed = True
+
+        print("Test: a COP curve collapses to a seasonal figure below its own maximum")
+        seasonal = page._seasonal_cop(PREDHEAT_COP_CURVE)
+        if seasonal is None:
+            print("  ERROR: the COP curve should produce a seasonal figure")
+            failed = True
+        else:
+            # Below the curve's 4.3 ceiling, because heat is delivered when it is cold, but
+            # comfortably above its cold-end values, because -20C essentially never happens.
+            if not 3.2 < seasonal < 3.8:
+                print("  ERROR: seasonal COP for this real Daikin curve should land around 3.5, got {}".format(seasonal))
+                failed = True
+            if seasonal >= max(PREDHEAT_COP_CURVE.values()):
+                print("  ERROR: the seasonal COP must be below the curve's maximum, got {}".format(seasonal))
+                failed = True
+
+        print("Test: an unreachable cold tail does not drag the seasonal COP down")
+        # The bug this pins: weighting by heat demand alone treats a -40C hour as arriving
+        # as often as a +5C one, so bolting a deep cold tail onto a curve would wreck the
+        # figure. Frequency weighting has to make the tail nearly irrelevant in the UK.
+        with_tail = dict(PREDHEAT_COP_CURVE)
+        with_tail.update({-40: 1.2, -35: 1.3, -30: 1.5, -25: 1.8})
+        tailed = page._seasonal_cop(with_tail)
+        if abs(tailed - seasonal) > 0.05:
+            print("  ERROR: an unreachable cold tail moved the seasonal COP from {} to {}".format(seasonal, tailed))
+            failed = True
+
+        print("Test: the seasonal COP is a harmonic (heat over electricity) mean, not arithmetic")
+        # Same temperature either side of the mean so the frequency weights match, leaving
+        # only the harmonic combination to distinguish the two.
+        pair = {UK_TEMPERATURE_MEAN_C - 4.0: 2.0, UK_TEMPERATURE_MEAN_C - 4.0 - 1e-9: 2.0}
+        if page._seasonal_cop(pair) is None or abs(page._seasonal_cop(pair) - 2.0) > 1e-6:
+            print("  ERROR: two identical points should give exactly that COP, got {}".format(page._seasonal_cop(pair)))
+            failed = True
+        arithmetic = page._seasonal_cop({5.0: 2.0, 5.0 - 1e-9: 6.0})
+        if arithmetic is None or not 2.9 < arithmetic < 3.1:
+            print("  ERROR: COP 2 and 6 at the same temperature should combine harmonically to 3.0, got {}".format(arithmetic))
+            failed = True
+
+        print("Test: an empty or unusable curve prefills nothing rather than a wrong number")
+        for curve in [None, {}, {"nonsense": "x"}, {20: 3.0}]:
+            if page._seasonal_cop(curve) is not None:
+                print("  ERROR: curve {} should not produce a seasonal COP, got {}".format(curve, page._seasonal_cop(curve)))
+                failed = True
+
+        print("Test: the weather-compensation curve gives a heat-weighted flow temperature")
+        flow = page._seasonal_flow_temp(PREDHEAT_COMPENSATION)
+        if flow is None or not 30.0 <= flow <= 45.0:
+            print("  ERROR: the flow temperature should land between the curve's own bounds, got {}".format(flow))
+            failed = True
+
+        print("Test: a predheat block in pump mode prefills SCOP and flow, and warns about double counting")
+        my_predbat.args["predheat"] = {"mode": "pump", "heat_pump_efficiency": PREDHEAT_COP_CURVE, "weather_compensation": PREDHEAT_COMPENSATION}
+        prefilled = page._heat_from_args()
+        if not prefilled or prefilled.get("predheat_mode") != "pump":
+            print("  ERROR: predheat mode should be reported as pump, got {}".format(prefilled))
+            failed = True
+        elif "scop" not in prefilled or "flow_temp_c" not in prefilled:
+            print("  ERROR: both SCOP and flow temperature should be prefilled, got {}".format(prefilled))
+            failed = True
+
+        config = page.prefill_config()
+        if "predheat_mode" in (config.get("heat") or {}):
+            print("  ERROR: predheat_mode is live state and must not be stored in the saved config")
+            failed = True
+        if abs((config["heat"] or {}).get("scop", 0) - prefilled["scop"]) > 1e-6:
+            print("  ERROR: the prefilled SCOP should reach the config, got {}".format(config.get("heat")))
+            failed = True
+
+        print("Test: the comparison is NOT switched on by the prefill")
+        if config["heat"].get("enable"):
+            print("  ERROR: prefilling must not enable the heat pump comparison - it doubles the run time")
+            failed = True
+
+        print("Test: the form warns that an existing heat pump is already inside the load figure")
+        form = page.render_form(config)
+        for fragment in ["Predbat already has you on a heat pump", "already includes", "counted twice"]:
+            if fragment not in form:
+                print("  ERROR: the form is missing the double-counting warning fragment '{}'".format(fragment))
+                failed = True
+
+        print("Test: a gas-mode predheat block prefills without the heat pump warning")
+        my_predbat.args["predheat"] = {"mode": "gas"}
+        form = page.render_form(page.prefill_config())
+        if "Predbat already has you on a heat pump" in form:
+            print("  ERROR: a gas-mode predheat block must not claim a heat pump is installed")
+            failed = True
+        if "mode: gas" not in form:
+            print("  ERROR: a gas-mode predheat block should still be reflected in the form")
+            failed = True
+    finally:
+        my_predbat.args.clear()
+        my_predbat.args.update(saved_args)
+
+    if failed:
+        print("**** ERROR: web_annual Predheat prefill tests failed ****")
     return failed

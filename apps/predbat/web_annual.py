@@ -15,6 +15,7 @@ the prospective-buyer path the tool exists to serve.
 
 import calendar
 import copy
+import math
 import datetime
 import html
 import json
@@ -28,6 +29,7 @@ from aiohttp import web
 from annual import RESULTS_SCHEMA_VERSION, AnnualConfigError, validate_config
 from annual_costs import DEFAULT_COSTS, build_costs, resolve_costs
 from annual_heat import (
+    MAX_COP,
     DEFAULT_ANNUAL_GAS_KWH,
     DEFAULT_BASE_TEMP_C,
     DEFAULT_BOILER_EFFICIENCY,
@@ -100,6 +102,12 @@ DEFAULT_HEAT = {
     "cylinder_standing_loss_kwh_per_day": DEFAULT_CYLINDER_STANDING_LOSS_KWH,
 }
 
+# UK hourly outdoor temperature, roughly. Used ONLY to weight a Predheat curve into a
+# single seasonal figure for the form's prefill - the run itself uses the modelled year's
+# real hourly temperatures and never touches these. See _heat_weighted_curve().
+UK_TEMPERATURE_MEAN_C = 10.5
+UK_TEMPERATURE_SD_C = 5.5
+
 CONFIG_FILENAME = "annual.yaml"
 
 
@@ -143,7 +151,7 @@ class AnnualPage:
         # _consume_terminal_state).
         self._running_config = None
 
-    def _arg(self, name, default=None, indirect=True, combine=False):
+    def _arg(self, name, default=None, indirect=True, combine=False, domain=None):
         """Read one configuration value from the in-memory args dictionary.
 
         Never reads apps.yaml from disk: the file may not exist at all in some
@@ -157,6 +165,10 @@ class AnnualPage:
         real value - see the call sites below for the field this bit precisely.
         """
         try:
+            # domain is how get_arg() reaches a nested block such as predheat's, which
+            # lives under its own key in apps.yaml rather than beside the top-level args.
+            if domain:
+                return self.base.get_arg(name, default, indirect=indirect, combine=combine, domain=domain)
             return self.base.get_arg(name, default, indirect=indirect, combine=combine)
         except Exception:
             return default
@@ -296,6 +308,17 @@ class AnnualPage:
         if dno_region:
             config["tariff"]["dno_region"] = dno_region
 
+        # Predheat already describes this house's heating system, so the heating section
+        # starts from it rather than from the generic example. Left switched off - see
+        # _heat_from_args().
+        from_predheat = self._heat_from_args()
+        if from_predheat:
+            # predheat_mode is live state, not configuration: it is read fresh in
+            # _render_heat_fieldset() every time the form is drawn, so storing a stale
+            # copy of it in annual.yaml would only ever be a way to be wrong later.
+            prefill = {key: value for key, value in from_predheat.items() if key != "predheat_mode"}
+            config["heat"] = dict(config.get("heat") or DEFAULT_HEAT, **prefill)
+
         api_key, account_id = self._octopus_from_args()
         if api_key and account_id:
             # Both are needed to download consumption - a key without an account (or the
@@ -313,6 +336,108 @@ class AnnualPage:
             config["load"] = {"octopus": {"api_key": str(api_key), "account_id": str(account_id)}, "shape": config["load"].get("shape", "flat")}
 
         return config
+
+    @staticmethod
+    def _heat_weighted_curve(curve, base_temp_c=DEFAULT_BASE_TEMP_C):
+        """Collapse an outdoor-temperature curve to a single heat-weighted figure.
+
+        Predheat holds both its COP curve and its weather-compensation curve as
+        ``{outdoor C: value}``. Turning one into a single seasonal number needs each point
+        weighted by how much of the year's heat is actually delivered at that temperature,
+        which is two things multiplied together:
+
+        * how much heat is needed there - proportional to ``base - outdoor``; and
+        * **how often that temperature happens at all**.
+
+        The second is easy to forget and gets the answer badly wrong without it. A Predheat
+        curve is tabulated at evenly spaced temperatures, typically -20C to +20C, so
+        weighting by heat demand alone treats a -20C hour as arriving as often as a +5C one.
+        In the UK it does not, and the result is a seasonal COP dragged down towards the
+        bottom of the curve - 2.48 rather than 3.15 for a real Daikin curve, which would
+        have quietly understated every heat pump prefilled from it.
+
+        Frequency is approximated by a normal distribution over UK hourly outdoor
+        temperatures (``UK_TEMPERATURE_MEAN_C``/``UK_TEMPERATURE_SD_C``). That is only a
+        prefill heuristic - the run itself uses the year's real hourly temperatures - so an
+        approximation is appropriate here, where the alternative is a network round trip
+        every time the form is drawn.
+
+        Returns ``(total_weight, [(weight, value), ...])``, or None for an unusable curve.
+        """
+        points = []
+        for temperature, value in (curve or {}).items():
+            try:
+                points.append((float(temperature), float(value)))
+            except (TypeError, ValueError):
+                continue
+
+        weighted = []
+        for temperature, value in points:
+            if value <= 0:
+                continue
+            demand = max(0.0, base_temp_c - temperature)
+            if demand <= 0:
+                continue
+            spread = (temperature - UK_TEMPERATURE_MEAN_C) / UK_TEMPERATURE_SD_C
+            frequency = math.exp(-0.5 * spread * spread)
+            weight = demand * frequency
+            if weight > 0:
+                weighted.append((weight, value))
+
+        if not weighted:
+            return None
+        total_weight = sum(weight for weight, _ in weighted)
+        return total_weight, weighted
+
+    @classmethod
+    def _seasonal_cop(cls, curve):
+        """Return the heat-weighted seasonal COP of a Predheat COP curve, or None."""
+        result = cls._heat_weighted_curve(curve)
+        if not result:
+            return None
+        total_weight, weighted = result
+        electricity = sum(weight / value for weight, value in weighted)
+        return (total_weight / electricity) if electricity > 0 else None
+
+    @classmethod
+    def _seasonal_flow_temp(cls, curve):
+        """Return the heat-weighted mean flow temperature of a weather-compensation curve, or None."""
+        result = cls._heat_weighted_curve(curve)
+        if not result:
+            return None
+        total_weight, weighted = result
+        return sum(weight * value for weight, value in weighted) / total_weight
+
+    def _heat_from_args(self):
+        """Return heating settings taken from Predbat's own Predheat config, or None.
+
+        Predheat already describes this house's heating system - its measured COP curve,
+        its weather-compensation flow temperatures and whether it runs on gas or a heat
+        pump - so asking the user to retype any of it would be both tedious and a chance
+        to disagree with the system Predbat is actually modelling.
+
+        Deliberately does NOT switch the comparison on. Enabling it roughly doubles how
+        long a run takes, which has to stay the user's decision; this only fills the boxes
+        so that when they do tick it, the figures already describe their own system.
+        """
+        mode = self._arg("mode", None, domain="predheat")
+        if not mode:
+            return None
+
+        heat = {"predheat_mode": str(mode)}
+
+        cop = self._seasonal_cop(self._arg("heat_pump_efficiency", {}, domain="predheat"))
+        if cop:
+            # Clamped to the range the annual validator accepts, so a curve that implies
+            # something outside it prefills a usable value rather than a form that will
+            # not submit.
+            heat["scop"] = round(min(MAX_COP, max(1.0, cop)), 2)
+
+        flow = self._seasonal_flow_temp(self._arg("weather_compensation", {}, domain="predheat"))
+        if flow:
+            heat["flow_temp_c"] = round(min(70.0, max(20.0, flow)), 1)
+
+        return heat
 
     def _octopus_from_args(self):
         """Return the live instance's (api_key, account_id), or (None, None) if either is unset.
@@ -631,8 +756,25 @@ class AnnualPage:
         """
         heat = config.get("heat") or {}
         enabled = bool(heat.get("enable"))
+        # Read live rather than from the saved config: a config saved before the heat pump
+        # went in, or on a different machine, must not decide what this says about the
+        # system Predbat is looking at right now.
+        predheat_mode = (self._heat_from_args() or {}).get("predheat_mode")
 
         text = "<fieldset><legend>Heating</legend>\n"
+
+        # A house whose Predheat is already in heat pump mode has one on the wall today,
+        # which inverts what this comparison means AND makes double-counting very easy:
+        # its consumption is already inside whatever annual electricity figure the load
+        # section holds, so adding a modelled heat pump on top counts it twice. Said here,
+        # beside the tick box, rather than left to be discovered in the results.
+        if predheat_mode == "pump":
+            text += '<p class="annual-banner"><strong>Predbat already has you on a heat pump</strong> (Predheat <code>mode: pump</code>), and the SCOP and flow temperature below have been filled in from its own curves. '
+            text += "Two things follow. Your annual electricity figure in the Load section almost certainly <strong>already includes</strong> the heat pump, so subtract it there before ticking this box, or the heat pump is counted twice. "
+            text += "And the comparison then reads backwards from the usual one: it is telling you what going <em>back</em> to gas would have cost.</p>\n"
+        elif predheat_mode:
+            text += '<p class="annual-note">Predheat is set to <code>mode: {}</code>, so the figures below start from your own heating configuration where Predbat knows them.</p>\n'.format(html.escape(str(predheat_mode), quote=True))
+
         text += '<div class="annual-field"><label for="heat_enable">Compare a heat pump against my gas boiler</label><input type="checkbox" id="heat_enable" name="heat_enable" onchange="annualHeatChanged()" {}></div>\n'.format("checked" if enabled else "")
         text += '<p class="annual-note">Models a year of heating from the same real weather the solar uses, then prices it both ways: gas today, or a heat pump running as ordinary electrical load your PV, battery and Predbat can help with.</p>\n'
         text += '<p class="annual-note"><strong>This roughly doubles how long a run takes</strong>, because every scenario is planned twice.</p>\n'
