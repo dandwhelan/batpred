@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 import pytz
 
 from annual_costs import build_costs, build_heat_costs, build_heat_payback, build_payback, resolve_costs
-from annual_heat import AnnualHeatError, HeatModel, HeatPumpLoadProfile, resolve_heat
+from annual_heat import AnnualHeatError, HeatModel, HeatPumpLoadProfile, HeatPumpRemovedLoadProfile, resolve_heat
 from annual_load import build_load_forecast, OctopusConsumptionLoadProfile, SyntheticLoadProfile
 from annual_tariff import AnnualTariff
 from annual_weather import AnnualWeather, resolve_postcode, temperature_by_local_day
@@ -1390,6 +1390,10 @@ class AnnualPredictor:
         # heat pump branch below tests on.
         self.heat_model = None
         self.heat_load_source = None
+        # The house WITHOUT the heat pump - the common baseline both legs are built from.
+        # Equal to load_source for a prospective buyer; derived by subtraction for an
+        # existing owner. See run().
+        self.gas_load_source = None
         self.caveats = []
 
     async def _resolve_location(self, weather_fetch):
@@ -1597,7 +1601,17 @@ class AnnualPredictor:
         self.predbat = create_headless_predbat(self.work_dir, self.config["timezone"], self.log)
         self.load_source = await self._build_load_source()
         if self.heat_model:
-            self.heat_load_source = HeatPumpLoadProfile(self.load_source, self.heat_model)
+            # Both legs are built from a common "house without the heat pump" baseline, so
+            # they differ by exactly the heat pump and nothing else. For a prospective
+            # buyer that baseline IS the configured load. For an existing owner the
+            # configured load already contains the heat pump, so the baseline has to be
+            # recovered by subtracting it back out first - otherwise it is counted twice,
+            # which is the single easiest way to get a wrong answer out of this tool.
+            if self.heat_model.settings["existing_heat_pump"]:
+                self.gas_load_source = HeatPumpRemovedLoadProfile(self.load_source, self.heat_model)
+            else:
+                self.gas_load_source = self.load_source
+            self.heat_load_source = HeatPumpLoadProfile(self.gas_load_source, self.heat_model)
             self.caveats.append(
                 "The heat pump comparison runs every scenario twice - once on gas, once on the heat pump - so the heat pump's extra electricity is what remains after PV, the battery and Predbat, not its consumption at an average rate. Gas is priced at a flat {} p/kWh with no seasonal variation.".format(self.heat_model.settings["gas_p_per_kwh"])
             )
@@ -1606,6 +1620,10 @@ class AnnualPredictor:
                     year, self.heat_model.settings["scop"], round(self.heat_model.realised_scop(), 2)
                 )
             )
+            if self.config["heat"].get("existing_heat_pump"):
+                self.caveats.append(
+                    "You already have a heat pump, so your annual electricity figure is taken as INCLUDING it: the modelled heat pump is subtracted back out to recover the house without it, and both legs are built from that baseline. The comparison therefore reads as what going back to a gas boiler would cost, not whether to fit a heat pump."
+                )
             self.caveats.append("The heat pump is modelled as ordinary electrical load on your existing tariff. Switching to a heat pump tariff, or letting Predbat shift the space heating itself, is not modelled and would change the answer.")
 
             heat_settings = self.heat_model.settings
@@ -1676,7 +1694,7 @@ class AnnualPredictor:
                 midnight_utc = zone.localize(datetime(day.year, day.month, day.day)).astimezone(pytz.utc)
                 day_plans = [] if self.config["debug"] else None
                 try:
-                    result = run_day(self.predbat, self.config, self.weather, self.tariff, self.load_source, day, midnight_utc, plans=day_plans)
+                    result = run_day(self.predbat, self.config, self.weather, self.tariff, self.gas_load_source or self.load_source, day, midnight_utc, plans=day_plans)
                     # The heat pump leg is the SAME sampled day re-run with the heat pump's
                     # electricity added to the household load. Both legs are run inside one
                     # try so a day that fails either is dropped from both: the whole heating
@@ -1761,6 +1779,19 @@ class AnnualPredictor:
                 row["plans"] = month_plans
             months.append(row)
             completed += 1
+
+        # A heat pump that will not fit inside the stated household consumption is a real
+        # config error - the baseline gets floored at zero and the gas leg is then billed
+        # for more electricity than it should be - so the shortfall is surfaced rather
+        # than left inside HeatPumpRemovedLoadProfile where nobody would see it.
+        residual = getattr(self.gas_load_source, "unsubtracted_kwh", 0.0)
+        if residual > 1.0:
+            residual_message = (
+                "Your heat pump does not fit inside the annual electricity figure you gave: {:.0f} kWh of it could not be subtracted, because the household load was already at zero at those times. "
+                "Check that the Load figure really includes the heat pump, and that the heat pump's own consumption is not overstated.".format(residual)
+            )
+            self.log("Warn: Annual: {}".format(residual_message))
+            self.caveats.append(residual_message)
 
         self.caveats.extend(self._tariff_fallback_caveats(self.tariff.fallback_months, self.tariff.unpaid_export_months, year))
 

@@ -30,6 +30,8 @@ from annual import RESULTS_SCHEMA_VERSION, AnnualConfigError, validate_config
 from annual_costs import DEFAULT_COSTS, build_costs, resolve_costs
 from annual_heat import (
     MAX_COP,
+    DEFAULT_HEAT_PUMP_KWH,
+    DEFAULT_WATER_HEAT_PUMP_KWH,
     DEFAULT_ANNUAL_GAS_KWH,
     DEFAULT_BASE_TEMP_C,
     DEFAULT_BOILER_EFFICIENCY,
@@ -100,6 +102,10 @@ DEFAULT_HEAT = {
     "water_charges_per_day": DEFAULT_WATER_CHARGES_PER_DAY,
     "dhw_kw": DEFAULT_DHW_KW,
     "cylinder_standing_loss_kwh_per_day": DEFAULT_CYLINDER_STANDING_LOSS_KWH,
+    "existing_heat_pump": False,
+    "heat_pump_kwh": DEFAULT_HEAT_PUMP_KWH,
+    "water_heat_pump_kwh": DEFAULT_WATER_HEAT_PUMP_KWH,
+    "water_cop": 0.0,
 }
 
 # UK hourly outdoor temperature, roughly. Used ONLY to weight a Predheat curve into a
@@ -737,6 +743,7 @@ class AnnualPage:
         text += self._number_field("heat_hot_water_target_c", "Cylinder target temperature", heat_advanced.get("hot_water_target_c", DEFAULT_HEAT["hot_water_target_c"]), suffix="°C")
         text += self._number_field("heat_cold_mains_c", "Cold mains temperature", heat_advanced.get("cold_mains_c", DEFAULT_HEAT["cold_mains_c"]), suffix="°C")
         text += self._number_field("heat_dhw_kw", "Heat pump output into the cylinder", heat_advanced.get("dhw_kw", DEFAULT_HEAT["dhw_kw"]), suffix="kW")
+        text += self._number_field("heat_water_cop", "Hot water COP (0 = work it out from the flow temperature)", heat_advanced.get("water_cop", DEFAULT_HEAT["water_cop"]))
         text += self._number_field("heat_cylinder_standing_loss_kwh_per_day", "Cylinder standing loss", heat_advanced.get("cylinder_standing_loss_kwh_per_day", DEFAULT_HEAT["cylinder_standing_loss_kwh_per_day"]), suffix="kWh/day")
         text += "</details>\n"
 
@@ -780,10 +787,23 @@ class AnnualPage:
         text += '<p class="annual-note"><strong>This roughly doubles how long a run takes</strong>, because every scenario is planned twice.</p>\n'
         text += '<div id="heat-fields" style="display:{}">\n'.format("block" if enabled else "none")
 
+        existing = bool(heat.get("existing_heat_pump", predheat_mode == "pump"))
+        text += '<div class="annual-field"><label for="heat_existing_heat_pump">I already have a heat pump</label><input type="checkbox" id="heat_existing_heat_pump" name="heat_existing_heat_pump" onchange="annualHeatChanged()" {}></div>\n'.format("checked" if existing else "")
+        text += '<p class="annual-note">Tick this if the heat pump is already fitted. Your annual electricity above is then taken as <strong>including</strong> it, and the comparison tells you what going back to a gas boiler would cost. Leave it clear if you are on gas and weighing one up.</p>\n'
+
+        text += '<div id="heat-existing" style="display:{}">\n'.format("block" if existing else "none")
+        text += self._number_field("heat_heat_pump_kwh", "Electricity the heat pump uses per year", heat.get("heat_pump_kwh", DEFAULT_HEAT["heat_pump_kwh"]), suffix="kWh")
+        text += '<p class="annual-note">Measured, from your heat pump\'s own energy sensor. This replaces the gas bill as the figure the whole heating model is anchored on.</p>\n'
+        text += self._number_field("heat_water_heat_pump_kwh", "…of which hot water", heat.get("water_heat_pump_kwh", DEFAULT_HEAT["water_heat_pump_kwh"]), suffix="kWh")
+        text += '<p class="annual-note">Roughly the electricity for one cylinder charge times how often you charge it. A 180 L charge is typically 2.5–3 kWh.</p>\n'
+        text += "</div>\n"
+
+        text += '<div id="heat-gasbill" style="display:{}">\n'.format("none" if existing else "block")
         text += self._number_field("heat_annual_gas_kwh", "Gas used per year", heat.get("annual_gas_kwh", DEFAULT_HEAT["annual_gas_kwh"]), suffix="kWh")
         text += '<p class="annual-note">From your gas bill or your smart meter. The UK average is about 11,500 kWh.</p>\n'
         text += self._number_field("heat_water_gas_kwh", "…of which hot water and cooking", heat.get("water_gas_kwh", DEFAULT_HEAT["water_gas_kwh"]), suffix="kWh")
         text += '<p class="annual-note">The part that does not depend on the weather, so it is spread evenly through the year rather than following the cold. About 2,500 kWh is typical.</p>\n'
+        text += "</div>\n"
         text += self._number_field("heat_gas_p_per_kwh", "Gas unit rate", heat.get("gas_p_per_kwh", DEFAULT_HEAT["gas_p_per_kwh"]), suffix="p/kWh")
         text += self._number_field("heat_gas_standing_charge_p_per_day", "Gas standing charge", heat.get("gas_standing_charge_p_per_day", DEFAULT_HEAT["gas_standing_charge_p_per_day"]), suffix="p/day")
         text += self._number_field("heat_scop", "Heat pump SCOP", heat.get("scop", DEFAULT_HEAT["scop"]))
@@ -942,6 +962,7 @@ class AnnualPage:
             "enable": postdata.get("heat_enable") is not None,
             "remove_gas_supply": postdata.get("heat_remove_gas_supply") is not None,
             "smart_hot_water": postdata.get("heat_smart_hot_water") is not None,
+            "existing_heat_pump": postdata.get("heat_existing_heat_pump") is not None,
         }
         for key, default in [
             ("annual_gas_kwh", DEFAULT_HEAT["annual_gas_kwh"]),
@@ -960,6 +981,9 @@ class AnnualPage:
             ("water_charges_per_day", DEFAULT_HEAT["water_charges_per_day"]),
             ("dhw_kw", DEFAULT_HEAT["dhw_kw"]),
             ("cylinder_standing_loss_kwh_per_day", DEFAULT_HEAT["cylinder_standing_loss_kwh_per_day"]),
+            ("heat_pump_kwh", DEFAULT_HEAT["heat_pump_kwh"]),
+            ("water_heat_pump_kwh", DEFAULT_HEAT["water_heat_pump_kwh"]),
+            ("water_cop", DEFAULT_HEAT["water_cop"]),
         ]:
             heat[key] = numeric("heat_{}".format(key), default)
         config["heat"] = heat
@@ -2047,6 +2071,14 @@ function annualHeatChanged() {
   // on screen invites someone to fill in a gas bill that is then never used.
   var fields = document.getElementById('heat-fields');
   if (fields) { fields.style.display = document.getElementById('heat_enable').checked ? 'block' : 'none'; }
+  // An existing owner is anchored on measured electricity; a prospective one on a gas
+  // bill. Only one of the two makes sense at a time, and showing both invites someone
+  // to fill in the one that is then ignored.
+  var existing = document.getElementById('heat_existing_heat_pump');
+  var existingBox = document.getElementById('heat-existing');
+  var gasBox = document.getElementById('heat-gasbill');
+  if (existing && existingBox) { existingBox.style.display = existing.checked ? 'block' : 'none'; }
+  if (existing && gasBox) { gasBox.style.display = existing.checked ? 'none' : 'block'; }
 }
 function annualCancel() { fetch('./annual_cancel', {method: 'POST'}); }
 function annualSolarModeChanged(index) {

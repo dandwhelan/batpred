@@ -84,6 +84,12 @@ DEFAULT_DHW_KW = 3.0
 # efficiency figure so that shifting a charge earlier is not silently free.
 DEFAULT_CYLINDER_STANDING_LOSS_KWH = 1.0
 
+# Measured heat pump electricity for a year, and the hot water share of it. Only used in
+# existing_heat_pump mode, where they anchor the model in place of a gas bill. Roughly a
+# four-bedroom UK house with a well-run heat pump.
+DEFAULT_HEAT_PUMP_KWH = 4000.0
+DEFAULT_WATER_HEAT_PUMP_KWH = 900.0
+
 # Specific heat capacity of water, kJ per kg per K, for the cylinder charge size.
 WATER_SPECIFIC_HEAT_KJ = 4.186
 SECONDS_PER_HOUR = 3600.0
@@ -194,11 +200,43 @@ def resolve_heat(raw):
         "water_charges_per_day": _number(raw, "water_charges_per_day", DEFAULT_WATER_CHARGES_PER_DAY, minimum=1, maximum=3, integer=True),
         "dhw_kw": _number(raw, "dhw_kw", DEFAULT_DHW_KW, minimum=0, exclusive_minimum=True),
         "cylinder_standing_loss_kwh_per_day": _number(raw, "cylinder_standing_loss_kwh_per_day", DEFAULT_CYLINDER_STANDING_LOSS_KWH, minimum=0),
+        # Which way round the comparison runs. False (the default) is the prospective
+        # buyer: on gas today, wondering about a heat pump, so the heat pump's electricity
+        # is ADDED to the household load. True is an existing owner: the heat pump is
+        # already in the meter reading, so its electricity is SUBTRACTED to recover the
+        # house without it, and the gas boiler becomes the hypothetical.
+        "existing_heat_pump": _as_bool(raw.get("existing_heat_pump", False)),
+        # Measured heat pump electricity for the year, and how much of that is hot water.
+        # Only read in existing_heat_pump mode, where they replace the gas bill as the
+        # thing the whole heating model is anchored on.
+        # A measured hot water COP, overriding the one derived from the cylinder's flow
+        # temperature. Zero means "derive it", matching how the quoted costs treat zero.
+        # Worth having because the derived figure is sensitive to the SPACE heating flow
+        # temperature the quality factor was calibrated at: a system running 35C radiators
+        # implies a modest machine, which then looks poor at a 55C cylinder. Anyone who has
+        # watched a full cylinder charge on a meter knows this number far better than the
+        # model can infer it.
+        "water_cop": _number(raw, "water_cop", 0.0, minimum=0, maximum=MAX_COP),
+        "heat_pump_kwh": _number(raw, "heat_pump_kwh", DEFAULT_HEAT_PUMP_KWH, minimum=0),
+        "water_heat_pump_kwh": _number(raw, "water_heat_pump_kwh", DEFAULT_WATER_HEAT_PUMP_KWH, minimum=0),
         # Whether the gas supply is cut off completely. A household keeping a gas hob
         # still pays the standing charge, and that is often most of the remaining bill,
         # so it must not be assumed away.
         "remove_gas_supply": _as_bool(raw.get("remove_gas_supply", True)),
     }
+
+    if settings["existing_heat_pump"]:
+        # An existing owner has a measured electricity figure and no gas bill to quote, so
+        # the gas side is DERIVED from the heat the pump delivers rather than the other way
+        # round. space_heat_kwh/water_heat_kwh are filled in by HeatModel once the COP curve
+        # has been calibrated - see HeatModel._derive_existing_heat().
+        if settings["water_heat_pump_kwh"] > settings["heat_pump_kwh"]:
+            raise AnnualHeatError(
+                "annual.heat.water_heat_pump_kwh ({}) cannot exceed heat_pump_kwh ({}): hot water is part of what the heat pump uses, not on top of it".format(settings["water_heat_pump_kwh"], settings["heat_pump_kwh"])
+            )
+        settings["space_heat_kwh"] = None
+        settings["water_heat_kwh"] = None
+        return settings
 
     if settings["water_gas_kwh"] > settings["annual_gas_kwh"]:
         raise AnnualHeatError("annual.heat.water_gas_kwh ({}) cannot exceed annual_gas_kwh ({}): hot water and cooking are part of the gas total, not on top of it".format(settings["water_gas_kwh"], settings["annual_gas_kwh"]))
@@ -302,6 +340,14 @@ class HeatModel:
         if self._year_degree_hours <= 0:
             raise AnnualHeatError("Every hour of {} was at or above the {}C degree-day base temperature, so there is no space heating to model".format(year, self.base_temp_c))
 
+        # Calibrated before the heat figures are derived, because an existing owner's heat
+        # is measured electricity TIMES the COP curve - it cannot be known until the curve
+        # is fixed. The calibration itself only needs the temperature distribution and the
+        # configured SCOP, never a heat total, so there is no circularity here.
+        self.quality = self._calibrate_quality()
+        if settings["existing_heat_pump"]:
+            self._derive_existing_heat()
+
         # Useful hot water delivered to the taps, which is what the GAS side is billed for.
         self.water_heat_per_day_kwh = settings["water_heat_kwh"] / float(self.days_in_year)
         # What the HEAT PUMP has to put into the cylinder: the same useful hot water plus
@@ -318,8 +364,6 @@ class HeatModel:
         # None means "no rates known", which is the fixed-schedule fallback.
         self._plan_rates = None
         self._plan_base_day = None
-
-        self.quality = self._calibrate_quality()
 
         # Scale factor applied to the sampled days of the month currently being run.
         # See set_month_scale() for why this exists.
@@ -382,6 +426,50 @@ class HeatModel:
             return 0.5
         return self.settings["scop"] * weighted_inverse / total_heat
 
+    def _estimate_water_spf(self):
+        """Return the year's average hot water SPF, weighted evenly across the year.
+
+        Hot water is drawn every day regardless of the weather, so every hour of the year
+        gets an equal say - unlike space heating, which is weighted by degree hours. Used
+        only to turn an existing owner's MEASURED hot water electricity into the heat it
+        delivered; the simulation itself still costs every charge at its own hour's COP.
+
+        Deliberately does not use the cylinder's charge schedule, which would be circular:
+        the schedule is sized from the hot water heat this is being used to derive.
+        """
+        total = 0.0
+        count = 0
+        for day, hourly in self.temperatures.items():
+            if day.year != self.year:
+                continue
+            for temperature in hourly:
+                if temperature is None:
+                    continue
+                total += self.water_cop(temperature)
+                count += 1
+        return (total / count) if count else self.settings["scop"]
+
+    def _derive_existing_heat(self):
+        """Fill in space and hot water heat from an existing owner's measured electricity.
+
+        The inverse of the prospective-buyer path: instead of a gas bill telling us how
+        much heat the house needs, a measured heat pump consumption does, multiplied by the
+        efficiency it achieved. Hot water and space heating are converted at their own
+        efficiencies, because they run at different flow temperatures and the split between
+        them is exactly what the user is being asked for.
+        """
+        settings = self.settings
+        water_electricity = settings["water_heat_pump_kwh"]
+        space_electricity = max(0.0, settings["heat_pump_kwh"] - water_electricity)
+
+        settings["water_heat_kwh"] = water_electricity * self._estimate_water_spf()
+        settings["space_heat_kwh"] = space_electricity * self.realised_scop()
+
+        # The gas figures are reported back to the user, so they have to exist in this mode
+        # too - derived from the heat, which is the opposite direction to the gas-first path.
+        settings["annual_gas_kwh"] = settings["space_heat_kwh"] / settings["boiler_efficiency"] + settings["water_heat_kwh"] / settings["water_boiler_efficiency"]
+        settings["water_gas_kwh"] = settings["water_heat_kwh"] / settings["water_boiler_efficiency"]
+
     def space_cop(self, outdoor_c):
         """Return the space-heating COP at the given outdoor temperature."""
         return min(MAX_COP, max(MIN_COP, self.quality * carnot_cop(outdoor_c, self.settings["flow_temp_c"])))
@@ -392,6 +480,12 @@ class HeatModel:
         Same hardware quality as space heating, but against the cylinder's higher flow
         temperature, so it is always the worse of the two.
         """
+        override = self.settings.get("water_cop") or 0.0
+        if override > 0:
+            # A measured figure beats a derived one. Held flat across the year: someone
+            # supplying it has one number, not a curve, and inventing a shape around it
+            # would be inventing information they did not give.
+            return min(MAX_COP, max(MIN_COP, override))
         return min(MAX_COP, max(MIN_COP, self.quality * carnot_cop(outdoor_c, self.settings["water_flow_temp_c"])))
 
     def day_degree_hours(self, day):
@@ -641,9 +735,14 @@ class HeatModel:
             "carnot_quality": round(self.quality, 4),
             "flow_temp_c": self.settings["flow_temp_c"],
             "water_flow_temp_c": self.settings["water_flow_temp_c"],
+            "water_cop": self.settings.get("water_cop", 0.0),
+            "water_spf": round(self._estimate_water_spf(), 3),
             "base_temp_c": self.base_temp_c,
             "water_boiler_efficiency": self.settings["water_boiler_efficiency"],
             "smart_hot_water": self.settings["smart_hot_water"],
+            "existing_heat_pump": self.settings["existing_heat_pump"],
+            "heat_pump_kwh": round(self.settings["heat_pump_kwh"], 3) if self.settings["existing_heat_pump"] else 0.0,
+            "water_heat_pump_kwh": round(self.settings["water_heat_pump_kwh"], 3) if self.settings["existing_heat_pump"] else 0.0,
             "cylinder_volume_l": self.settings["cylinder_volume_l"],
             "hot_water_target_c": self.settings["hot_water_target_c"],
             "water_charges_per_day": self.settings["water_charges_per_day"],
@@ -683,6 +782,70 @@ def _cheapest_start(rates, earliest, latest_end, duration):
             best_total = total
             best_start = start
     return best_start
+
+
+class HeatPumpRemovedLoadProfile:
+    """A load source with a modelled heat pump SUBTRACTED from another source.
+
+    Used in ``existing_heat_pump`` mode to recover the house as it would be WITHOUT the
+    heat pump, from a consumption figure that already includes it. Both legs are then
+    built from that same baseline - the gas leg uses it directly, the heat pump leg adds
+    the modelled heat pump back on top - so the two differ by exactly the heat pump and
+    nothing else, which is the same guarantee the prospective-buyer path gives.
+
+    Subtracting a modelled profile from a synthetic household shape is necessarily
+    approximate: the real heat pump ran when it ran, and the shape does not know that.
+    It is still much better than the alternative of asking the user to do the subtraction
+    themselves on an annual total, which loses the time-of-day information entirely.
+    """
+
+    def __init__(self, base, model):
+        """Wrap ``base`` (any LoadProfileSource), removing ``model``'s heat pump load."""
+        self.base = base
+        self.model = model
+        # Energy that could not be subtracted because the household load was already at
+        # zero for those minutes. Recorded rather than silently dropped so the caller can
+        # report it - a large residual means the configured heat pump consumption is too
+        # big to fit inside the stated household total, which is a real config error.
+        #
+        # Keyed BY DAY, and overwritten rather than added to, because the same day's
+        # profile is rebuilt several times per sampled day - once per leg per scenario,
+        # and again for the second day of each 48 hour plan. A running total would count
+        # the same shortfall once per rebuild and inflate it several-fold.
+        self._unsubtracted_by_day = {}
+
+    @property
+    def unsubtracted_kwh(self):
+        """Return the total energy across all days that could not be subtracted."""
+        return sum(self._unsubtracted_by_day.values())
+
+    def daily_kwh(self, day):
+        """Return the day's household kWh with the heat pump's share removed."""
+        profile = self.minute_profile(day)
+        return sum(profile) if profile is not None else 0.0
+
+    def minute_profile(self, day):
+        """Return 1440 per-minute kWh with the heat pump removed, floored at zero.
+
+        A ``None`` from the base is passed straight through: it means the underlying
+        source has no data for that day, which subtraction cannot improve on.
+        """
+        base_profile = self.base.minute_profile(day)
+        if base_profile is None:
+            return None
+        heat_profile = self.model.minute_electricity_kwh(day)
+        result = []
+        shortfall = 0.0
+        for index, base_value in enumerate(base_profile):
+            remaining = base_value - heat_profile[index]
+            if remaining < 0:
+                # The house cannot use less than nothing. Record the shortfall so it is
+                # visible rather than quietly making the baseline look bigger than it is.
+                shortfall += -remaining
+                remaining = 0.0
+            result.append(remaining)
+        self._unsubtracted_by_day[day] = shortfall
+        return result
 
 
 class HeatPumpLoadProfile:

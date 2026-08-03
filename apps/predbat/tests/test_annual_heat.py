@@ -28,6 +28,7 @@ from annual_heat import (
     AnnualHeatError,
     HeatModel,
     HeatPumpLoadProfile,
+    HeatPumpRemovedLoadProfile,
     carnot_cop,
     resolve_heat,
 )
@@ -294,6 +295,7 @@ def test_annual_heat(my_predbat):
     failed = test_heat_costs() or failed
     failed = test_temperature_local_days() or failed
     failed = test_smart_cylinder(temperatures, year) or failed
+    failed = test_existing_heat_pump(temperatures, year) or failed
 
     if failed:
         print("**** ERROR: annual heat tests failed ****")
@@ -648,4 +650,103 @@ def test_smart_cylinder(temperatures, year):
 
     if failed:
         print("**** ERROR: smart cylinder tests failed ****")
+    return failed
+
+
+def test_existing_heat_pump(temperatures, year):
+    """Verify the existing-owner mode: measured electricity in, gas counterfactual out."""
+    failed = False
+    print("Test: an existing owner's heat is derived from measured electricity, not a gas bill")
+    settings = resolve_heat({"existing_heat_pump": True, "heat_pump_kwh": 4000, "water_heat_pump_kwh": 900, "scop": 3.25, "flow_temp_c": 35, "water_cop": 3.35})
+    if settings["space_heat_kwh"] is not None or settings["water_heat_kwh"] is not None:
+        print("  ERROR: heat should be left for HeatModel to derive, got {}".format(settings["space_heat_kwh"]))
+        failed = True
+
+    model = HeatModel(settings, temperatures, year)
+    # 3100 kWh of space electricity at the realised SCOP, 900 of water at the manual COP
+    expected_space = (4000 - 900) * model.realised_scop()
+    if not close(settings["space_heat_kwh"], expected_space, tolerance=1.0):
+        print("  ERROR: space heat should be {} kWh, got {}".format(expected_space, settings["space_heat_kwh"]))
+        failed = True
+    if not close(settings["water_heat_kwh"], 900 * 3.35, tolerance=1.0):
+        print("  ERROR: water heat should be {} kWh, got {}".format(900 * 3.35, settings["water_heat_kwh"]))
+        failed = True
+
+    print("Test: a manual hot water COP overrides the flow-temperature derivation")
+    if not close(model.water_cop(-5), 3.35) or not close(model.water_cop(15), 3.35):
+        print("  ERROR: a manual water COP should be flat across temperatures, got {} / {}".format(model.water_cop(-5), model.water_cop(15)))
+        failed = True
+    derived = HeatModel(resolve_heat({"existing_heat_pump": True, "heat_pump_kwh": 4000, "water_heat_pump_kwh": 900, "scop": 3.25, "flow_temp_c": 35}), temperatures, year)
+    if close(derived.water_cop(5), 3.35):
+        print("  ERROR: without an override the water COP should be derived, not 3.35")
+        failed = True
+
+    print("Test: hot water electricity cannot exceed the heat pump's total")
+    try:
+        resolve_heat({"existing_heat_pump": True, "heat_pump_kwh": 1000, "water_heat_pump_kwh": 2000})
+        print("  ERROR: hot water above the heat pump total should be rejected")
+        failed = True
+    except AnnualHeatError:
+        pass
+
+    print("Test: the derived gas bill reconciles with the derived heat")
+    gas_total = sum(model.month_gas(month)["gas_kwh"] for month in range(1, 13))
+    if not close(gas_total, settings["annual_gas_kwh"], tolerance=2.0):
+        print("  ERROR: monthly gas should sum to the derived annual {} kWh, got {}".format(settings["annual_gas_kwh"], gas_total))
+        failed = True
+
+    print("Test: removing the heat pump recovers the house without it, and adding it back restores the original")
+    # Big enough to absorb a January day's heat pump load: a 4000 kWh/year heat pump
+    # averages around 26 kWh of electricity a day in January, far above its annual mean,
+    # which is exactly why the subtraction has to be done per minute rather than on a
+    # yearly total.
+    base = StubLoad(daily=45.0)
+    day = date(year, 1, 15)
+    model.set_month_scale(1, [(day, 31.0)])
+    removed = HeatPumpRemovedLoadProfile(base, model)
+    restored = HeatPumpLoadProfile(removed, model)
+
+    base_profile = base.minute_profile(day)
+    removed_profile = removed.minute_profile(day)
+    restored_profile = restored.minute_profile(day)
+    heat_profile = model.minute_electricity_kwh(day)
+
+    # Energy conservation, which holds whether or not the floor at zero bit: what came out
+    # is what went in, less the heat pump, plus whatever could not be taken away.
+    if not close(sum(removed_profile), sum(base_profile) - sum(heat_profile) + removed.unsubtracted_kwh, tolerance=0.01):
+        print("  ERROR: the baseline does not reconcile: {} vs {} - {} + {}".format(sum(removed_profile), sum(base_profile), sum(heat_profile), removed.unsubtracted_kwh))
+        failed = True
+
+    print("Test: with headroom to spare, removing then re-adding the heat pump restores the original exactly")
+    # A flat stub house drawing 1.9 kW cannot absorb a 3 kW cylinder charge, so the floor
+    # at zero bites on a 45 kWh day and the round trip is lossy by exactly that much. Give
+    # it real headroom and the identity the whole two-leg comparison rests on must hold
+    # exactly: the two legs differ by the heat pump and by nothing else.
+    roomy_base = StubLoad(daily=200.0)
+    roomy_removed = HeatPumpRemovedLoadProfile(roomy_base, model)
+    roomy_restored = HeatPumpLoadProfile(roomy_removed, model)
+    if roomy_removed.unsubtracted_kwh > 0.001:
+        print("  ERROR: a 200 kWh day should absorb the heat pump with nothing left over, got {}".format(roomy_removed.unsubtracted_kwh))
+        failed = True
+    if not close(sum(roomy_restored.minute_profile(day)), 200.0, tolerance=0.01):
+        print("  ERROR: removing then re-adding should restore 200 kWh, got {}".format(sum(roomy_restored.minute_profile(day))))
+        failed = True
+
+    print("Test: a heat pump too big for the stated household load is recorded, not silently dropped")
+    tiny = HeatPumpRemovedLoadProfile(StubLoad(daily=0.5), model)
+    profile = tiny.minute_profile(day)
+    if min(profile) < 0:
+        print("  ERROR: the baseline must never go negative")
+        failed = True
+    if tiny.unsubtracted_kwh <= 0:
+        print("  ERROR: the un-subtractable energy should have been recorded, got {}".format(tiny.unsubtracted_kwh))
+        failed = True
+
+    print("Test: a missing base day stays missing rather than becoming a negative baseline")
+    if HeatPumpRemovedLoadProfile(StubLoad(daily=20.0, missing={day}), model).minute_profile(day) is not None:
+        print("  ERROR: a missing base day must pass None through")
+        failed = True
+
+    if failed:
+        print("**** ERROR: existing heat pump tests failed ****")
     return failed
