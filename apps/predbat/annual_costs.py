@@ -43,6 +43,16 @@ DEFAULT_COSTS = {
     # figure, without doing any arithmetic themselves.
     "quoted_pv_gbp": 0.0,
     "quoted_total_gbp": 0.0,
+    # Air source heat pump, installed. A typical 2025/26 UK retrofit including the
+    # cylinder and the radiator work an MCS installer signs off.
+    "heat_pump_install_gbp": 13000.0,
+    # The Boiler Upgrade Scheme grant, paid to the installer and deducted from the
+    # price the household actually pays, so it reduces CAPITAL rather than being an
+    # income stream. Zero it for a household that does not qualify.
+    "heat_pump_grant_gbp": 7500.0,
+    # A real quote for the heat pump installation, before the grant. Zero means "no
+    # quote" rather than "free", matching quoted_pv_gbp/quoted_total_gbp above.
+    "quoted_heat_pump_gbp": 0.0,
 }
 
 # Accepted in a stored config but ignored: an earlier revision asked for a battery-only
@@ -162,6 +172,55 @@ def build_costs(total_kwp, battery_kwh, settings):
         "total_kwp": round(float(total_kwp or 0), 3),
         "battery_kwh": round(float(battery_kwh or 0), 3),
     }
+
+
+def build_heat_costs(settings):
+    """Return the heat pump capital breakdown: list price, grant, and what is actually paid.
+
+    The grant reduces capital rather than appearing as a saving, because that is how the
+    Boiler Upgrade Scheme works in practice - it is paid to the installer and the
+    household is invoiced the difference. Treating it as an annual income stream would
+    make the payback period depend on how long it was spread over, which is meaningless.
+
+    The net figure is floored at zero: a grant larger than the price would otherwise
+    produce a negative capital cost and a nonsensical payback.
+    """
+    quoted = float(settings.get("quoted_heat_pump_gbp", 0) or 0)
+    install = quoted if quoted > 0 else float(settings.get("heat_pump_install_gbp", 0) or 0)
+    grant = min(float(settings.get("heat_pump_grant_gbp", 0) or 0), install)
+    return {
+        "install_gbp": round(install, 2),
+        "grant_gbp": round(grant, 2),
+        "net_gbp": round(max(0.0, install - grant), 2),
+        "quoted": quoted > 0,
+    }
+
+
+def build_heat_payback(heat_scenarios, heat_costs, months_included):
+    """Return the heat pump payback rows, or a reason they could not be built.
+
+    One row per hardware scenario, because the answer genuinely differs between them:
+    a heat pump's extra electricity is far cheaper for a household that can charge a
+    battery overnight and run the heat pump off it than for one importing every kWh at
+    the daytime rate. Collapsing that to a single number would hide the interaction this
+    tool exists to measure.
+
+    Like ``build_payback``, this refuses a partial year rather than extrapolating one:
+    heating is the most seasonal load in the house, so a year missing January is not
+    eleven twelfths of an answer - it is missing the part that matters most.
+    """
+    if not heat_scenarios:
+        return {"available": False, "reason": "No month produced a usable heat pump result, so there is nothing to pay back."}
+    if months_included != 12:
+        return {
+            "available": False,
+            "reason": "Heat pump payback needs a full year, but only {} of 12 months could be modelled. Heating is strongly seasonal, so a partial year cannot be scaled up. The missing months are named in the caveats.".format(months_included),
+        }
+
+    rows = {}
+    for key, entry in heat_scenarios.items():
+        rows[key] = payback_row(heat_costs["net_gbp"], entry["annual_saving_p"] / 100.0)
+    return {"available": True, "scenarios": rows}
 
 
 def payback_row(capital_gbp, annual_saving_gbp, recurring_gbp=0.0):

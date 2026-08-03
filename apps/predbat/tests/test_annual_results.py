@@ -19,7 +19,7 @@ exercise this same code from the top.
 import inspect
 from datetime import date
 
-from annual import SCENARIO_FIELDS, SCENARIO_KEYS, AnnualPredictor, _billed_result, _capture_plan, _run_scenarios, average_rate, run_day, validate_config
+from annual import RESULTS_SCHEMA_VERSION, SCENARIO_FIELDS, SCENARIO_KEYS, AnnualPredictor, _billed_result, _capture_plan, _run_scenarios, average_rate, run_day, validate_config
 from prediction import Prediction
 from tests.test_infra import reset_inverter
 
@@ -97,6 +97,15 @@ def test_annual_results(my_predbat):
     expected_saving = 300.0 - 130.0
     if result["annual"]["savings"]["pv_battery_vs_none_p"] != expected_saving:
         print("  ERROR: expected pv_battery_vs_none_p {}, got {}".format(expected_saving, result["annual"]["savings"]["pv_battery_vs_none_p"]))
+        failed = True
+
+    print("Test: every results document is stamped with the engine's schema version")
+    # Without the stamp a stored run is indistinguishable from one made before the
+    # 2026-08-02 energy fix, and the results page has nothing to warn on - which is the
+    # whole point of the marker, since those runs' costs are right and only their kWh
+    # columns are wrong.
+    if result.get("schema_version") != RESULTS_SCHEMA_VERSION:
+        print("  ERROR: expected schema_version {}, got {}".format(RESULTS_SCHEMA_VERSION, result.get("schema_version")))
         failed = True
 
     print("Test: _build_results with a mix of ok and unavailable months excludes the unavailable one")

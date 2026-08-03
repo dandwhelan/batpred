@@ -12,7 +12,8 @@
 These run real Predbat plans, so they are registered as slow.
 """
 
-from datetime import date, datetime
+import math
+from datetime import date, datetime, timedelta
 
 import pytz
 
@@ -190,6 +191,20 @@ def test_annual_integration(my_predbat):
         print("  ERROR: the PV-only scenario must have no battery throughput, got {}".format(pv_only["battery_throughput_kwh"]))
         failed = True
 
+    print("Test: energy totals are bounded to the billed day, like cost_p")
+    # pv_generated_kwh is summed over end_record by _billed_result itself, so it is the one
+    # energy figure that was never in doubt - which makes it the yardstick. Neither pv_only
+    # (no battery at all) nor without_predbat (a battery on a charge-only timer, no export
+    # windows) has any way to put energy on the grid other than surplus PV, so exporting
+    # MORE than the day generated is impossible. Before 2026-08-02 both did exactly that:
+    # export_kwh was a running total over the whole 48 hour plan while pv_generated_kwh
+    # covered one day, so each came back at roughly 160% of the day's generation.
+    for key in ["pv_only", "without_predbat"]:
+        entry = results[key]
+        if entry["export_kwh"] > entry["pv_generated_kwh"] + 1e-6:
+            print("  ERROR: {} exported {} kWh but only generated {} - energy is not bounded to the billed day".format(key, entry["export_kwh"], entry["pv_generated_kwh"]))
+            failed = True
+
     print("Test: pv_only sits between the no-system baseline and PV-plus-battery on cost")
     # Not an arbitrary ordering check: PV alone must beat no system (it displaces import),
     # and must not beat PV plus a battery (the battery can only add value). A violation
@@ -352,4 +367,122 @@ def test_annual_integration(my_predbat):
             print("  ERROR: {}'s captured plan has no rows - the viewer would render 'No plan data available'".format(key))
             failed = True
 
+    return failed
+
+
+def make_heat_model(year=2025, scop=3.2):
+    """Return a HeatModel over a cold synthetic winter, ready for a January sample."""
+    from annual_heat import HeatModel, resolve_heat
+
+    temperatures = {}
+    for offset in range(400):
+        day = date(year, 1, 1) + timedelta(days=offset)
+        # A cold January easing into a mild spring, so a January sample has real demand
+        seasonal = 2.0 + 12.0 * (offset / 200.0)
+        temperatures[day] = [seasonal + 2.0 * math.sin(2 * math.pi * (hour - 9) / 24.0) for hour in range(24)]
+    settings = resolve_heat({"annual_gas_kwh": 14000, "water_gas_kwh": 2500, "scop": scop})
+    return HeatModel(settings, temperatures, year)
+
+
+def test_annual_heat_integration(my_predbat):
+    """Verify the heat pump leg runs through the real scenarios and costs more than gas.
+
+    The point of this test is that the heat pump is modelled as ORDINARY electrical load:
+    it goes through the same planner, battery and PV as any other load, and the answer is
+    the difference between two real runs rather than an arithmetic estimate bolted on the
+    side. Anything that silently stopped the heat pump load reaching the prediction (a
+    load source that replaced rather than wrapped, a leg planned against the wrong series)
+    would show up here as two legs with identical costs.
+    """
+    from annual_heat import HeatPumpLoadProfile
+
+    failed = False
+    print("**** Testing annual heat pump integration ****")
+
+    config = make_config()
+    weather = StubWeather(peak_kw=4.0)
+    day = date(2025, 1, 15)
+    midnight = pytz.utc.localize(datetime(day.year, day.month, day.day))
+    model = make_heat_model()
+    model.set_month_scale(1, [(day, 31.0)])
+
+    base_load = SyntheticLoadProfile(annual_kwh=config["load"]["annual_kwh"], shape=config["load"]["shape"], year=config["year"])
+    heat_load = HeatPumpLoadProfile(base_load, model)
+
+    print("Test: a heat pump day draws meaningfully more electricity than the base load")
+    heat_kwh = sum(model.hourly_electricity_kwh(day))
+    if heat_kwh <= 1.0:
+        print("  ERROR: a mid-January heat pump day should draw well over 1 kWh, got {}".format(heat_kwh))
+        failed = True
+
+    reset_inverter(my_predbat)
+    gas_leg = run_day(my_predbat, config, weather, StubTariff(), base_load, day, midnight)
+    reset_inverter(my_predbat)
+    heat_leg = run_day(my_predbat, config, weather, StubTariff(), heat_load, day, midnight)
+
+    print("Test: both legs produce every scenario")
+    for key in SCENARIO_KEYS:
+        for leg_name, leg in [("gas", gas_leg), ("heat pump", heat_leg)]:
+            if key not in leg:
+                print("  ERROR: the {} leg is missing scenario '{}'".format(leg_name, key))
+                failed = True
+
+    if not failed:
+        print("Test: the heat pump leg costs more and imports more in every scenario")
+        for key in SCENARIO_KEYS:
+            if heat_leg[key]["cost_p"] <= gas_leg[key]["cost_p"]:
+                print("  ERROR: {}: the heat pump leg ({}) should cost more than the gas leg ({})".format(key, heat_leg[key]["cost_p"], gas_leg[key]["cost_p"]))
+                failed = True
+            if heat_leg[key]["import_kwh"] <= gas_leg[key]["import_kwh"]:
+                print("  ERROR: {}: the heat pump leg should import more than the gas leg".format(key))
+                failed = True
+
+        print("Test: the extra import is EXACTLY the heat pump's own energy, neither scaled nor double counted")
+        # With no PV and no battery there is nothing to store or generate, so every kWh the
+        # heat pump draws has to arrive as an extra imported kWh - no more, no less. That
+        # makes this an exact identity rather than a tolerance, and it is the single
+        # sharpest check that the heat pump load reaches the prediction untouched: a load
+        # source that replaced rather than wrapped, a profile applied twice, or Predbat's
+        # load_scaling being applied to it would all break it.
+        #
+        # Only the FIRST day of the 48 hour plan counts, the same day cost_p is billed for:
+        # import_kwh is read from the end_record-bounded snapshot (see _billed_result). This
+        # doubles as the regression guard for that bounding - before 2026-08-02 import_kwh
+        # was the running total over the whole plan, and this identity only held against
+        # both days' heat. Only the difference between the legs is asserted here, so the
+        # constant background load both legs carry cancels out.
+        extra_import = heat_leg["no_pvbat"]["import_kwh"] - gas_leg["no_pvbat"]["import_kwh"]
+        if abs(extra_import - heat_kwh) > 0.01:
+            print("  ERROR: no_pvbat extra import {} should equal the heat pump's {} kWh over the billed day".format(extra_import, heat_kwh))
+            failed = True
+
+        print("Test: the extra import is the billed day's heat alone, not the whole 48 hour plan")
+        # Stated separately from the identity above because it is the thing that regressed:
+        # an unbounded import_kwh lands almost exactly on the two-day figure, which is a
+        # plausible-looking number rather than an obviously broken one.
+        plan_heat_kwh = heat_kwh + sum(model.hourly_electricity_kwh(day + timedelta(days=1)))
+        if abs(extra_import - plan_heat_kwh) < 0.01:
+            print("  ERROR: no_pvbat extra import {} covers both plan days ({} kWh), so import_kwh is not bounded to the billed day".format(extra_import, plan_heat_kwh))
+            failed = True
+
+        print("Test: PV and the battery reduce the heat pump's extra cost")
+        # The whole reason the heat pump goes through the scenarios rather than being
+        # costed at an average rate: a household with PV, a battery and Predbat should
+        # absorb some of the heat pump's demand more cheaply than one with neither.
+        bare_extra = heat_leg["no_pvbat"]["cost_p"] - gas_leg["no_pvbat"]["cost_p"]
+        predbat_extra = heat_leg["with_predbat"]["cost_p"] - gas_leg["with_predbat"]["cost_p"]
+        if predbat_extra >= bare_extra:
+            print("  ERROR: with PV/battery/Predbat the heat pump's extra cost ({}) should be below the no-system extra ({})".format(predbat_extra, bare_extra))
+            failed = True
+
+        print("Test: PV generation is unchanged between the legs")
+        # A useful self-check that the two legs really are the same sampled day: the heat
+        # pump changes what the house consumes, never what the roof produces.
+        for key in SCENARIO_KEYS:
+            if abs(heat_leg[key]["pv_generated_kwh"] - gas_leg[key]["pv_generated_kwh"]) > 1e-6:
+                print("  ERROR: {}: PV generation should be identical between the legs".format(key))
+                failed = True
+
+    if failed:
+        print("**** ERROR: annual heat pump integration tests failed ****")
     return failed

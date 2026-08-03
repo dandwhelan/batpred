@@ -13,7 +13,9 @@ error, from which each month's P10 ratio is derived.
 """
 
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta
+
+import pytz
 
 from annual_http import fetch_json
 from solar_model import convert_azimuth, gti_hourly_to_period_kwh
@@ -22,6 +24,16 @@ ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_ARCHIVE_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 HOURLY_VARIABLES = "global_tilted_irradiance,temperature_2m,wind_speed_10m"
+
+# The heat model needs outdoor temperature and nothing else. Requested on its own rather
+# than lifted out of the PV download because a heat pump can be modelled with no solar
+# arrays configured at all, in which case there is no PV request to lift it from.
+TEMPERATURE_VARIABLE = "temperature_2m"
+
+# A local day must have at least this many of its 24 hours present to be usable. Short
+# days are a real occurrence at the edges of the downloaded window and on the spring
+# clock change; a day missing more than a few hours would understate its heat demand.
+MIN_HOURS_PER_LOCAL_DAY = 20
 
 # A month needs at least this many usable forecast/actual day pairs before its
 # measured P10 ratio is trusted over the flat fallback.
@@ -230,6 +242,65 @@ class AnnualWeather:
 
         return ratios, fallback_months
 
+    def _build_temperature_url(self, year):
+        """Build the Open-Meteo request for a calendar year of hourly outdoor temperature.
+
+        No tilt or azimuth: temperature is a property of the site, not of any array, so
+        this is a single request regardless of how many arrays are configured - or
+        whether any are.
+        """
+        return "{}?latitude={}&longitude={}&start_date={}-01-01&end_date={}-01-01&hourly={}&timezone=UTC".format(ARCHIVE_URL, self.latitude, self.longitude, year, year + 1, TEMPERATURE_VARIABLE)
+
+    @staticmethod
+    def _temperature_payload_problem(data):
+        """Return why a temperature payload cannot be trusted, or None when it is usable."""
+        if not data:
+            return "no data"
+        hourly = data.get("hourly", {})
+        times = hourly.get("time", [])
+        values = hourly.get(TEMPERATURE_VARIABLE, [])
+        if not times or not values:
+            return "no hourly values"
+        if len(values) < len(times):
+            return "truncated ({} stamps, {} values)".format(len(times), len(values))
+        return None
+
+    async def fetch_temperatures(self, year):
+        """Download a calendar year of hourly outdoor temperature, keyed by tz-aware UTC hour.
+
+        Returns an empty dict when the download is unusable, leaving the caller to decide
+        whether that is fatal - it is for a heat pump run, and irrelevant for one without.
+        Cached like the PV series, so a repeated run costs no request.
+        """
+        cache_key = "temperature_{}_{}_{}".format(year, self.latitude, self.longitude)
+        data = None
+        if self.storage:
+            cached = await self.storage.load("annual", cache_key)
+            if self._temperature_payload_problem(cached) is None:
+                data = cached
+        if not data:
+            fetched = await self.fetch_json(self._build_temperature_url(year))
+            problem = self._temperature_payload_problem(fetched)
+            if problem is not None:
+                self.log("Warn: Annual: outdoor temperature data for {} is unusable ({})".format(year, problem))
+                return {}
+            data = fetched
+            if self.storage:
+                await self.storage.save("annual", cache_key, data, format="json")
+
+        hourly = data["hourly"]
+        series = {}
+        for index, stamp_text in enumerate(hourly["time"]):
+            value = hourly[TEMPERATURE_VARIABLE][index]
+            if value is None:
+                continue
+            try:
+                stamp = datetime.strptime(stamp_text, "%Y-%m-%dT%H:%M").replace(tzinfo=pytz.utc)
+            except (ValueError, TypeError):
+                continue
+            series[stamp] = float(value)
+        return series
+
     async def fetch(self, year):
         """Download and convert a calendar year, returning a populated WeatherYear."""
         actual_periods = await self._fetch_series(ARCHIVE_URL, year, "actual")
@@ -241,6 +312,56 @@ class AnnualWeather:
 
         ratios, fallback_months = self._derive_p10_ratios(actual_periods, forecast_periods, forecast_available)
         return WeatherYear(actual_periods, forecast_periods, ratios, forecast_available, fallback_months)
+
+
+def temperature_by_local_day(series, timezone):
+    """Regroup a UTC-keyed hourly temperature series into 24 values per LOCAL date.
+
+    The heat model works in local days because the load profile does: minute 0 of a
+    ``load_forecast`` is local midnight, so hour 0 of a day's heat demand has to be
+    local midnight too. Feeding it a UTC-keyed series would shift the whole heating
+    profile by the UTC offset - an hour in British Summer Time, which lands the evening
+    peak in the wrong half-hourly rate slot.
+
+    Both clock changes are handled rather than discarded. In autumn two UTC hours map
+    onto the same local hour, so they are averaged; in spring one local hour never
+    happens, so it is filled from its neighbours along with any other isolated gap.
+    A local day still short of ``MIN_HOURS_PER_LOCAL_DAY`` real readings is dropped
+    entirely - that is the first and last day of the downloaded window, which only ever
+    hold a partial day, and a day filled mostly from guesses would understate its heat.
+    """
+    zone = pytz.timezone(timezone)
+    collected = {}
+    for stamp, value in series.items():
+        local = stamp.astimezone(zone)
+        collected.setdefault(local.date(), {}).setdefault(local.hour, []).append(value)
+
+    by_day = {}
+    for day, hours in collected.items():
+        if len(hours) < MIN_HOURS_PER_LOCAL_DAY:
+            continue
+        averaged = {hour: sum(values) / len(values) for hour, values in hours.items()}
+        by_day[day] = _fill_missing_hours(averaged)
+    return by_day
+
+
+def _fill_missing_hours(averaged):
+    """Return 24 hourly values, filling any gap from the nearest hour that has one.
+
+    Only ever called for a day already known to hold at least
+    ``MIN_HOURS_PER_LOCAL_DAY`` real readings, so a filled hour is always surrounded by
+    real ones - this is interpolation across a clock change or an isolated dropout, not
+    invention of a day that was never downloaded.
+    """
+    present = sorted(averaged)
+    filled = []
+    for hour in range(24):
+        if hour in averaged:
+            filled.append(averaged[hour])
+            continue
+        nearest = min(present, key=lambda candidate: abs(candidate - hour))
+        filled.append(averaged[nearest])
+    return filled
 
 
 POSTCODE_URL = "https://api.postcodes.io/postcodes/{}"
