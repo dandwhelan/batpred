@@ -79,6 +79,7 @@ class DatabaseEngine:
         If the image really is damaged the file is moved aside and a new one started,
         because looping on a permanently corrupt file would just restart Predbat for ever.
         """
+        last_error = None
         for attempt in range(1, DB_OPEN_RETRIES + 1):
             try:
                 self._cleanup_db()
@@ -86,6 +87,7 @@ class DatabaseEngine:
                     self.log("Info: db_engine: Database opened successfully on attempt {}".format(attempt))
                 return
             except sqlite3.DatabaseError as e:
+                last_error = e
                 self.log("Warn: db_engine: Database error on open attempt {} of {}: {}".format(attempt, DB_OPEN_RETRIES, e))
                 try:
                     self.db.close()
@@ -95,22 +97,43 @@ class DatabaseEngine:
                     time.sleep(DB_OPEN_RETRY_WAIT)
                     self._connect()
 
-        # Out of retries - decide whether the file itself is actually damaged
         self._connect()
-        corrupt = True
+
+        # A lock or a busy file is not corruption - whoever holds it will let go on its own.
+        # DatabaseManager.recover_from_error already refuses to treat OperationalError as
+        # corruption, but that exclusion is undone here unless it is repeated, because
+        # OperationalError is a *subclass* of DatabaseError and the retry loop above catches
+        # the parent. On 2026-08-05 three "database is locked" errors quarantined a working
+        # database this way, and on 2026-08-02 the same path destroyed 5.1M rows of history
+        # that a later integrity_check proved had never been damaged.
+        if isinstance(last_error, sqlite3.OperationalError):
+            self.log("Warn: db_engine: Giving up after {} attempts ({}) - not corruption, leaving the database alone".format(DB_OPEN_RETRIES, last_error))
+            return
+
+        # Quarantine only on a *positive* report of damage. quick_check failing to run at all
+        # says nothing about the file, so anything other than a clear non-ok verdict has to
+        # keep the database - throwing away history needs proof, not the absence of proof.
         try:
             result = self.db_cursor.execute("PRAGMA quick_check(10)").fetchone()
-            corrupt = not (result and result[0] == "ok")
-            if not corrupt:
-                self.log("Warn: db_engine: quick_check reports the database is OK, retrying cleanup once more")
+        except sqlite3.DatabaseError as e:
+            self.log("Warn: db_engine: quick_check could not run ({}) - keeping the database".format(e))
+            return
+
+        if not result:
+            self.log("Warn: db_engine: quick_check returned no verdict - keeping the database")
+            return
+
+        if result[0] == "ok":
+            self.log("Warn: db_engine: quick_check reports the database is OK, retrying cleanup once more")
+            try:
                 self._cleanup_db()
                 self.log("Info: db_engine: Database recovered after quick_check")
-                return
-        except sqlite3.DatabaseError as e:
-            self.log("Warn: db_engine: quick_check failed: {}".format(e))
+            except sqlite3.DatabaseError as e:
+                self.log("Warn: db_engine: Cleanup still failing after a clean quick_check ({}) - keeping the database".format(e))
+            return
 
-        if corrupt:
-            self._quarantine_db()
+        self.log("Error: db_engine: quick_check reports the image is damaged: {}".format(result[0]))
+        self._quarantine_db()
 
     def _quarantine_db(self):
         """
@@ -126,6 +149,13 @@ class DatabaseEngine:
         bad_path = "{}.corrupt-{}".format(self.db_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
         try:
             os.rename(self.db_path, bad_path)
+            # A hot journal belongs to the file it was written against. Left beside the
+            # replacement database it would be replayed into it on the next open,
+            # corrupting the new file too - so it moves aside with its database.
+            for suffix in ("-journal", "-wal", "-shm"):
+                sidecar = self.db_path + suffix
+                if os.path.exists(sidecar):
+                    os.rename(sidecar, bad_path + suffix)
             self.log("Error: db_engine: Database is corrupt, moved to {} and starting a new empty database - history has been lost".format(bad_path))
             try:
                 # Runs during startup, so notification config may not be loaded yet
