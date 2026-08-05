@@ -814,7 +814,11 @@ class HAInterface(ComponentBase):
         if "state" in item:
             state = item["state"]
             self.state_data[entity_id] = {"state": state, "attributes": attributes, "last_changed": last_changed}
-            if not nodb and self.db_enable and ((self.db_mirror_ha and (entity_id in self.db_mirror_list)) or self.db_primary):
+            # db_mirror_list holds every entity Predbat has read or written (get_state,
+            # update_state, get_history, set_state all register there). Recording is limited
+            # to that list even with db_primary - the websocket delivers state_changed for
+            # every entity in HA, and without the filter all of them end up in the database.
+            if not nodb and self.db_enable and (self.db_mirror_ha or self.db_primary) and (entity_id in self.db_mirror_list):
                 # Instead of appending to a local mirror_updates list, call the database manager to schedule the update
                 if last_changed:
                     try:
