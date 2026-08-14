@@ -94,6 +94,7 @@ datalog
 datap
 datapoints
 datas
+datasheet
 dataviz
 dateutil
 dayname
@@ -181,6 +182,7 @@ freephase
 fronius
 funcs
 futurerate
+gasbill
 gecloud
 gekey
 generationmix
@@ -535,6 +537,7 @@ unnormalised
 unparseable
 unsmoothed
 unstaged
+unsubtracted
 urandom
 urlsafe
 useid

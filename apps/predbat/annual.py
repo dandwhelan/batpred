@@ -1057,9 +1057,7 @@ def _billed_result(predbat, end_record, pv_step):
     was_debug_enable = pred.debug_enable
     pred.debug_enable = True
     try:
-        cost, _, _, _, _, final_soc, _, battery_cycle, _, final_iboost, _ = predbat.run_prediction(
-            predbat.charge_limit_best, predbat.charge_window_best, predbat.export_window_best, predbat.export_limits_best, False, end_record=end_record
-        )
+        cost, _, _, _, _, final_soc, _, battery_cycle, _, final_iboost, _ = predbat.run_prediction(predbat.charge_limit_best, predbat.charge_window_best, predbat.export_window_best, predbat.export_limits_best, False, end_record=end_record)
         # Deliberately unguarded: if upstream ever renames these, a hard AttributeError is
         # the outcome to want. Falling back to the returned tuple would silently restore
         # the whole-plan double-count this exists to avoid.
@@ -1662,7 +1660,9 @@ class AnnualPredictor:
                 self.gas_load_source = self.load_source
             self.heat_load_source = HeatPumpLoadProfile(self.gas_load_source, self.heat_model)
             self.caveats.append(
-                "The heat pump comparison runs every scenario twice - once on gas, once on the heat pump - so the heat pump's extra electricity is what remains after PV, the battery and Predbat, not its consumption at an average rate. Gas is priced at a flat {} p/kWh with no seasonal variation.".format(self.heat_model.settings["gas_p_per_kwh"])
+                "The heat pump comparison runs every scenario twice - once on gas, once on the heat pump - so the heat pump's extra electricity is what remains after PV, the battery and Predbat, not its consumption at an average rate. Gas is priced at a flat {} p/kWh with no seasonal variation.".format(
+                    self.heat_model.settings["gas_p_per_kwh"]
+                )
             )
             self.caveats.append(
                 "Heat demand is spread across the year by heating degree days from {}'s real hourly temperatures, and COP varies with outdoor temperature around your {} SCOP (realised {}). Hot water runs at a lower COP than space heating because the cylinder needs a higher flow temperature.".format(
@@ -1683,7 +1683,11 @@ class AnnualPredictor:
                     )
                 )
             else:
-                self.caveats.append("The hot water cylinder is on a fixed timer, reheating to be ready for {} draw-off(s) a day. Ticking the smart cylinder option lets it charge on the cheapest rates instead, which is usually worth considerably more than anything else in this comparison.".format(heat_settings["water_charges_per_day"]))
+                self.caveats.append(
+                    "The hot water cylinder is on a fixed timer, reheating to be ready for {} draw-off(s) a day. Ticking the smart cylinder option lets it charge on the cheapest rates instead, which is usually worth considerably more than anything else in this comparison.".format(
+                        heat_settings["water_charges_per_day"]
+                    )
+                )
 
             # A cylinder that cannot physically hold a day's hot water in the configured
             # number of charges is a config error the user can fix (more charges, or a
@@ -1957,10 +1961,7 @@ class AnnualPredictor:
 
         scenarios = {}
         for key in SCENARIO_KEYS:
-            scenarios[key] = {
-                field: round(sum(entry["heat"]["scenarios"][key][field] for entry in heat_months), 3)
-                for field in ["electricity_gas_p", "electricity_heatpump_p", "extra_electricity_p", "annual_saving_p"]
-            }
+            scenarios[key] = {field: round(sum(entry["heat"]["scenarios"][key][field] for entry in heat_months), 3) for field in ["electricity_gas_p", "electricity_heatpump_p", "extra_electricity_p", "annual_saving_p"]}
 
         # The electricity the heat pump itself drew, before PV or the battery served any of
         # it. Reported alongside the extra COST because the two are very different numbers
