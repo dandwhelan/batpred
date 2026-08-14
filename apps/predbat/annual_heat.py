@@ -37,7 +37,6 @@ Three ideas carry most of the weight:
 
 import calendar
 import math
-from datetime import date, timedelta
 
 # Ofgem's medium Typical Domestic Consumption Value for gas, kWh a year. Only ever a
 # default for a user who has not looked at a bill yet.
@@ -231,9 +230,7 @@ def resolve_heat(raw):
         # round. space_heat_kwh/water_heat_kwh are filled in by HeatModel once the COP curve
         # has been calibrated - see HeatModel._derive_existing_heat().
         if settings["water_heat_pump_kwh"] > settings["heat_pump_kwh"]:
-            raise AnnualHeatError(
-                "annual.heat.water_heat_pump_kwh ({}) cannot exceed heat_pump_kwh ({}): hot water is part of what the heat pump uses, not on top of it".format(settings["water_heat_pump_kwh"], settings["heat_pump_kwh"])
-            )
+            raise AnnualHeatError("annual.heat.water_heat_pump_kwh ({}) cannot exceed heat_pump_kwh ({}): hot water is part of what the heat pump uses, not on top of it".format(settings["water_heat_pump_kwh"], settings["heat_pump_kwh"]))
         settings["space_heat_kwh"] = None
         settings["water_heat_kwh"] = None
         return settings

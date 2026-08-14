@@ -94,6 +94,7 @@ datalog
 datap
 datapoints
 datas
+datasheet
 dataviz
 dateutil
 dayname
@@ -150,6 +151,7 @@ enphaseenergy
 Enpower
 entrez
 epod
+errorcode
 etok
 euids
 EVDC
@@ -180,6 +182,7 @@ freephase
 fronius
 funcs
 futurerate
+gasbill
 gecloud
 gekey
 generationmix
@@ -336,6 +339,7 @@ nordpool
 noreferrer
 nosc
 nosuchrun
+NOTADB
 nrgheat
 numpy
 OCPP
@@ -533,6 +537,7 @@ unnormalised
 unparseable
 unsmoothed
 unstaged
+unsubtracted
 urandom
 urlsafe
 useid

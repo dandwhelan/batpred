@@ -850,7 +850,9 @@ class AnnualPage:
         text += '<div id="heat-fields" style="display:{}">\n'.format("block" if enabled else "none")
 
         existing = bool(heat.get("existing_heat_pump", predheat_mode == "pump"))
-        text += '<div class="annual-field"><label for="heat_existing_heat_pump">I already have a heat pump</label><input type="checkbox" id="heat_existing_heat_pump" name="heat_existing_heat_pump" onchange="annualHeatChanged()" {}></div>\n'.format("checked" if existing else "")
+        text += '<div class="annual-field"><label for="heat_existing_heat_pump">I already have a heat pump</label><input type="checkbox" id="heat_existing_heat_pump" name="heat_existing_heat_pump" onchange="annualHeatChanged()" {}></div>\n'.format(
+            "checked" if existing else ""
+        )
         text += '<p class="annual-note">Tick this if the heat pump is already fitted. Your annual electricity above is then taken as <strong>including</strong> it, and the comparison tells you what going back to a gas boiler would cost. Leave it clear if you are on gas and weighing one up.</p>\n'
 
         text += '<div id="heat-existing" style="display:{}">\n'.format("block" if existing else "none")
@@ -872,12 +874,16 @@ class AnnualPage:
         text += '<p class="annual-note">Units of heat per unit of electricity, averaged over the year. Field results for UK retrofits cluster around 3.0–3.5; an MCS design certificate usually quotes a more optimistic figure. Efficiency still varies with the outdoor temperature around this average.</p>\n'
         text += self._number_field("heat_flow_temp_c", "Radiator flow temperature", heat.get("flow_temp_c", DEFAULT_HEAT["flow_temp_c"]), suffix="°C")
         text += '<p class="annual-note">About 35 °C for underfloor heating, 45 °C with upsized radiators, 55 °C for an untouched radiator circuit. Lower is more efficient.</p>\n'
-        text += '<div class="annual-field"><label for="heat_smart_hot_water">Smart hot water cylinder (Mixergy or similar)</label><input type="checkbox" id="heat_smart_hot_water" name="heat_smart_hot_water" {}></div>\n'.format("checked" if heat.get("smart_hot_water", DEFAULT_HEAT["smart_hot_water"]) else "")
+        text += '<div class="annual-field"><label for="heat_smart_hot_water">Smart hot water cylinder (Mixergy or similar)</label><input type="checkbox" id="heat_smart_hot_water" name="heat_smart_hot_water" {}></div>\n'.format(
+            "checked" if heat.get("smart_hot_water", DEFAULT_HEAT["smart_hot_water"]) else ""
+        )
         text += '<p class="annual-note">Charges the cylinder on the cheapest half-hours that still finish before you need the water, instead of at a fixed time. On a tariff with a cheap overnight band this is usually worth more than anything else on this page. Leave it clear for a plain timer.</p>\n'
         text += self._number_field("heat_cylinder_volume_l", "Cylinder size", heat.get("cylinder_volume_l", DEFAULT_HEAT["cylinder_volume_l"]), suffix="litres")
         text += self._number_field("heat_water_charges_per_day", "Times the cylinder is reheated per day", heat.get("water_charges_per_day", DEFAULT_HEAT["water_charges_per_day"]), step="1")
         text += '<p class="annual-note">One overnight charge is the usual heat pump pattern. A charge is scheduled to <em>finish</em> before the water is wanted, not start then.</p>\n'
-        text += '<div class="annual-field"><label for="heat_remove_gas_supply">Gas supply disconnected entirely</label><input type="checkbox" id="heat_remove_gas_supply" name="heat_remove_gas_supply" {}></div>\n'.format("checked" if heat.get("remove_gas_supply", True) else "")
+        text += '<div class="annual-field"><label for="heat_remove_gas_supply">Gas supply disconnected entirely</label><input type="checkbox" id="heat_remove_gas_supply" name="heat_remove_gas_supply" {}></div>\n'.format(
+            "checked" if heat.get("remove_gas_supply", True) else ""
+        )
         text += '<p class="annual-note">Tick this to stop paying the gas standing charge too. Leave it clear if you are keeping a gas hob — the standing charge is often most of a summer gas bill.</p>\n'
         text += "</div>\n</fieldset>\n"
         return text
@@ -1742,7 +1748,9 @@ class AnnualPage:
             if summary.get("smart_hot_water"):
                 cylinder = "Your <strong>{:,.0f} L smart cylinder</strong> is charged {} time(s) a day, each charge placed in the cheapest window that still finishes before you need the water.".format(summary["cylinder_volume_l"], charges)
             else:
-                cylinder = "Your <strong>{:,.0f} L cylinder</strong> is charged {} time(s) a day on a fixed timer. Switching it to a smart cylinder, so it charges on the cheapest rates, is usually the biggest single improvement available here.".format(summary["cylinder_volume_l"], charges)
+                cylinder = "Your <strong>{:,.0f} L cylinder</strong> is charged {} time(s) a day on a fixed timer. Switching it to a smart cylinder, so it charges on the cheapest rates, is usually the biggest single improvement available here.".format(
+                    summary["cylinder_volume_l"], charges
+                )
             text += "<p class='annual-note'>{} A full charge to {:.0f} °C is {:.1f} kWh of heat; the day's hot water needs {:.1f} kWh including {:.1f} kWh of cylinder standing loss.</p>\n".format(
                 cylinder, summary.get("hot_water_target_c", 0), summary.get("full_charge_kwh", 0), summary.get("water_charge_per_day_kwh", 0), summary.get("cylinder_standing_loss_kwh_per_day", 0)
             )
@@ -1776,9 +1784,7 @@ class AnnualPage:
                 years = "n/a"
             saving = entry.get("annual_saving_p", 0)
             saving_cell = self._pounds(saving) if saving >= 0 else "<span class='annual-unavailable'>{}</span>".format(self._pounds(saving))
-            text += "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n".format(
-                SCENARIO_LABELS[key], self._pounds(heat.get("gas_avoided_p", 0)), self._pounds(entry.get("extra_electricity_p", 0)), saving_cell, years
-            )
+            text += "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n".format(SCENARIO_LABELS[key], self._pounds(heat.get("gas_avoided_p", 0)), self._pounds(entry.get("extra_electricity_p", 0)), saving_cell, years)
         text += "</table>\n"
 
         quoted = " (your quote)" if costs.get("quoted") else " (estimated)"

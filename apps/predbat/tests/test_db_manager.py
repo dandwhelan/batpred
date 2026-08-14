@@ -94,7 +94,7 @@ def test_db_manager(my_predbat=None):
         ("commit_throttle", _test_db_manager_commit_throttling, "Commit throttling (5 second interval)"),
         ("retention", _test_db_engine_retention, "Retention pruning (db_days boundary and db_days_daily)"),
         ("maintenance", _test_db_engine_maintenance, "Nightly prune and vacuum reclaims space"),
-        ("corruption", _test_db_engine_corruption_recovery, "Transient corruption retried, real corruption quarantined"),
+        ("corruption", _test_db_engine_corruption_recovery, "Quarantine only on a positive corruption verdict"),
         ("maintenance_schedule", _test_db_manager_maintenance_schedule, "Nightly maintenance runs once per night"),
     ]
 
@@ -721,6 +721,23 @@ def _count_states(db_path, keep=None):
     return count
 
 
+def _corrupt_db_pages(db_path, pages=4):
+    """Damage a database's b-tree pages, leaving page 1 readable so quick_check can still grade it"""
+    with open(db_path, "r+b") as handle:
+        handle.seek(16)
+        page_size = int.from_bytes(handle.read(2), "big")
+        if page_size == 1:
+            page_size = 65536
+        # Page 1 holds the header and the schema, so start at page 3 to keep the file openable
+        handle.seek(page_size * 2)
+        handle.write(b"\xa5" * (page_size * pages))
+
+
+def _quarantined_files(config_root):
+    """List the files quarantine has moved aside, the database itself sorting before its sidecars"""
+    return sorted(f for f in os.listdir(config_root) if f.startswith("predbat.db.corrupt"))
+
+
 def _test_db_engine_retention(my_predbat=None):
     """Test that db_days prunes at the right boundary and db_days_daily bounds daily rows"""
     print("\n=== Testing DatabaseEngine retention ===")
@@ -797,53 +814,179 @@ def _test_db_engine_maintenance(my_predbat=None):
 
 
 def _test_db_engine_corruption_recovery(my_predbat=None):
-    """Test that transient corruption is retried and real corruption is quarantined"""
+    """Test that the database is quarantined on a positive corruption verdict and kept otherwise
+
+    Quarantine destroys history, so it takes proof of damage: either a quick_check verdict that
+    grades the image bad, or a SQLite result code saying the file is not a readable database at
+    all. Every other failure to open - contention, a clean verdict, a bug of our own - keeps the
+    file, because the absence of a verdict is not evidence of damage.
+    """
     print("\n=== Testing DatabaseEngine corruption recovery ===")
     import db_engine as db_engine_module
 
     original_wait = db_engine_module.DB_OPEN_RETRY_WAIT
     db_engine_module.DB_OPEN_RETRY_WAIT = 0
-
-    # A transient malformed error must not kill the engine or discard the database
-    mock_base = MockBase()
-    db_path = os.path.join(mock_base.config_root, "predbat.db")
     real_cleanup = DatabaseEngine._cleanup_db
-    calls = {"count": 0}
-
-    def flaky_cleanup(self):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise sqlite3.DatabaseError("database disk image is malformed")
-        return real_cleanup(self)
+    real_connect = DatabaseEngine._connect
 
     try:
-        _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
-        DatabaseEngine._cleanup_db = flaky_cleanup
-        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
-        assert _count_states(db_path) == 1, "Data should survive a transient error"
-        assert not any(f.startswith("predbat.db.corrupt") for f in os.listdir(mock_base.config_root)), "Database should not be quarantined after a transient error"
-        print("✓ Transient malformed error retried, database preserved")
-        engine._close()
+        # A transient malformed error must not kill the engine or discard the database
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+        calls = {"count": 0}
+
+        def flaky_cleanup(self):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            return real_cleanup(self)
+
+        try:
+            _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+            DatabaseEngine._cleanup_db = flaky_cleanup
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            assert _count_states(db_path) == 1, "Data should survive a transient error"
+            assert not _quarantined_files(mock_base.config_root), "Database should not be quarantined after a transient error"
+            print("✓ Transient malformed error retried, database preserved")
+            engine._close()
+        finally:
+            DatabaseEngine._cleanup_db = real_cleanup
+            shutil.rmtree(mock_base.config_root)
+
+        # Contention is not damage. OperationalError is a subclass of DatabaseError, so the retry
+        # loop catches it like any other - three "database is locked" errors during a restart
+        # overlap were enough to quarantine a working 1.3 GB database on 2026-08-05.
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+
+        def locked_cleanup(self):
+            raise sqlite3.OperationalError("database is locked")
+
+        try:
+            _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+            DatabaseEngine._cleanup_db = locked_cleanup
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            assert _count_states(db_path) == 1, "A locked database must keep its data"
+            assert not _quarantined_files(mock_base.config_root), "A locked database must never be quarantined"
+            assert any("not corruption" in m for m in mock_base.log_messages), "Giving up on a locked database should be logged as contention"
+            print("✓ Repeated lock contention left the database alone")
+            engine._close()
+        finally:
+            DatabaseEngine._cleanup_db = real_cleanup
+            shutil.rmtree(mock_base.config_root)
+
+        # A file that grades "ok" is not a file to throw away, however stuck the cleanup is
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+
+        def malformed_cleanup(self):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        try:
+            _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+            DatabaseEngine._cleanup_db = malformed_cleanup
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            assert _count_states(db_path) == 1, "A database that grades ok must keep its data"
+            assert not _quarantined_files(mock_base.config_root), "A database that grades ok must never be quarantined"
+            assert any("Cleanup still failing after a clean quick_check" in m for m in mock_base.log_messages), "A cleanup still failing after a clean verdict should be logged"
+            print("✓ Clean quick_check verdict kept the database despite a failing cleanup")
+            engine._close()
+        finally:
+            DatabaseEngine._cleanup_db = real_cleanup
+            shutil.rmtree(mock_base.config_root)
+
+        # A DatabaseError carrying no SQLite result code is a bug of ours, not a verdict on the
+        # file. ProgrammingError is a DatabaseError too, so quarantining on the exception class
+        # alone would answer a coding mistake by destroying the user's history.
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+
+        class DeadCursor:
+            """A cursor that fails the way a closed connection does, with no SQLite result code"""
+
+            def execute(self, *args):
+                """Fail every statement, quick_check included"""
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+
+        def connect_with_dead_cursor(self):
+            real_connect(self)
+            self.db_cursor = DeadCursor()
+
+        try:
+            _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+            DatabaseEngine._connect = connect_with_dead_cursor
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            assert _count_states(db_path) == 1, "An error with no corruption code must keep its data"
+            assert not _quarantined_files(mock_base.config_root), "An error with no corruption code must never quarantine"
+            assert any("keeping the database" in m for m in mock_base.log_messages), "Keeping the database should be logged"
+            print("✓ A DatabaseError with no corruption code kept the database")
+            engine._close()
+        finally:
+            DatabaseEngine._connect = real_connect
+            shutil.rmtree(mock_base.config_root)
+
+        # A file that still opens but grades bad is the positive verdict quarantine exists for
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+        try:
+            _seed_states(db_path, [(20, "I")] * 4000, mock_base.now_utc_real)
+            _corrupt_db_pages(db_path)
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            quarantined = _quarantined_files(mock_base.config_root)
+            assert any("quick_check reports the image is damaged" in m for m in mock_base.log_messages), "Quarantine should follow a positive quick_check verdict"
+            assert len(quarantined) == 1, f"Damaged database should be moved aside, found {quarantined}"
+            assert _count_states(db_path) == 0, "A fresh database should have been created"
+            assert any("Alert:" in m for m in mock_base.log_messages), "User should be notified about the data loss"
+            print(f"✓ Positively damaged database quarantined as {quarantined[0]} and a fresh one started")
+            engine._close()
+        finally:
+            shutil.rmtree(mock_base.config_root)
+
+        # A hot journal belongs to the file it was written against - left beside the replacement
+        # it would be replayed into it on the next open, damaging that one too. Driven directly
+        # because SQLite tidies stale sidecars away as it opens and closes the file, so one
+        # cannot be staged through the constructor.
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+        try:
+            _seed_states(db_path, [(1, "I")], mock_base.now_utc_real)
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            engine.db.close()
+            for suffix in ("-journal", "-wal", "-shm"):
+                with open(db_path + suffix, "wb") as handle:
+                    handle.write(b"stale sidecar")
+            engine._quarantine_db()
+            quarantined = _quarantined_files(mock_base.config_root)
+            assert len(quarantined) == 4, f"The database and its three sidecars should all move aside, found {quarantined}"
+            leftovers = [f for f in os.listdir(mock_base.config_root) if f.startswith("predbat.db-")]
+            assert not leftovers, f"A sidecar left beside the new database would be replayed into it, found {leftovers}"
+            print("✓ Quarantine took the journal, wal and shm sidecars with the database")
+            engine._close()
+        finally:
+            shutil.rmtree(mock_base.config_root)
+
+        # An image SQLite cannot recognise never reaches a verdict, but it will never open
+        # either. Keeping it would leave Predbat running with no history for the life of the
+        # process and no notification, so an unreadable file counts as proof of damage.
+        mock_base = MockBase()
+        db_path = os.path.join(mock_base.config_root, "predbat.db")
+        try:
+            with open(db_path, "wb") as handle:
+                handle.write(b"SQLite format 3\x00" + os.urandom(60000))
+            engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
+            quarantined = _quarantined_files(mock_base.config_root)
+            assert any("the image is unreadable" in m for m in mock_base.log_messages), "Quarantine should record that the image could not be read"
+            assert len(quarantined) == 1, f"Unreadable database should be moved aside, found {quarantined}"
+            assert _count_states(db_path) == 0, "A fresh database should have been created"
+            assert any("Alert:" in m for m in mock_base.log_messages), "User should be notified about the data loss"
+            print(f"✓ Unreadable database quarantined as {quarantined[0]} and a fresh one started")
+            engine._close()
+        finally:
+            shutil.rmtree(mock_base.config_root)
     finally:
         DatabaseEngine._cleanup_db = real_cleanup
-        shutil.rmtree(mock_base.config_root)
-
-    # A genuinely corrupt file must be moved aside so Predbat does not restart-loop
-    mock_base = MockBase()
-    db_path = os.path.join(mock_base.config_root, "predbat.db")
-    try:
-        with open(db_path, "wb") as handle:
-            handle.write(b"SQLite format 3\x00" + os.urandom(60000))
-        engine = DatabaseEngine(mock_base, 14, db_days_daily=365)
-        quarantined = [f for f in os.listdir(mock_base.config_root) if f.startswith("predbat.db.corrupt")]
-        assert len(quarantined) == 1, f"Corrupt database should be moved aside, found {quarantined}"
-        assert _count_states(db_path) == 0, "A fresh database should have been created"
-        assert any("Alert:" in m for m in mock_base.log_messages), "User should be notified about the data loss"
-        print(f"✓ Corrupt database quarantined as {quarantined[0]} and a fresh one started")
-        engine._close()
-    finally:
+        DatabaseEngine._connect = real_connect
         db_engine_module.DB_OPEN_RETRY_WAIT = original_wait
-        shutil.rmtree(mock_base.config_root)
     print("=== test_db_engine_corruption_recovery PASSED ===\n")
     return False
 
