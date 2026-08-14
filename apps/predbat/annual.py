@@ -19,10 +19,11 @@ from datetime import date, datetime, timedelta
 
 import pytz
 
-from annual_costs import build_costs, build_payback, resolve_costs
+from annual_costs import build_costs, build_heat_costs, build_heat_payback, build_payback, resolve_costs
+from annual_heat import AnnualHeatError, HeatModel, HeatPumpLoadProfile, HeatPumpRemovedLoadProfile, resolve_heat
 from annual_load import build_load_forecast, OctopusConsumptionLoadProfile, SyntheticLoadProfile
 from annual_tariff import AnnualTariff
-from annual_weather import AnnualWeather, resolve_postcode
+from annual_weather import AnnualWeather, resolve_postcode, temperature_by_local_day
 from const import MINUTE_WATT, PREDICT_STEP
 from prediction import Prediction
 
@@ -249,6 +250,20 @@ def _validated_costs(raw):
         raise AnnualConfigError(str(error))
 
 
+def _validated_heat(raw):
+    """Return the validated heat settings, or None when no heat pump is being modelled.
+
+    ``annual_heat.resolve_heat`` raises ``AnnualHeatError`` because it is a pure module
+    with no dependency on this one; translating here keeps every config problem a single
+    exception type for the CLI and web layer to catch, exactly as ``_validated_costs``
+    does for the install-cost model.
+    """
+    try:
+        return resolve_heat(raw)
+    except AnnualHeatError as error:
+        raise AnnualConfigError(str(error))
+
+
 def validate_config(config, today=None):
     """Validate and normalise an annual prediction config, returning a fully defaulted copy.
 
@@ -299,12 +314,20 @@ def validate_config(config, today=None):
         "tariff": _validate_tariff(raw.get("tariff")),
         "samples_per_month": samples_per_month,
         "costs": _validated_costs(raw.get("costs")),
+        "heat": _validated_heat(raw.get("heat")),
         "debug": _coerce_bool(raw.get("debug", False)),
         "timezone": raw.get("timezone", DEFAULT_TIMEZONE),
         "pv10_derate_fallback": _require_number(raw.get("pv10_derate_fallback", DEFAULT_PV10_DERATE_FALLBACK), "annual.pv10_derate_fallback", minimum=0, exclusive_minimum=True, maximum=1),
         "raw": scrub_secrets(raw),
     }
 
+
+# Deliberately not named "apps.yaml". Standalone mode's hot-reload watcher (hass.py)
+# walks the config tree and watches every .py plus any file called "apps.yaml", so a
+# work directory under /config with that name made each annual run rewrite a watched
+# file, restarting the whole of Predbat and killing the run that had just started.
+# $PREDBAT_APPS_FILE takes any path, so the name is ours to choose.
+HEADLESS_APPS_YAML_NAME = "headless_apps.yaml"
 
 # Minimal apps.yaml for a headless run. PredBat's Hass base class reads this at
 # construction time; nothing here talks to Home Assistant. timezone is quoted since it
@@ -376,11 +399,22 @@ class AnnualNullHA:
 
 
 def write_minimal_apps_yaml(work_dir, timezone):
-    """Write the headless apps.yaml into ``work_dir`` and return its path."""
+    """Write the headless config into ``work_dir`` and return its path.
+
+    Rewritten only when the contents would change, so a work directory that lives
+    under a watched config tree does not get a fresh mtime on every run.
+    """
     os.makedirs(work_dir, exist_ok=True)
-    path = os.path.join(work_dir, "apps.yaml")
+    path = os.path.join(work_dir, HEADLESS_APPS_YAML_NAME)
+    wanted = MINIMAL_APPS_YAML.format(timezone=timezone)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            if handle.read() == wanted:
+                return path
+    except OSError:
+        pass
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write(MINIMAL_APPS_YAML.format(timezone=timezone))
+        handle.write(wanted)
     return path
 
 
@@ -654,6 +688,19 @@ def select_samples(weather, year, month, samples_per_month, has_solar=True):
 
 DAY_MINUTES = 24 * 60
 PLAN_MINUTES = 48 * 60
+
+# Stamped into every results document so a stored run can be told apart from one
+# produced by a different version of the engine. Bump this only when a change alters
+# the NUMBERS a run holds, not when a field is added: a reader that finds an older
+# version must say so rather than silently compare figures that are not comparable.
+#
+#   1  no marker at all - runs stored before 2026-08-02. Their per-scenario import_kwh,
+#      export_kwh and the export_credit_p_estimate derived from export_kwh cover the
+#      whole 48 hour plan rather than the billed day, so they read roughly double.
+#      cost_p, savings, payback, pv_generated_kwh and battery_throughput_kwh are all
+#      correct in these runs and unchanged by the fix (see _billed_result()).
+#   2  import and export energy bounded to the billed day.
+RESULTS_SCHEMA_VERSION = 2
 
 # Every sample starts from an empty battery. The compute_metric correction values
 # whatever charge is left at the end, so the starting level does not bias the cost.
@@ -952,17 +999,63 @@ def _billed_result(predbat, end_record, pv_step):
     ``enable_standing_charge`` inside ``prediction.py`` (see ``_capture_plan()``,
     which needs a save="best" run for an unrelated reason and re-runs the prediction
     from scratch rather than reusing this one, precisely to keep that flag off here).
+
+    ``debug_enable`` is forced on for the duration of the run, and the import/export
+    energy is read off the Prediction object rather than out of the returned tuple.
+    That is not a debugging leftover, it is the only way to get energy figures
+    bounded to the billed day. ``run_prediction()`` simulates the whole
+    ``forecast_minutes`` plan (48 hours here) no matter what ``end_record`` says;
+    ``end_record`` only stops the *recording*, so the tuple's
+    ``import_kwh_battery``/``import_kwh_house``/``export_kwh`` are running totals
+    over the entire plan and come back roughly double the day's real figures, while
+    ``final_metric``, ``final_soc``, ``final_battery_cycle`` and ``final_iboost_kwh``
+    in the same tuple ARE the end_record snapshots. The bounded energy snapshots
+    exist as ``final_import_kwh_battery``/``final_import_kwh_house``/
+    ``final_export_kwh``, but ``prediction.py`` only stores them on ``self`` under
+    ``if self.debug_enable or save:`` - and ``save`` is not an option here, per the
+    paragraph above. This is true of both engines: the C++ kernel mirrors the Python
+    loop exactly (``prediction_kernel.cpp`` returns the unbounded accumulators and
+    the bounded ``final_battery_cycle``), so the kernel is not the cause and turning
+    it off is not the fix.
+
+    Setting ``debug_enable`` does make ``kernel_supported()`` fall back to the Python
+    engine for this one prediction per scenario (~12 ms rather than ~0.5 ms on a Pi,
+    so ~50 ms per sampled day against a ~2 minute-per-month run). It changes no
+    arithmetic whatsoever - inside ``run_prediction()`` the flag only ever gates
+    which results get stored - and the two engines agree to 4 decimal places on
+    cost, SoC and battery cycle, which is what makes reading the Python-only
+    snapshots safe rather than a subtle second source of numbers.
+
+    Do not "optimise" this back to the returned tuple. Two tests exist to stop that:
+    ``test_annual_heat_integration`` asserts the heat pump leg's extra ``no_pvbat``
+    import is exactly ONE day of heat and explicitly not the two-day figure, and
+    ``test_annual_integration`` asserts that neither ``pv_only`` nor
+    ``without_predbat`` - neither of which can put anything on the grid but surplus PV
+    - exports more than ``pv_generated_kwh``, which ``_billed_result`` sums over
+    ``end_record`` itself.
     """
-    cost, import_kwh_battery, import_kwh_house, export_kwh, _, final_soc, _, battery_cycle, _, final_iboost, _ = predbat.run_prediction(
-        predbat.charge_limit_best, predbat.charge_window_best, predbat.export_window_best, predbat.export_limits_best, False, end_record=end_record
-    )
+    pred = predbat.prediction
+    was_debug_enable = pred.debug_enable
+    pred.debug_enable = True
+    try:
+        cost, _, _, _, _, final_soc, _, battery_cycle, _, final_iboost, _ = predbat.run_prediction(
+            predbat.charge_limit_best, predbat.charge_window_best, predbat.export_window_best, predbat.export_limits_best, False, end_record=end_record
+        )
+        # Deliberately unguarded: if upstream ever renames these, a hard AttributeError is
+        # the outcome to want. Falling back to the returned tuple would silently restore
+        # the whole-plan double-count this exists to avoid.
+        import_kwh = pred.final_import_kwh_battery + pred.final_import_kwh_house
+        export_kwh = pred.final_export_kwh
+    finally:
+        pred.debug_enable = was_debug_enable
+
     metric_start, _ = predbat.compute_metric(end_record, predbat.soc_kw, predbat.soc_kw, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     metric_end, _ = predbat.compute_metric(end_record, final_soc, final_soc, cost, cost, final_iboost, final_iboost, 0, 0, 0, 0, 0, 0)
 
     pv_generated = sum(value for minute, value in pv_step.items() if minute < end_record)
     return {
         "cost_p": metric_end - metric_start,
-        "import_kwh": import_kwh_battery + import_kwh_house,
+        "import_kwh": import_kwh,
         "export_kwh": export_kwh,
         "pv_generated_kwh": pv_generated,
         "battery_throughput_kwh": battery_cycle,
@@ -1293,6 +1386,14 @@ class AnnualPredictor:
         self.weather = None
         self.tariff = None
         self.load_source = None
+        # Set only when a heat pump is configured; None otherwise, which is what every
+        # heat pump branch below tests on.
+        self.heat_model = None
+        self.heat_load_source = None
+        # The house WITHOUT the heat pump - the common baseline both legs are built from.
+        # Equal to load_source for a prospective buyer; derived by subtraction for an
+        # existing owner. See run().
+        self.gas_load_source = None
         self.caveats = []
 
     async def _resolve_location(self, weather_fetch):
@@ -1398,6 +1499,65 @@ class AnnualPredictor:
             caveats.append("No export rates at all (historical or current) could be found for {} on this tariff, so export was priced at zero for those months. If this tariff pays for export, savings for those months are understated.".format(unpaid_list))
         return caveats
 
+    async def _build_heat_model(self, weather_client, year):
+        """Build the heat model from a year of hourly outdoor temperature, or return None.
+
+        Returns None when no heat pump is configured. When one IS configured, a missing
+        temperature series is fatal rather than something to model around: the whole
+        comparison rests on it, and a heat pump costed against invented weather would be
+        worse than no answer at all.
+
+        The temperature download is independent of the PV one, so this works for a
+        battery-only or even hardware-free run with no solar arrays configured.
+        """
+        settings = self.config.get("heat")
+        if not settings:
+            return None
+
+        series = await weather_client.fetch_temperatures(year)
+        temperatures = temperature_by_local_day(series, self.config["timezone"])
+        if not temperatures:
+            raise AnnualConfigError("Hourly outdoor temperature for {} could not be downloaded, so the heat pump comparison cannot be modelled. Re-run without the heat pump, or try again once Open-Meteo is reachable.".format(year))
+
+        model = HeatModel(settings, temperatures, year, log=self.log)
+        self.log(
+            "Annual: heat pump modelled at SCOP {} (realised {}) from {} kWh of gas, {} kWh space heat and {} kWh hot water".format(
+                settings["scop"], round(model.realised_scop(), 2), round(settings["annual_gas_kwh"]), round(settings["space_heat_kwh"]), round(settings["water_heat_kwh"])
+            )
+        )
+        return model
+
+    def _heat_month_row(self, month, scenarios, heat_scenarios):
+        """Return one month's heating comparison: the gas bill against the heat pump's electricity.
+
+        The gas figures come from the whole month's degree days rather than from the
+        sampled days, so they do not inherit the sampling's irradiance bias (see
+        ``HeatModel.set_month_scale``). The electricity figures are the difference between
+        the two legs actually run, which is what makes them worth having: the extra cost of
+        running a heat pump is not its consumption times an average rate, it is whatever
+        survives after PV, the battery and Predbat have had a go at it.
+        """
+        gas = self.heat_model.month_gas(month)
+        settings = self.heat_model.settings
+        avoided_standing = gas["gas_standing_charge_p"] if settings["remove_gas_supply"] else 0.0
+        gas_avoided_p = gas["gas_unit_cost_p"] + avoided_standing
+
+        rows = {}
+        for key in SCENARIO_KEYS:
+            extra = heat_scenarios[key]["cost_p"] - scenarios[key]["cost_p"]
+            rows[key] = {
+                "electricity_gas_p": round(scenarios[key]["cost_p"], 3),
+                "electricity_heatpump_p": round(heat_scenarios[key]["cost_p"], 3),
+                "extra_electricity_p": round(extra, 3),
+                "annual_saving_p": round(gas_avoided_p - extra, 3),
+            }
+
+        row = dict(gas)
+        row["gas_total_p"] = round(gas["gas_unit_cost_p"] + gas["gas_standing_charge_p"], 3)
+        row["gas_avoided_p"] = round(gas_avoided_p, 3)
+        row["scenarios"] = rows
+        return row
+
     async def run(self, progress=None):
         """Run the full annual projection and return the results document."""
         year = self.config["year"]
@@ -1436,8 +1596,57 @@ class AnnualPredictor:
             self.log("Warn: {}".format(car_overflow_warning))
             self.caveats.append(car_overflow_warning)
 
+        self.heat_model = await self._build_heat_model(weather_client, year)
+
         self.predbat = create_headless_predbat(self.work_dir, self.config["timezone"], self.log)
         self.load_source = await self._build_load_source()
+        if self.heat_model:
+            # Both legs are built from a common "house without the heat pump" baseline, so
+            # they differ by exactly the heat pump and nothing else. For a prospective
+            # buyer that baseline IS the configured load. For an existing owner the
+            # configured load already contains the heat pump, so the baseline has to be
+            # recovered by subtracting it back out first - otherwise it is counted twice,
+            # which is the single easiest way to get a wrong answer out of this tool.
+            if self.heat_model.settings["existing_heat_pump"]:
+                self.gas_load_source = HeatPumpRemovedLoadProfile(self.load_source, self.heat_model)
+            else:
+                self.gas_load_source = self.load_source
+            self.heat_load_source = HeatPumpLoadProfile(self.gas_load_source, self.heat_model)
+            self.caveats.append(
+                "The heat pump comparison runs every scenario twice - once on gas, once on the heat pump - so the heat pump's extra electricity is what remains after PV, the battery and Predbat, not its consumption at an average rate. Gas is priced at a flat {} p/kWh with no seasonal variation.".format(self.heat_model.settings["gas_p_per_kwh"])
+            )
+            self.caveats.append(
+                "Heat demand is spread across the year by heating degree days from {}'s real hourly temperatures, and COP varies with outdoor temperature around your {} SCOP (realised {}). Hot water runs at a lower COP than space heating because the cylinder needs a higher flow temperature.".format(
+                    year, self.heat_model.settings["scop"], round(self.heat_model.realised_scop(), 2)
+                )
+            )
+            if self.config["heat"].get("existing_heat_pump"):
+                self.caveats.append(
+                    "You already have a heat pump, so your annual electricity figure is taken as INCLUDING it: the modelled heat pump is subtracted back out to recover the house without it, and both legs are built from that baseline. The comparison therefore reads as what going back to a gas boiler would cost, not whether to fit a heat pump."
+                )
+            self.caveats.append("The heat pump is modelled as ordinary electrical load on your existing tariff. Switching to a heat pump tariff, or letting Predbat shift the space heating itself, is not modelled and would change the answer.")
+
+            heat_settings = self.heat_model.settings
+            if heat_settings["smart_hot_water"]:
+                self.caveats.append(
+                    "The hot water cylinder is smart: each of its {} charge(s) a day is placed in the cheapest window that still finishes before the water is needed, which is what a Mixergy-style cylinder does. Space heating is NOT shifted this way - it has to follow the weather.".format(
+                        heat_settings["water_charges_per_day"]
+                    )
+                )
+            else:
+                self.caveats.append("The hot water cylinder is on a fixed timer, reheating to be ready for {} draw-off(s) a day. Ticking the smart cylinder option lets it charge on the cheapest rates instead, which is usually worth considerably more than anything else in this comparison.".format(heat_settings["water_charges_per_day"]))
+
+            # A cylinder that cannot physically hold a day's hot water in the configured
+            # number of charges is a config error the user can fix (more charges, or a
+            # bigger cylinder), and it silently understates their real hot water cost if
+            # left unsaid - so it is surfaced rather than modelled around.
+            capacity = self.heat_model.full_charge_kwh * heat_settings["water_charges_per_day"]
+            if self.heat_model.water_charge_per_day_kwh > capacity > 0:
+                capacity_message = "Your hot water needs {:.1f} kWh a day but a {:.0f} L cylinder charged to {:.0f}C holds only {:.1f} kWh, so {} charge(s) a day cannot cover it. The model still delivers the full amount; in reality you would run out, or need more charges a day.".format(
+                    self.heat_model.water_charge_per_day_kwh, heat_settings["cylinder_volume_l"], heat_settings["hot_water_target_c"], self.heat_model.full_charge_kwh, heat_settings["water_charges_per_day"]
+                )
+                self.log("Warn: Annual: {}".format(capacity_message))
+                self.caveats.append(capacity_message)
         self.tariff = AnnualTariff(self.config["tariff"], log=self.log, predbat=self.predbat, storage=self.storage, timezone=self.config["timezone"])
 
         zone = pytz.timezone(self.config["timezone"])
@@ -1470,21 +1679,47 @@ class AnnualPredictor:
                 completed += 1
                 continue
 
+            # Correct this month's sampled days onto the month's own heat demand before any
+            # of them are planned - the sample was chosen by irradiance, not temperature.
+            # See HeatModel.set_month_scale().
+            if self.heat_model:
+                self.heat_model.set_month_scale(month, samples)
+
             surviving_samples = []
             day_results = []
+            heat_day_results = []
             failed_days = []
             month_plans = []
             for day, weight in samples:
                 midnight_utc = zone.localize(datetime(day.year, day.month, day.day)).astimezone(pytz.utc)
                 day_plans = [] if self.config["debug"] else None
                 try:
-                    result = run_day(self.predbat, self.config, self.weather, self.tariff, self.load_source, day, midnight_utc, plans=day_plans)
+                    result = run_day(self.predbat, self.config, self.weather, self.tariff, self.gas_load_source or self.load_source, day, midnight_utc, plans=day_plans)
+                    # The heat pump leg is the SAME sampled day re-run with the heat pump's
+                    # electricity added to the household load. Both legs are run inside one
+                    # try so a day that fails either is dropped from both: the whole heating
+                    # answer is the difference between the two legs, and a day present in one
+                    # but not the other would silently corrupt it.
+                    if self.heat_model:
+                        # A smart cylinder charges on the cheapest half-hours, so it has to see
+                        # this day's rates before its load profile is built. Set here rather than
+                        # inside prepare_sample() because prepare_sample builds the load forecast
+                        # BEFORE it fetches rates, and because the gas leg above must never see
+                        # them - only the heat pump leg has a cylinder to schedule.
+                        rate_import, _ = self.tariff.rates_for(midnight_utc, PLAN_MINUTES)
+                        self.heat_model.set_plan_rates(day, rate_import)
+                        heat_result = run_day(self.predbat, self.config, self.weather, self.tariff, self.heat_load_source, day, midnight_utc)
+                        self.heat_model.set_plan_rates(None, None)
+                    else:
+                        heat_result = None
                 except Exception as exc:  # noqa: BLE001 - one bad sample must not abort the whole year
                     self.log("Warn: Annual: {} in month {} failed to plan/cost ({}: {}); excluding it from this month's total".format(day.isoformat(), month, type(exc).__name__, exc))
                     failed_days.append(day.isoformat())
                     continue
                 surviving_samples.append((day, weight))
                 day_results.append(result)
+                if heat_result is not None:
+                    heat_day_results.append(heat_result)
                 if day_plans is not None:
                     month_plans.extend(dict(entry, day=day.isoformat()) for entry in day_plans)
 
@@ -1501,17 +1736,25 @@ class AnnualPredictor:
             _, rate_export = self.tariff.rates_for(first_midnight, DAY_MINUTES)
             export_rate = average_rate(rate_export, DAY_MINUTES)
 
-            scenarios = {}
-            for key in SCENARIO_KEYS:
-                entry = {field: totals[key][field] for field in SCENARIO_FIELDS}
-                # An approximation, not a second income stream: cost_p already prices export at
-                # the real per-minute export rate for every minute it happened, so the export
-                # credit is already inside it. This is a cruder second estimate of the same
-                # money (a single day's flat average export rate), kept only for a human-
-                # readable "how much of that came from export" figure. Adding it to cost_p
-                # double-counts the export income - see the results-document caveat below.
-                entry["export_credit_p_estimate"] = entry["export_kwh"] * export_rate
-                scenarios[key] = {name: round(value, 3) for name, value in entry.items()}
+            def build_scenarios(scenario_totals):
+                """Round one leg's weighted monthly totals and attach the export credit estimate.
+
+                ``export_credit_p_estimate`` is an approximation, not a second income
+                stream: cost_p already prices export at the real per-minute export rate for
+                every minute it happened, so the export credit is already inside it. This is
+                a cruder second estimate of the same money (a single day's flat average
+                export rate), kept only for a human-readable "how much of that came from
+                export" figure. Adding it to cost_p double-counts the export income - see
+                the results-document caveat below.
+                """
+                built = {}
+                for key in SCENARIO_KEYS:
+                    entry = {field: scenario_totals[key][field] for field in SCENARIO_FIELDS}
+                    entry["export_credit_p_estimate"] = entry["export_kwh"] * export_rate
+                    built[key] = {name: round(value, 3) for name, value in entry.items()}
+                return built
+
+            scenarios = build_scenarios(totals)
 
             row = {
                 "month": month,
@@ -1528,10 +1771,27 @@ class AnnualPredictor:
                 # JSON, the chart or the table.
                 "rates_synthesised": self._synthesised_sides(self.tariff.fallback_months, year, month),
             }
+            if self.heat_model and heat_day_results:
+                heat_scenarios = build_scenarios(self._month_scenarios(surviving_samples, heat_day_results))
+                row["scenarios_heatpump"] = heat_scenarios
+                row["heat"] = self._heat_month_row(month, scenarios, heat_scenarios)
             if self.config["debug"]:
                 row["plans"] = month_plans
             months.append(row)
             completed += 1
+
+        # A heat pump that will not fit inside the stated household consumption is a real
+        # config error - the baseline gets floored at zero and the gas leg is then billed
+        # for more electricity than it should be - so the shortfall is surfaced rather
+        # than left inside HeatPumpRemovedLoadProfile where nobody would see it.
+        residual = getattr(self.gas_load_source, "unsubtracted_kwh", 0.0)
+        if residual > 1.0:
+            residual_message = (
+                "Your heat pump does not fit inside the annual electricity figure you gave: {:.0f} kWh of it could not be subtracted, because the household load was already at zero at those times. "
+                "Check that the Load figure really includes the heat pump, and that the heat pump's own consumption is not overstated.".format(residual)
+            )
+            self.log("Warn: Annual: {}".format(residual_message))
+            self.caveats.append(residual_message)
 
         self.caveats.extend(self._tariff_fallback_caveats(self.tariff.fallback_months, self.tariff.unpaid_export_months, year))
 
@@ -1568,6 +1828,8 @@ class AnnualPredictor:
             if no_result_message not in self.caveats:
                 self.caveats.append(no_result_message)
 
+        heat = self._build_heat_results(included)
+
         total_kwp = sum(float(array.get("kwp", 0) or 0) for array in self.config.get("solar") or [])
         battery_kwh = float((self.config.get("battery") or {}).get("size_kwh", 0) or 0)
         costs = build_costs(total_kwp, battery_kwh, self.config["costs"])
@@ -1581,6 +1843,7 @@ class AnnualPredictor:
 
         return {
             "year": self.config["year"],
+            "schema_version": RESULTS_SCHEMA_VERSION,
             "config": self.config["raw"],
             "months": months,
             "annual": {
@@ -1591,6 +1854,62 @@ class AnnualPredictor:
                 "months_excluded": excluded,
                 "costs": costs,
                 "payback": payback,
+                "heat": heat,
             },
             "caveats": self.caveats,
         }
+
+    def _build_heat_results(self, included):
+        """Return the run-level heating comparison, or None when no heat pump was modelled.
+
+        Sums the per-month heat rows the same way the scenario totals are summed, so a
+        month excluded from one is excluded from the other and the two stay comparable.
+        A month that ran but produced no heat row (its heat pump leg failed everywhere)
+        is dropped from BOTH the heat totals and the payback's month count, so a partial
+        heating year is reported as partial rather than quietly summed as a whole one.
+        """
+        if not self.heat_model:
+            return None
+
+        heat_months = [entry for entry in included if entry.get("heat")]
+        settings = self.heat_model.settings
+        heat_costs = build_heat_costs(self.config["costs"])
+
+        if not heat_months:
+            return {
+                "available": False,
+                "reason": "No month produced a usable heat pump result.",
+                "summary": self.heat_model.summary(),
+                "costs": heat_costs,
+            }
+
+        fields = ["heat_kwh", "space_heat_kwh", "water_heat_kwh", "gas_kwh", "gas_unit_cost_p", "gas_standing_charge_p", "gas_total_p", "gas_avoided_p"]
+        totals = {field: round(sum(entry["heat"][field] for entry in heat_months), 3) for field in fields}
+
+        scenarios = {}
+        for key in SCENARIO_KEYS:
+            scenarios[key] = {
+                field: round(sum(entry["heat"]["scenarios"][key][field] for entry in heat_months), 3)
+                for field in ["electricity_gas_p", "electricity_heatpump_p", "extra_electricity_p", "annual_saving_p"]
+            }
+
+        # The electricity the heat pump itself drew, before PV or the battery served any of
+        # it. Reported alongside the extra COST because the two are very different numbers
+        # for a household with a battery, and quoting only the cost invites the reader to
+        # divide it by an assumed rate and get the wrong consumption.
+        heat_pump_kwh = round(totals["heat_kwh"] / self.heat_model.realised_scop(), 3) if self.heat_model.realised_scop() > 0 else 0.0
+
+        result = {
+            "available": True,
+            "summary": self.heat_model.summary(),
+            "costs": heat_costs,
+            "months_included": len(heat_months),
+            "heat_pump_kwh_estimate": heat_pump_kwh,
+            "scenarios": scenarios,
+            "payback": build_heat_payback(scenarios, heat_costs, len(heat_months)),
+        }
+        result.update(totals)
+
+        if not settings["remove_gas_supply"]:
+            result["retained_gas_standing_charge_p"] = totals["gas_standing_charge_p"]
+        return result

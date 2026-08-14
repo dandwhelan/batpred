@@ -313,7 +313,10 @@ class Fetch:
 
         # Fill zero periods with integrated power data
         if zero_periods:
-            self.log("Warn: Found {} periods of zero load with power data, filling using power integration".format(len(zero_periods)))
+            # Not a warning - the gap is found and repaired here, so this is routine. A real
+            # historic outage would otherwise re-report itself every cycle until it aged out
+            # of the history window.
+            self.log("Info: Found {} periods of zero load with power data, filling using power integration".format(len(zero_periods)))
             # Print the first 5 periods for debugging
             for i, (period_start, period_end, base_value) in enumerate(zero_periods[:5]):
                 start_timestamp = self.now_utc - timedelta(minutes=period_start)

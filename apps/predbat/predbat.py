@@ -458,6 +458,10 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.current_charge_limit_kwh = 0.0
         self.inverter_limit = 0.0
         self.export_limit = 0.0
+        # Export targets, per inverter id, that we gave up writing over REST because the
+        # register never read them back. Held here rather than on the Inverter because a
+        # new Inverter object is built every cycle.
+        self.rest_discharge_target_unwritable = {}
         self.charge_limit = []
         self.charge_limit_best = []
         self.charge_window = []

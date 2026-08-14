@@ -174,8 +174,10 @@ class Inverter:
         self.rest_v3 = False
         self.serial_number = "Unknown"
         self.count_register_writes = 0
-        # Export target we gave up writing over REST because the register never read it back
-        self.rest_discharge_target_unwritable = None
+        # Export targets we gave up writing over REST live on the base, see below - a new
+        # Inverter is constructed every cycle so per-instance state would forget them
+        if not hasattr(self.base, "rest_discharge_target_unwritable"):
+            self.base.rest_discharge_target_unwritable = {}
         self.created_attributes = {}
         self.track_charge_start = "00:00:00"
         self.track_charge_end = "00:00:00"
@@ -2507,7 +2509,7 @@ class Inverter:
                         current = 0
 
                     if current != target_soc:
-                        if self.rest_discharge_target_unwritable == target_soc:
+                        if self.base.rest_discharge_target_unwritable.get(self.id) == target_soc:
                             self.log("Inverter {} export target register does not read back {}, leaving it alone".format(self.id, target_soc))
                         else:
                             self.rest_setDischargeTarget(target_soc)
@@ -3379,6 +3381,26 @@ class Inverter:
         self.base.record_status("Warn: Inverter {} REST failed to setChargeSlot1".format(self.id), had_errors=True)
         return False
 
+    def rest_write_acknowledged(self, response):
+        """
+        Did GivTCP report the write itself as successful?
+
+        On some inverters the whole discharge_target_soc_1..10 block is absent from GivTCP's
+        read map and stays at 0 whatever is written, so the readback can never confirm a
+        write that did in fact land - GivTCP logs "was a success" and the inverter honours it.
+        The POST response is the only confirmation available on that hardware.
+        """
+        if response is None or getattr(response, "status_code", None) != 200:
+            return False
+        try:
+            result = str(response.json().get("result", "")).lower()
+        except ValueError:
+            return False
+        # "was not a success" and "failed" both contain a word we would otherwise match on
+        if "fail" in result or "error" in result or "not a success" in result:
+            return False
+        return "success" in result
+
     def rest_setDischargeTarget(self, target):
         """
         Configure discharge to percent via REST
@@ -3396,9 +3418,9 @@ class Inverter:
                 current = int(float(current))
             except (ValueError, TypeError):
                 current = None
-            if current == target:
+            if current == target or self.rest_write_acknowledged(r):
                 self.count_register_writes += 1
-                self.rest_discharge_target_unwritable = None
+                self.base.rest_discharge_target_unwritable.pop(self.id, None)
                 self.base.log("Inverter {} Set export target slot 1 {} via REST successful after retry {}".format(self.id, data, retry))
                 return True
             self.sleep(2)
@@ -3406,7 +3428,7 @@ class Inverter:
         # Some inverters accept the write but never read the register back (it stays at 0), so
         # retrying it every cycle just floods the log and holds predbat.status in a warning state.
         # Report it once, then leave this target alone until a different one is asked for.
-        self.rest_discharge_target_unwritable = target
+        self.base.rest_discharge_target_unwritable[self.id] = target
         self.base.log("Warn: Inverter {} Set export target slot 1 {} via REST failed".format(self.id, data))
         self.base.record_status("Warn: Inverter {} REST failed to setExportTarget".format(self.id), had_errors=True)
         return False

@@ -108,10 +108,20 @@ class AnnualTariff:
         self.unpaid_export_months = set()
 
     def _resolve_url(self, url, name, dno_region=None):
-        """Substitute templated arguments such as {dno_region} into a tariff URL, without mutating predbat.args."""
+        """Substitute templated arguments such as {dno_region} into a tariff URL, without mutating predbat.args.
+
+        Prefilled URLs can come from two different sources with two different
+        placeholder names for the same value: the tariff catalogue's own entries
+        use ``{dno_region}``, while URLs copied from the user's live apps.yaml
+        (``rates_import_octopus_url`` / ``rates_export_octopus_url`` - see
+        web_annual.py's prefill_config) use Predbat's own long-standing
+        ``{octopus_region}`` convention. Both must resolve to the same region
+        letter, so both keys are offered here regardless of which one the URL
+        actually contains.
+        """
         if not url:
             return None
-        extra_args = {"dno_region": dno_region} if dno_region else None
+        extra_args = {"dno_region": dno_region, "octopus_region": dno_region} if dno_region else None
         return self.predbat.resolve_arg(name, url, indirect=False, extra_args=extra_args)
 
     @staticmethod

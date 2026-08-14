@@ -17,6 +17,7 @@ from multiple async contexts.
 
 from datetime import timedelta, datetime, timezone
 import asyncio
+import sqlite3
 import time
 import traceback
 import threading
@@ -26,6 +27,7 @@ from component_base import ComponentBase
 IPC_TIMEOUT = 60.0  # Seconds to wait for IPC response
 MAINTENANCE_HOUR = 3  # Local hour at which nightly database maintenance runs
 IDLE_WAIT = 30.0  # Seconds to wait for new work before re-checking housekeeping
+DB_ERROR_RECOVER_AFTER = 5  # Consecutive corruption errors before rebuilding the connection
 
 
 class DatabaseManager(ComponentBase):
@@ -50,6 +52,7 @@ class DatabaseManager(ComponentBase):
         self.api_started = False
         self.last_success_timestamp = None
         self.last_commit_time = datetime.now(timezone.utc)
+        self.db_error_count = 0
 
     def bridge_event(self, loop):
         """
@@ -141,16 +144,49 @@ class DatabaseManager(ComponentBase):
                             self.db_engine._commit_db()
                             self.last_commit_time = now
                 self.last_success_timestamp = datetime.now(timezone.utc)
+                self.db_error_count = 0
 
             except Exception as e:
                 self.log(f"Error in database thread: {e}")
                 self.log("Error: " + traceback.format_exc())
+                self.recover_from_error(e)
 
         if hasattr(self.db_engine, "_commit_db"):
             self.db_engine._commit_db()
         self.db_engine._close()
         self.log("db_manager: Stopped cleanly")
         self.api_started = False
+
+    def recover_from_error(self, error):
+        """
+        Rebuild the connection after repeated corruption errors.
+
+        The queue loop otherwise has no recovery of its own - DatabaseEngine only retries
+        and quarantines at startup - so a single bad page leaves Predbat running with
+        db_primary set and every history write failing silently for the life of the process.
+        That is exactly what happened on 2026-08-02, and it only cleared by luck.
+
+        A lock or a busy file is not corruption: another reader will let go on its own and
+        reconnecting mid-contention would just make it worse, so those are left alone.
+        """
+        if not isinstance(error, sqlite3.DatabaseError) or isinstance(error, sqlite3.OperationalError):
+            return
+
+        self.db_error_count += 1
+        if self.db_error_count < DB_ERROR_RECOVER_AFTER:
+            return
+
+        self.log("Warn: db_manager: {} database errors in a row, rebuilding the connection".format(self.db_error_count))
+        self.db_error_count = 0
+        try:
+            # _cleanup_db_retry reconnects, re-checks, and quarantines the file if it really
+            # is damaged, so this recovers or starts a fresh database rather than looping
+            self.db_engine._connect()
+            self.db_engine._cleanup_db_retry()
+            self.log("Info: db_manager: Database connection rebuilt")
+        except Exception as e:
+            self.log("Error: db_manager: Unable to recover the database: {}".format(e))
+            self.log("Error: " + traceback.format_exc())
 
     def run_maintenance(self):
         """
