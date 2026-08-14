@@ -31,6 +31,26 @@ DB_OPEN_RETRY_WAIT = 5
 # whole file, evicting a database-sized amount of page cache, so it is not worth doing
 # for a small saving on a memory-constrained machine.
 VACUUM_MIN_FREE_BYTES = 256 * 1024 * 1024
+# SQLite result codes that positively identify a damaged image, as opposed to a file that is
+# merely busy, unreachable, or held open by someone else
+SQLITE_CORRUPT = 11
+SQLITE_NOTADB = 26
+
+
+def _is_corruption_error(error):
+    """
+    Is this SQLite error a positive report that the database image is damaged?
+
+    Matched on the result code rather than the exception class, because sqlite3.DatabaseError
+    covers far more than corruption - ProgrammingError ("Cannot operate on a closed database")
+    is one of its subclasses, and a bug of our own must never be read as a reason to throw the
+    user's history away.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return False
+    # Extended result codes carry the primary code in the low byte (SQLITE_CORRUPT_INDEX = 779)
+    return (code & 0xFF) in (SQLITE_CORRUPT, SQLITE_NOTADB)
 
 
 class DatabaseEngine:
@@ -110,13 +130,22 @@ class DatabaseEngine:
             self.log("Warn: db_engine: Giving up after {} attempts ({}) - not corruption, leaving the database alone".format(DB_OPEN_RETRIES, last_error))
             return
 
-        # Quarantine only on a *positive* report of damage. quick_check failing to run at all
-        # says nothing about the file, so anything other than a clear non-ok verdict has to
-        # keep the database - throwing away history needs proof, not the absence of proof.
+        # Quarantine only on a *positive* report of damage. A check that simply cannot reach a
+        # verdict has to keep the database - throwing away history needs proof, not the absence
+        # of proof.
         try:
             result = self.db_cursor.execute("PRAGMA quick_check(10)").fetchone()
         except sqlite3.DatabaseError as e:
-            self.log("Warn: db_engine: quick_check could not run ({}) - keeping the database".format(e))
+            # An unreadable image is reported this way rather than as a verdict: SQLite that
+            # cannot recognise the header never gets far enough to grade the pages. That is a
+            # positive finding, and a file SQLite will not read is the permanently corrupt file
+            # quarantine exists for. Keeping it would leave Predbat running with db_primary set
+            # and every history write failing for the life of the process, unnoticed.
+            if _is_corruption_error(e):
+                self.log("Error: db_engine: quick_check could not run, the image is unreadable: {}".format(e))
+                self._quarantine_db()
+            else:
+                self.log("Warn: db_engine: quick_check could not run ({}) - keeping the database".format(e))
             return
 
         if not result:

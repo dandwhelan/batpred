@@ -150,6 +150,7 @@ enphaseenergy
 Enpower
 entrez
 epod
+errorcode
 etok
 euids
 EVDC
@@ -336,6 +337,7 @@ nordpool
 noreferrer
 nosc
 nosuchrun
+NOTADB
 nrgheat
 numpy
 OCPP
