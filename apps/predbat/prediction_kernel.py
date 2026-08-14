@@ -20,6 +20,7 @@ PK_PARITY_REVISION in the .cpp must both be bumped so a stale binary is
 rejected at load time rather than producing divergent results.
 """
 
+import array
 import ctypes
 import os
 import platform
@@ -27,11 +28,15 @@ import sys
 import weakref
 
 from const import PREDICT_STEP
-from utils import remove_intersecting_windows, get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot
+from utils import get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot
 
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
-KERNEL_ABI_VERSION = 102
-KERNEL_PARITY_REVISION = 103
+# Bumped past this fork's previous 102/103 on the merge of upstream v8.48.1: both sides changed
+# the context struct (upstream added the pv90 scenario arrays, this fork the FIT tariff fields)
+# and both changed hot loop behaviour, so every binary built before this merge - this fork's own
+# 102 and upstream's 3 alike - must be rejected at load time rather than trusted.
+KERNEL_ABI_VERSION = 103
+KERNEL_PARITY_REVISION = 104
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = 4
@@ -53,6 +58,8 @@ class PkContext(ctypes.Structure):
         ("load", ctypes.POINTER(ctypes.c_double)),
         ("pv10", ctypes.POINTER(ctypes.c_double)),
         ("load10", ctypes.POINTER(ctypes.c_double)),
+        ("pv90", ctypes.POINTER(ctypes.c_double)),
+        ("load90", ctypes.POINTER(ctypes.c_double)),
         ("temp_charge_cap", ctypes.POINTER(ctypes.c_double)),
         ("temp_discharge_cap", ctypes.POINTER(ctypes.c_double)),
         ("io_flag", ctypes.POINTER(ctypes.c_int32)),
@@ -146,7 +153,7 @@ class PkScenario(ctypes.Structure):
         ("soc_out", ctypes.POINTER(ctypes.c_double)),
         ("n_charge", ctypes.c_int32),
         ("n_export", ctypes.c_int32),
-        ("pv10", ctypes.c_int32),
+        ("pv_scenario", ctypes.c_int32),
         ("end_record", ctypes.c_int32),
         ("step", ctypes.c_int32),
     ]
@@ -261,14 +268,48 @@ def load_kernel(log=None):
     return KERNEL_LIB
 
 
+def select_array_typecode(candidates, ctype):
+    """Pick an array.array typecode whose itemsize matches ctype exactly, or None if none does.
+
+    array.array's integer typecodes are C types, so their widths are platform-defined - 'i' is a C
+    int, which is 32 bit everywhere predbat runs but is not guaranteed to be. Getting this wrong is
+    not a loud failure: from_buffer only checks the buffer is big enough, so a wider backing type is
+    accepted and the kernel silently reads interleaved garbage. Matching the size up front, and
+    falling back to the slower construction when nothing matches, keeps that impossible.
+    """
+    size = ctypes.sizeof(ctype)
+    for typecode in candidates:
+        if array.array(typecode).itemsize == size:
+            return typecode
+    return None
+
+
+DOUBLE_TYPECODE = select_array_typecode(("d", "f"), ctypes.c_double)
+INT32_TYPECODE = select_array_typecode(("i", "l", "h"), ctypes.c_int32)
+
+
 def double_array(values):
-    """Create a ctypes double array from a Python list"""
-    return (ctypes.c_double * len(values))(*values)
+    """Create a ctypes double array from a Python list.
+
+    Built via array.array rather than (ctypes.c_double * n)(*values): the latter unpacks the list as
+    positional arguments and is several times slower, which matters because these are rebuilt on
+    every simulation. from_buffer returns a view over the array.array, and ctypes keeps the backing
+    object alive through the view's _objects, so the buffer cannot be collected while the kernel is
+    using it. Each pool worker is a separate process (multiprocessing with fork), so no buffer is
+    ever shared between workers.
+    """
+    if DOUBLE_TYPECODE is None:
+        return (ctypes.c_double * len(values))(*values)
+    backing = array.array(DOUBLE_TYPECODE, values)
+    return (ctypes.c_double * len(backing)).from_buffer(backing)
 
 
 def int32_array(values):
-    """Create a ctypes int32 array from a Python list"""
-    return (ctypes.c_int32 * len(values))(*values)
+    """Create a ctypes int32 array from a Python list - see double_array for why array.array is used"""
+    if INT32_TYPECODE is None:
+        return (ctypes.c_int32 * len(values))(*values)
+    backing = array.array(INT32_TYPECODE, values)
+    return (ctypes.c_int32 * len(backing)).from_buffer(backing)
 
 
 def kernel_context_free(handle):
@@ -303,6 +344,8 @@ def create_kernel_context(pred):
         load = []
         pv10 = []
         load10 = []
+        pv90 = []
+        load90 = []
         temp_charge_cap = []
         temp_discharge_cap = []
         carbon = []
@@ -321,6 +364,8 @@ def create_kernel_context(pred):
             load.append(pred.load_minutes_step[minute])
             pv10.append(pred.pv_forecast_minute10_step[minute])
             load10.append(pred.load_minutes_step10[minute])
+            pv90.append(pred.pv_forecast_minute90_step[minute])
+            load90.append(pred.load_minutes_step90[minute])
             # Pre-compute the temperature rate cap base (before the min against the max rate,
             # which the kernel applies per lookup) - mirrors utils.py find_battery_temperature_cap
             battery_temperature = pred.battery_temperature_prediction.get(minute, pred.battery_temperature)
@@ -348,6 +393,8 @@ def create_kernel_context(pred):
         ctx.load = double_array(load)
         ctx.pv10 = double_array(pv10)
         ctx.load10 = double_array(load10)
+        ctx.pv90 = double_array(pv90)
+        ctx.load90 = double_array(load90)
         ctx.temp_charge_cap = double_array(temp_charge_cap)
         ctx.temp_discharge_cap = double_array(temp_discharge_cap)
         ctx.io_flag = int32_array(io_flag)
@@ -453,7 +500,7 @@ def kernel_supported(pred, save, step):
     return not save and not pred.debug_enable and getattr(pred, "kernel_handle", 0) != 0
 
 
-def run_prediction_kernel(pred, charge_limit, charge_window, export_window, export_limits, pv10, end_record, step, cache):
+def run_prediction_kernel(pred, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, step, cache):
     """Run one prediction scenario through the C++ kernel.
 
     The caller's requested step is intentionally ignored - the kernel always simulates at
@@ -467,8 +514,9 @@ def run_prediction_kernel(pred, charge_limit, charge_window, export_window, expo
     if not lib:
         return None
 
-    # Remove intersecting windows, mirroring the Python engine - prediction.py:492-493
-    charge_limit, charge_window = remove_intersecting_windows(charge_limit, charge_window, export_limits, export_window)
+    # The kernel clips intersecting windows itself (clip_intersecting_charge_windows in
+    # prediction_kernel.cpp), mirroring what the Python engine does before simulating. Doing it in
+    # Python here cost more per simulation than the simulation, so the raw windows are handed over.
 
     if len(charge_limit) < len(charge_window) or len(export_limits) < len(export_window):
         # The kernel indexes limits by window number - a short limits list would read out of bounds
@@ -491,7 +539,7 @@ def run_prediction_kernel(pred, charge_limit, charge_window, export_window, expo
     scenario.soc_out = soc_out
     scenario.n_charge = len(charge_window)
     scenario.n_export = len(export_window)
-    scenario.pv10 = 1 if pv10 else 0
+    scenario.pv_scenario = int(pv_scenario)
     scenario.end_record = end_record
     scenario.step = PREDICT_STEP  # the caller's step is ignored - see run_prediction_kernel docstring
 

@@ -21,7 +21,7 @@ import copy
 import traceback
 from datetime import datetime, timedelta
 from multiprocessing import Pool, cpu_count
-from const import PREDICT_STEP, TIME_FORMAT, MINUTE_WATT
+from const import PREDICT_STEP, PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90, TIME_FORMAT, MINUTE_WATT
 from utils import calc_percent_limit, dp0, dp1, dp2, dp3, dp4, remove_intersecting_windows, calc_percent_limit, in_car_slot
 from prediction import Prediction, wrapped_run_prediction_single, wrapped_run_prediction_charge, wrapped_run_prediction_charge_min_max, wrapped_run_prediction_export, wrapped_run_prediction_charge_min_max
 from prediction_kernel import kernel_status_summary
@@ -392,6 +392,15 @@ class Plan:
             reset_contribution = scenario_hash_entry(1, window_n, best_export_limits_reset[window_n])
             export_hash_delta[window_n] = {True: scenario_hash_entry(1, window_n, 99.0) - reset_contribution, False: scenario_hash_entry(1, window_n, min_freeze_percent) - reset_contribution}
 
+        # Which charge window an export window collides with is a purely geometric question, and this
+        # function only ever turns windows on and off - it never moves a window's start or end. So the
+        # answer is fixed for the life of the call and is memoised here, keyed by export window. Without
+        # it the trial loop below re-scans the whole charge window list for every export window of every
+        # candidate: on a benchmark scenario that was 1.74 million linear scans of a ~200 entry list,
+        # for 221 distinct answers. Only the collision itself is cached - the limit that follows from it
+        # depends on charge_mods/best_limits_reset and changes from trial to trial.
+        hit_charge_cache = {}
+
         # Start loop of trials
         for loop_price in all_prices:
             if best_level_score is not None:
@@ -454,7 +463,10 @@ class Plan:
                                 # Remove export hitting charge windows if this is disabled
                                 if not self.calculate_export_oncharge:
                                     for window_n in all_d[:]:
-                                        hit_charge = self.hit_charge_window(self.charge_window_best, export_window[window_n]["start"], export_window[window_n]["end"])
+                                        hit_charge = hit_charge_cache.get(window_n)
+                                        if hit_charge is None:
+                                            hit_charge = self.hit_charge_window(self.charge_window_best, export_window[window_n]["start"], export_window[window_n]["end"])
+                                            hit_charge_cache[window_n] = hit_charge
                                         if hit_charge >= 0:
                                             if hit_charge in charge_mods:
                                                 hit_charge_limit = self.reserve if charge_mods[hit_charge] else self.soc_max
@@ -492,8 +504,9 @@ class Plan:
                                     try_export[window_n] = 99.0 if freeze else min_freeze_percent
 
                                 pred_item = {}
-                                pred_item["handle"] = self.launch_run_prediction_single(try_charge_limit, charge_window, export_window, try_export, False, end_record=end_record, step=step)
-                                pred_item["handle10"] = self.launch_run_prediction_single(try_charge_limit, charge_window, export_window, try_export, True, end_record=end_record, step=step)
+                                pred_item["handle"] = self.launch_run_prediction_single(try_charge_limit, charge_window, export_window, try_export, PV_SCENARIO_NOMINAL, end_record=end_record, step=step)
+                                pred_item["handle10"] = self.launch_run_prediction_single(try_charge_limit, charge_window, export_window, try_export, PV_SCENARIO_PV10, end_record=end_record, step=step)
+                                pred_item["handle90"] = self.launch_run_prediction_single(try_charge_limit, charge_window, export_window, try_export, PV_SCENARIO_PV90, end_record=end_record, step=step) if self.pv_metric90_weight > 0 else None
                                 pred_item["charge_limit"] = try_charge_limit
                                 pred_item["export_limit"] = try_export
                                 pred_item["loop_price"] = loop_price
@@ -506,6 +519,7 @@ class Plan:
                 for pred in pred_table:
                     handle = pred["handle"]
                     handle10 = pred["handle10"]
+                    handle90 = pred.get("handle90")
                     try_charge_limit = pred["charge_limit"]
                     try_export = pred["export_limit"]
                     loop_price = pred["loop_price"]
@@ -516,8 +530,15 @@ class Plan:
 
                     cost, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = handle.get()
                     cost10, import_kwh_battery10, import_kwh_house10, export_kwh10, soc_min10, soc10, soc_min_minute10, battery_cycle10, metric_keep10, final_iboost10, final_carbon_g10 = handle10.get()
+                    soc90 = None
+                    cost90 = None
+                    final_iboost90 = 0.0
+                    if handle90 is not None:
+                        (cost90, _, _, _, _, soc90, _, _, _, final_iboost90, _) = handle90.get()
 
-                    metric, battery_value = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh)
+                    metric, battery_value = self.compute_metric(
+                        end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh, soc90=soc90, cost90=cost90, final_iboost90=final_iboost90
+                    )
 
                     tried_list[try_hash] = metric
 
@@ -598,7 +619,7 @@ class Plan:
         if best_all_n:
             best_all_n.sort()
             metric, battery_value, cost, keep, cycle, carbon, import_this, export_this = self.run_prediction_metric(best_limits, charge_window, export_window, best_export_limits, end_record=end_record)
-            best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import = self.optimise_charge_limit(
+            best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan = self.optimise_charge_limit(
                 0, record_charge_windows, best_limits, charge_window, export_window, best_export_limits, all_n=best_all_n, end_record=end_record
             )
             if self.debug_enable:
@@ -626,49 +647,49 @@ class Plan:
             best_max_export_slots,
         )
 
-    def launch_run_prediction_single(self, charge_limit, charge_window, export_window, export_limits, pv10, end_record, step=PREDICT_STEP):
+    def launch_run_prediction_single(self, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, step=PREDICT_STEP):
         """
         Launch a thread to run a prediction
         """
         charge_limit = list(charge_limit)
         export_limits = list(export_limits)
         if self.pool and self.pool._state == "RUN":
-            han = self.pool.apply_async(wrapped_run_prediction_single, (charge_limit, charge_window, export_window, export_limits, pv10, end_record, step))
+            han = self.pool.apply_async(wrapped_run_prediction_single, (charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, step))
         else:
-            han = DummyThread(self.prediction.thread_run_prediction_single(charge_limit, charge_window, export_window, export_limits, pv10, end_record, step))
+            han = DummyThread(self.prediction.thread_run_prediction_single(charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, step))
         return han
 
-    def launch_run_prediction_charge(self, loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record):
+    def launch_run_prediction_charge(self, loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record):
         """
         Launch a thread to run a prediction
         """
         if self.pool and self.pool._state == "RUN":
-            han = self.pool.apply_async(wrapped_run_prediction_charge, (loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record))
+            han = self.pool.apply_async(wrapped_run_prediction_charge, (loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record))
         else:
-            han = DummyThread(self.prediction.thread_run_prediction_charge(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record))
+            han = DummyThread(self.prediction.thread_run_prediction_charge(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record))
         return han
 
-    def launch_run_prediction_charge_min_max(self, loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record):
+    def launch_run_prediction_charge_min_max(self, loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record):
         """
         Launch a thread to run a prediction
         """
         if self.pool and self.pool._state == "RUN":
-            han = self.pool.apply_async(wrapped_run_prediction_charge_min_max, (loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record))
+            han = self.pool.apply_async(wrapped_run_prediction_charge_min_max, (loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record))
         else:
-            han = DummyThread(self.prediction.thread_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv10, all_n, end_record))
+            han = DummyThread(self.prediction.thread_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, pv_scenario, all_n, end_record))
         return han
 
-    def launch_run_prediction_export(self, this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv10, all_n, end_record):
+    def launch_run_prediction_export(self, this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv_scenario, all_n, end_record):
         """
         Launch a thread to run a prediction
         """
         if self.pool and self.pool._state == "RUN":
             han = self.pool.apply_async(
                 wrapped_run_prediction_export,
-                (this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv10, all_n, end_record),
+                (this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv_scenario, all_n, end_record),
             )
         else:
-            han = DummyThread(self.prediction.thread_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv10, all_n, end_record))
+            han = DummyThread(self.prediction.thread_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, pv_scenario, all_n, end_record))
         return han
 
     def scenario_summary_title(self, record_time):
@@ -829,34 +850,64 @@ class Plan:
             window_n += 1
         return -1
 
-    def run_prediction_metric(self, charge_limit_best, charge_window_best, export_window_best, export_limits_best, end_record=None, save=None):
+    def run_prediction_metric(self, charge_limit_best, charge_window_best, export_window_best, export_limits_best, end_record=None, save=None, nominal_only=False):
         """
-        Run a single datapoint for PV and PV10 and return the metric
+        Run a single datapoint for PV and PV10 (and PV90, when enabled) and return the metric
+
+        Every optimiser comparison (optimise_charge_limit_price_threads, optimise_charge_limit,
+        optimise_export) that this baseline is measured against now blends in a pv90 term whenever
+        pv_metric90_weight > 0, so this baseline must too - otherwise the two sides of every
+        `n_best_metric < best_metric` comparison sit on different scales.
+
+        With nominal_only=True only the nominal (50%) scenario is simulated - one simulation instead
+        of two or three. The nominal results are mirrored into the pv10 slots so compute_metric's
+        pv10 adjustment cancels to zero and pv90 is skipped, giving a pure central-forecast metric.
+        Used by prune_dead_plan_slots, where each trial only asks whether the nominal outcome moved.
         """
 
         if end_record is None:
             end_record = self.forecast_minutes
 
-        (
-            cost10,
-            import_kwh_battery10,
-            import_kwh_house10,
-            export_kwh10,
-            soc_min10,
-            soc10,
-            soc_min_minute10,
-            battery_cycle10,
-            metric_keep10,
-            final_iboost10,
-            final_carbon_g10,
-        ) = self.run_prediction(
-            charge_limit_best,
-            charge_window_best,
-            export_window_best,
-            export_limits_best,
-            True,
-            end_record=end_record,
-        )
+        # Run pv90 first (when active), and the nominal scenario last. Plan.run_prediction
+        # unconditionally overwrites self.predict_soc, self.car_charging_soc_next, self.iboost_next
+        # and self.iboost_running* on every call - so whichever scenario runs last is the one those
+        # attributes are left holding. Every traced consumer only reads them after this function's
+        # final (nominal, save=save) run anyway, so this ordering does not change any output; it just
+        # removes the latent trap of pv90 being the one left behind when pv_metric90_weight > 0.
+        soc90 = None
+        cost90 = None
+        final_iboost90 = 0.0
+        if self.pv_metric90_weight > 0 and not nominal_only:
+            (cost90, _, _, _, _, soc90, _, _, _, final_iboost90, _) = self.run_prediction(
+                charge_limit_best,
+                charge_window_best,
+                export_window_best,
+                export_limits_best,
+                PV_SCENARIO_PV90,
+                end_record=end_record,
+            )
+
+        if not nominal_only:
+            (
+                cost10,
+                import_kwh_battery10,
+                import_kwh_house10,
+                export_kwh10,
+                soc_min10,
+                soc10,
+                soc_min_minute10,
+                battery_cycle10,
+                metric_keep10,
+                final_iboost10,
+                final_carbon_g10,
+            ) = self.run_prediction(
+                charge_limit_best,
+                charge_window_best,
+                export_window_best,
+                export_limits_best,
+                True,
+                end_record=end_record,
+            )
         # Run new plan
         (
             cost,
@@ -879,7 +930,14 @@ class Plan:
             end_record=end_record,
             save=save,
         )
-        metric, battery_value = self.compute_metric(self.end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh)
+        if nominal_only:
+            # Mirror the nominal outputs into the pv10 slots so the pv10 adjustment cancels to zero
+            cost10 = cost
+            soc10 = soc
+            final_iboost10 = final_iboost
+        metric, battery_value = self.compute_metric(
+            self.end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh, soc90=soc90, cost90=cost90, final_iboost90=final_iboost90
+        )
         return metric, battery_value, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh_battery + import_kwh_house, export_kwh
 
     def in_charge_window(self, charge_window, minute_abs):
@@ -951,6 +1009,135 @@ class Plan:
             return True
         return False
 
+    def plan_window_snapshot(self, typ, window_n):
+        """Copy the single window an optimisation pass can modify, so the change can be undone."""
+        if typ == "c":
+            return self.charge_limit_best[window_n]
+        return self.export_limits_best[window_n], copy.deepcopy(self.export_window_best[window_n])
+
+    def plan_window_restore(self, typ, window_n, snapshot):
+        """Put a window back as it was when plan_window_snapshot() captured it."""
+        if typ == "c":
+            self.charge_limit_best[window_n] = snapshot
+        else:
+            self.export_limits_best[window_n], self.export_window_best[window_n] = snapshot
+
+    def plan_metric_now(self, end_record):
+        """Measure the plan currently held as (metric, cost, keep, cycle, carbon, import)."""
+        metric, battery_value, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh, export_kwh = self.run_prediction_metric(self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=end_record)
+        return metric, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh
+
+    def keep_window_change_if_improved(self, baseline, candidate, typ, window_n, snapshot):
+        """Undo a pending single-window plan change unless it improved the whole-plan metric.
+
+        optimise_charge_limit/optimise_export rank their candidates against the window being turned off rather
+        than the setting the plan already holds, and on a score carrying adjustments the plan metric does not,
+        so a pass that writes their result back unconditionally can replace a better setting chosen by an
+        earlier pass. Reverting on a regression keeps such a pass monotonic - notably it stops an in-progress
+        forced export being cancelled part way through a price peak.
+
+        candidate is the metric of the plan as just written back, taken from the optimiser rather than
+        re-simulated: the optimiser scores each option by simulating the whole plan with this one window
+        changed, so the unadjusted metric of the option it selected already describes the plan we now hold.
+
+        A change that ties is kept, matching optimise_swap_export: only a genuine regression is reverted.
+        Reverting ties instead leaves a differently shaped plan of equal value, and the passes that run after
+        this one amplify that into a real difference.
+
+        The comparison carries no commitment bonus, so an in-progress export that is worse on the plan metric
+        than the setting already held is reverted even when optimise_export preferred it. Lower metric is
+        better.
+
+        Returns the metric tuple to carry forward: the candidate when the change is kept, the baseline when not.
+        """
+        if candidate[0] <= baseline[0]:
+            return candidate
+        if self.debug_enable:
+            self.log("Reverted change to {} window {} as metric {} did not improve on {}".format(typ, window_n, dp2(candidate[0]), dp2(baseline[0])))
+        self.plan_window_restore(typ, window_n, snapshot)
+        return baseline
+
+    def plan_scoring_pair(self, plan_new, plan_prev, preclip_new, preclip_prev):
+        """Return the (new, previous) plans that selection should be scored on.
+
+        Plans are (charge_limit, charge_window, export_window, export_limits) tuples.
+
+        Clipping sets the charge/export percentage actually shown on the plan and sent to the inverter, so it
+        has to stay. It is a no-op in the expected case - the mid-case cost is unchanged - but it moves the
+        metric through the PV10 branch by an amount that depends on plan shape. Scoring the clipped plans
+        therefore decides between them partly on a difference clipping invented rather than one the plans
+        really have, and by then the slot is usually hours away and will be re-planned many times before it
+        executes.
+
+        Both sides fall back together when either snapshot is missing (the first recompute after a restart):
+        scoring an un-taxed new plan against a taxed incumbent would favour the new plan on the tax alone.
+        """
+        if preclip_new is not None and preclip_prev is not None:
+            return preclip_new, preclip_prev
+        return plan_new, plan_prev
+
+    @staticmethod
+    def pv_series_signature(series):
+        """Return a cheap content and coverage signature for a per-minute PV series.
+
+        The tuple is (minute count, total kWh, first minute, last minute) - enough to notice that a
+        series has been swapped or rewritten between plan runs, and to tell how much of the plan
+        horizon it spans. It is never used as a value in its own right, so a content collision costs
+        nothing more than a redundant (or skipped) refresh of the fallback p90 copy.
+        """
+        if not series:
+            return (0, 0.0, None, None)
+        return (len(series), round(sum(series.values()), 6), min(series), max(series))
+
+    def refresh_pv_forecast_minute90(self):
+        """Keep the pv90 (upside) PV forecast series in step with the p50 series it sits beside.
+
+        ``fetch.py`` always refreshes ``pv_forecast_minute90`` alongside ``pv_forecast_minute``, falling
+        back to a copy of the p50 when no forecast90 data is published, so in production the pair is
+        always consistent. But callers that assign ``pv_forecast_minute`` directly - ``annual.py``'s
+        year-long sweep, which reuses ONE PredBat instance across every sampled day, replayed debug
+        dumps with no forecast90 sensor, and unit tests sharing a fixture - can leave the p90 empty or,
+        far worse, holding a series belonging to a completely different p50.
+
+        A stale p90 is not a harmless approximation: it silently turns pv90, which exists to be the
+        UPSIDE case, into a severe downside one. January's p50 held against July's makes the "upside"
+        scenario carry a quarter of nominal PV - exactly the inversion already ruled out for
+        ``load_scaling90``, arriving by another route. Emptiness is therefore not a sufficient trigger.
+
+        Two independent tests must both pass for the p90 in hand to be used:
+
+        1. Coverage. The p90 must span the part of the plan horizon that the p50 spans. Missing minutes
+           read back as zero from ``step_data_history``, so a p90 that stops short of the horizon makes
+           pv90 a zero-PV downside case over the rest of it. In production this always holds - fetch.py
+           builds all three series over one shared minute range - so this only ever fires on a p90 that
+           came from somewhere else.
+        2. Not left behind. If the p50 changed since the previous call while the p90 did not, the p90
+           cannot belong to the p50 in hand. A p90 that moved with its p50 - the normal case for a real
+           fetched forecast90 - is kept untouched however far it diverges, because that divergence is
+           the entire point of having a real p90.
+
+        Failing either test re-derives the p90 from the p50. That costs only the accuracy of the upside
+        case (pv90 collapses to nominal PV, an inert scenario), whereas using a mismatched one silently
+        inverts what the feature means.
+        """
+        p50_signature = self.pv_series_signature(self.pv_forecast_minute)
+        p90_signature = self.pv_series_signature(self.pv_forecast_minute90)
+        previous = self.pv_forecast_minute90_signatures
+
+        if not self.pv_forecast_minute:
+            # Nothing to plan against - the only consistent p90 is an equally empty one
+            covers_horizon = not self.pv_forecast_minute90
+        else:
+            first_needed = max(p50_signature[2], self.minutes_now)
+            last_needed = min(p50_signature[3], self.minutes_now + self.forecast_minutes)
+            covers_horizon = bool(self.pv_forecast_minute90) and p90_signature[2] <= first_needed and p90_signature[3] >= last_needed
+        left_behind = previous is not None and previous[0] != p50_signature and previous[1] == p90_signature
+
+        if not covers_horizon or left_behind:
+            self.pv_forecast_minute90 = dict(self.pv_forecast_minute)
+            p90_signature = p50_signature
+        self.pv_forecast_minute90_signatures = (p50_signature, p90_signature)
+
     def calculate_plan(self, recompute=True, debug_mode=False, publish=True):
         """
         Calculate the new plan (best)
@@ -999,12 +1186,14 @@ class Plan:
                 charge_window_best_prev = copy.deepcopy(self.charge_window_best)
                 export_window_best_prev = copy.deepcopy(self.export_window_best)
                 export_limits_best_prev = copy.deepcopy(self.export_limits_best)
+                preclip_prev = self.plan_preclip
                 self.log("Recompute is saving previous plan...")
             else:
                 charge_limit_best_prev = None
                 charge_window_best_prev = None
                 export_window_best_prev = None
                 export_limits_best_prev = None
+                preclip_prev = None
                 self.log("Recompute, previous plan is invalid...")
 
             self.plan_valid = False  # In case of crash, plan is now invalid
@@ -1037,6 +1226,27 @@ class Plan:
         # Created optimised step data
         self.metric_cloud_coverage = self.get_cloud_factor(self.minutes_now, self.pv_forecast_minute, self.pv_forecast_minute10)
         self.metric_load_divergence = self.get_load_divergence(self.minutes_now, self.load_minutes)
+
+        # Clamp the three load scalings so load_scaling90 <= load_scaling <= load_scaling10 always
+        # holds: the PV90 case can never end up with more load than the central case, and the PV10
+        # case can never end up with less. Without this, any load_scaling below load_scaling90 turns
+        # PV90 into a second, harsher downside case rather than the upside one it exists to model.
+        # This lives here rather than in fetch_config_options because it is an invariant of the
+        # scenarios, not of config reading - callers that set the scalings directly (the annual
+        # report, the random scenario harness, compare) never read config and would otherwise plan
+        # with the scenarios inverted. Sequential evaluation is deliberate: the clamped load_scaling90
+        # can never be the maximum of the three, so the second line reduces to max of the other two.
+        # These are locals so the configured values stay visible in Home Assistant and the logs.
+        load_scaling90 = min(self.load_scaling90, self.load_scaling10, self.load_scaling)
+        load_scaling10 = max(load_scaling90, self.load_scaling, self.load_scaling10)
+        if load_scaling90 != self.load_scaling90:
+            self.log(
+                "Warn: load_scaling90 {} exceeds load_scaling ({}) or load_scaling10 ({}) so the PV90 scenario would have more load than the central case - using {} for this plan".format(
+                    self.load_scaling90, self.load_scaling, self.load_scaling10, load_scaling90
+                )
+            )
+        if load_scaling10 != self.load_scaling10:
+            self.log("Warn: load_scaling10 {} is below load_scaling ({}) so the PV10 scenario would have less load than the central case - using {} for this plan".format(self.load_scaling10, self.load_scaling, load_scaling10))
         load_minutes_step = self.step_data_history(
             self.load_minutes,
             self.minutes_now,
@@ -1055,7 +1265,7 @@ class Plan:
             self.minutes_now,
             forward=False,
             scale_today=self.load_inday_adjustment,
-            scale_fixed=self.load_scaling10,
+            scale_fixed=load_scaling10,
             type_load=True,
             load_forecast=self.load_forecast,
             load_scaling_dynamic=self.load_scaling_dynamic,
@@ -1063,21 +1273,46 @@ class Plan:
             load_adjust=self.manual_load_adjust,
             load_baseline=self.dynamic_load_baseline,
         )
+        # load_scaling90 is an ABSOLUTE multiplier of the historical load, exactly like load_scaling10
+        # above - it does not compose with load_scaling. fetch_config_options() (CHANGE 4) clamps
+        # load_scaling90 <= load_scaling <= load_scaling10 immediately after reading all three from
+        # config, so by the time calculate_plan() runs load_scaling90 can never exceed load_scaling
+        # here - the pv90-load-inverts-into-a-second-downside-case failure mode CHANGE 3 used to warn
+        # about from this call site is now structurally unreachable, and the warning has been removed
+        # (see fetch_config_options' clamp-changed-a-value log instead, which fires there once per
+        # config read rather than here once per plan).
+        load_minutes_step90 = self.step_data_history(
+            self.load_minutes,
+            self.minutes_now,
+            forward=False,
+            scale_today=self.load_inday_adjustment,
+            scale_fixed=load_scaling90,
+            type_load=True,
+            load_forecast=self.load_forecast,
+            load_scaling_dynamic=self.load_scaling_dynamic,
+            cloud_factor=self.metric_load_divergence,
+            load_adjust=self.manual_load_adjust,
+            load_baseline=self.dynamic_load_baseline,
+        )
         pv_forecast_minute_step = self.step_data_history(self.pv_forecast_minute, self.minutes_now, forward=True, cloud_factor=self.metric_cloud_coverage)
         pv_forecast_minute10_step = self.step_data_history(self.pv_forecast_minute10, self.minutes_now, forward=True, cloud_factor=min(self.metric_cloud_coverage + 0.2, 1.0) if self.metric_cloud_coverage else None, flip=True)
+        self.refresh_pv_forecast_minute90()
+        pv_forecast_minute90_step = self.step_data_history(self.pv_forecast_minute90, self.minutes_now, forward=True, cloud_factor=self.metric_cloud_coverage)
 
         # Save step data for debug
         self.load_minutes_step = load_minutes_step
         self.load_minutes_step10 = load_minutes_step10
+        self.load_minutes_step90 = load_minutes_step90
         self.pv_forecast_minute_step = pv_forecast_minute_step
         self.pv_forecast_minute10_step = pv_forecast_minute10_step
+        self.pv_forecast_minute90_step = pv_forecast_minute90_step
 
         # Yesterday data
         if recompute and self.calculate_savings and publish:
             self.calculate_yesterday()
 
         # Creation prediction object
-        self.prediction = Prediction(self, pv_forecast_minute_step, pv_forecast_minute10_step, load_minutes_step, load_minutes_step10)
+        self.prediction = Prediction(self, pv_forecast_minute_step, pv_forecast_minute10_step, load_minutes_step, load_minutes_step10, pv_forecast_minute90_step, load_minutes_step90)
         kernel_message, kernel_is_warning = kernel_status_summary(self.prediction)
         self.log("{}Prediction kernel: {}".format("Warn: " if kernel_is_warning else "", kernel_message))
 
@@ -1130,6 +1365,13 @@ class Plan:
 
             # Remove charge windows that overlap with export windows
             self.charge_limit_best, self.charge_window_best = remove_intersecting_windows(self.charge_limit_best, self.charge_window_best, self.export_limits_best, self.export_window_best)
+
+            # Snapshot the plan as optimised, before clipping adjusts the percentages for execution
+            preclip_new = (copy.deepcopy(self.charge_limit_best), copy.deepcopy(self.charge_window_best), copy.deepcopy(self.export_window_best), copy.deepcopy(self.export_limits_best))
+
+            # Model-based clipping: drop slots that do nothing in the central forecast. Runs after the
+            # scoring snapshot so plan selection still compares plans as optimised (#4403).
+            self.prune_dead_plan_slots()
 
             # Filter out any unused export windows
             if self.calculate_best_export and self.export_window_best:
@@ -1215,26 +1457,37 @@ class Plan:
 
             # Plan comparison
             if charge_window_best_prev is not None and not debug_mode:
-                metric, battery_value, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh, export_kwh = self.run_prediction_metric(
-                    self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=self.end_record
+                # Score the plans as optimised rather than as clipped - see plan_scoring_pair()
+                score_new, score_prev = self.plan_scoring_pair(
+                    (self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best),
+                    (charge_limit_best_prev, charge_window_best_prev, export_window_best_prev, export_limits_best_prev),
+                    preclip_new,
+                    preclip_prev,
                 )
+                metric, battery_value, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh, export_kwh = self.run_prediction_metric(score_new[0], score_new[1], score_new[2], score_new[3], end_record=self.end_record)
                 metric_prev, battery_value_prev, cost_prev, metric_keep_prev, battery_cycle_prev, final_carbon_g_prev, import_kwh_prev, export_kwh_prev = self.run_prediction_metric(
-                    charge_limit_best_prev, charge_window_best_prev, export_window_best_prev, export_limits_best_prev, end_record=self.end_record
+                    score_prev[0], score_prev[1], score_prev[2], score_prev[3], end_record=self.end_record
                 )
 
                 self.log("Previous plan best metric is {} (cost {}) and new plan best metric is {} (cost {})".format(dp2(metric_prev), dp2(cost_prev), dp2(metric), dp2(cost)))
-                fragmentation_prev = self.plan_fragmentation(charge_window_best_prev, charge_limit_best_prev, export_window_best_prev, export_limits_best_prev)
-                fragmentation_new = self.plan_fragmentation(self.charge_window_best, self.charge_limit_best, self.export_window_best, self.export_limits_best)
+                fragmentation_prev = self.plan_fragmentation(score_prev[1], score_prev[0], score_prev[2], score_prev[3])
+                fragmentation_new = self.plan_fragmentation(score_new[1], score_new[0], score_new[2], score_new[3])
                 if not self.should_replace_plan(metric_prev, metric, fragmentation_prev, fragmentation_new):
                     self.log("New plan metric is not significantly better (metric_min_improvement_plan {}) than previous plan, using previous plan".format(self.metric_min_improvement_plan))
                     self.charge_window_best = copy.deepcopy(charge_window_best_prev)
                     self.charge_limit_best = copy.deepcopy(charge_limit_best_prev)
                     self.export_window_best = copy.deepcopy(export_window_best_prev)
                     self.export_limits_best = copy.deepcopy(export_limits_best_prev)
+                    # Keeping the incumbent keeps its pre-clip snapshot too, so the next cycle still compares
+                    # like for like
+                    preclip_new = preclip_prev
                 elif (metric_prev - metric) >= self.metric_min_improvement_plan:
                     self.log("New plan metric is significantly better from previous plan, using new plan")
                 else:
                     self.log("New plan is a cost-neutral improvement but less fragmented ({} vs {} segments), using new plan".format(fragmentation_new, fragmentation_prev))
+
+            # Carry the pre-clip snapshot of whichever plan we kept into the next cycle
+            self.plan_preclip = preclip_new
 
             # Plan is now valid
             self.log("Plan valid is now true after recompute was {}".format(self.plan_valid))
@@ -1361,31 +1614,86 @@ class Plan:
         # Return if we recomputed or not
         return recompute
 
-    def compute_metric(self, end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh):
+    def battery_value_rate(self, minute):
         """
-        Compute the metric combing pv and pv10 data
+        Forward value of one kWh left in the battery at the given absolute minute, in p/kWh
+
+        The value is what it would cost to replace that energy: the cheapest import rate available
+        from `minute` to the end of the forecast, grossed up by the charging losses. It is capped at
+        the highest import rate (reduced by losses) so a flat tariff cannot value stored energy above
+        what the grid would ever charge for it, and floored at the export arbitrage margin and at
+        1p/kWh.
+
+        Both the cap and the export recovery ratio read the base tariff (rate_max_base,
+        rate_export_max_forward), captured before saving sessions and overrides are layered on. A
+        session is a one-off event, not evidence about what the tariff charges for a kWh or pays for a
+        surplus one, and letting one set either term values stored energy above what discharging it can
+        realise - which the planner spends as profit by freeze charging every window up to end_record.
+        Both fall back to their whole-horizon equivalents when the base data is absent, so replaying an
+        older debug file behaves as it did before.
+
+        Note `rate_export_min` here is not the export rate - it is the export earnings less the
+        replacement cost, so it only raises the value when exporting beats re-importing. It can
+        never lower it, which is why a zero export rate does not reduce the credit.
+
+        This is the single definition used by the planner's metric, the dashboard's value_per_kwh
+        attributes and the savings report, so all three agree on what a stored kWh is worth.
+        """
+        rate_min_raw = self.rate_min_forward.get(minute, self.rate_min)
+        rate_max = self.rate_max_base or self.rate_max
+        rate_min = rate_min_raw / self.inverter_loss / self.battery_loss + self.metric_battery_cycle
+        rate_min = max(min(rate_min, rate_max * self.inverter_loss * self.battery_loss - self.metric_battery_cycle), 0)
+
+        # Replacement cost assumes the energy can always be redeployed. That holds while surplus can
+        # be sold, but if export pays less than it cost to import then anything the house cannot use
+        # is a partial loss, so the stored energy is worth less than replacement. Scale the value by
+        # how much of the cheapest import price export would actually recover: full value when export
+        # matches or beats it, down to metric_battery_value_export_scaling when export is worthless.
+        # Setting that to 1.0 disables this entirely.
+        if rate_min_raw > 0 and self.metric_battery_value_export_scaling < 1.0:
+            # Forward-looking like rate_min_raw, so an export price that has already passed stops
+            # counting once it has - a saving session ending in ten minutes says nothing about what
+            # the energy still in the battery can be sold for over the rest of the plan.
+            export_max = self.rate_export_max_forward.get(minute, 0.0) if self.rate_export_max_forward else self.rate_export_max
+            recovery = min(max(export_max / rate_min_raw, 0.0), 1.0)
+            rate_min *= self.metric_battery_value_export_scaling + (1.0 - self.metric_battery_value_export_scaling) * recovery
+
+        rate_export_min = self.rate_export_min * self.inverter_loss * self.battery_loss_discharge - self.metric_battery_cycle - rate_min
+        return max(rate_min, 1.0, rate_export_min)
+
+    def compute_metric(self, end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh, soc90=None, cost90=None, final_iboost90=0.0):
+        """
+        Compute the metric by blending the nominal, PV10 and PV90 scenarios
+
+        cost90 is the switch for the PV90 term - when it is None the scenario was not simulated and
+        its weight collapses into the nominal weight.
         """
         # Store simulated mid value
         metric = cost
         metric10 = cost10
+        metric90 = cost90
 
         # Balancing payment to account for battery left over
         # ie. how much extra battery is worth to us in future, assume it's the same as low rate
-        rate_min = (self.rate_min_forward.get(self.minutes_now + end_record, self.rate_min)) / self.inverter_loss / self.battery_loss + self.metric_battery_cycle
-        rate_min = max(min(rate_min, self.rate_max * self.inverter_loss * self.battery_loss - self.metric_battery_cycle), 0)
-        rate_export_min = self.rate_export_min * self.inverter_loss * self.battery_loss_discharge - self.metric_battery_cycle - rate_min
-        battery_value = (soc * self.metric_battery_value_scaling + final_iboost * self.iboost_value_scaling) * max(rate_min, 1.0, rate_export_min)
-        battery_value10 = (soc10 * self.metric_battery_value_scaling + final_iboost10 * self.iboost_value_scaling) * max(rate_min, 1.0, rate_export_min)
+        value_rate = self.battery_value_rate(self.minutes_now + end_record)
+        battery_value = (soc * self.metric_battery_value_scaling + final_iboost * self.iboost_value_scaling) * value_rate
+        battery_value10 = (soc10 * self.metric_battery_value_scaling + final_iboost10 * self.iboost_value_scaling) * value_rate
         metric -= battery_value
         metric10 -= battery_value10
+        if metric90 is not None:
+            battery_value90 = ((soc90 or 0) * self.metric_battery_value_scaling + final_iboost90 * self.iboost_value_scaling) * value_rate
+            metric90 -= battery_value90
 
-        # Metric adjustment based on 10% outcome weighting
-        if metric10 > metric:
-            metric_diff = metric10 - metric
-            metric_diff *= self.pv_metric10_weight
-            metric += metric_diff
-        else:
-            metric_diff = 0.0
+        # Signed weighted average across the simulated scenarios. Unlike the previous downside-only
+        # clamp this lets a better-than-nominal scenario pull the metric down, which is what gives
+        # PV90 a gradient at all - PV90 is nearly always cheaper than nominal.
+        weight10 = self.pv_metric10_weight
+        weight90 = self.pv_metric90_weight if metric90 is not None else 0.0
+        weight_total = weight10 + weight90
+        if weight_total > 1.0:
+            weight10 = weight10 / weight_total
+            weight90 = weight90 / weight_total
+        metric = (1.0 - weight10 - weight90) * metric + weight10 * metric10 + weight90 * (metric90 if metric90 is not None else 0.0)
 
         # Carbon metric
         if self.carbon_enable:
@@ -1409,6 +1717,7 @@ class Plan:
         best_soc_min_minute = 0
         best_metric = 9999999
         best_metric_first = best_metric
+        best_metric_plan = 9999999
         best_cost = 0
         best_import = 0
         best_soc_step = self.best_soc_step
@@ -1420,6 +1729,8 @@ class Plan:
         try_charge_limit = list(charge_limit)
         resultmid = {}
         result10 = {}
+        result90 = {}
+        run_pv90 = self.pv_metric90_weight > 0
 
         if not self.set_charge_freeze:
             allow_freeze = False
@@ -1446,10 +1757,25 @@ class Plan:
             hans = []
             all_max_soc = 0
             all_min_soc = self.soc_max
-            hans.append(self.launch_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, False, all_n, end_record))
-            hans.append(self.launch_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, True, all_n, end_record))
-            hans.append(self.launch_run_prediction_charge_min_max(best_soc_min, window_n, charge_limit, charge_window, export_window, export_limits, False, all_n, end_record))
-            hans.append(self.launch_run_prediction_charge_min_max(best_soc_min, window_n, charge_limit, charge_window, export_window, export_limits, True, all_n, end_record))
+            hans.append(self.launch_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_NOMINAL, all_n, end_record))
+            hans.append(self.launch_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV10, all_n, end_record))
+            hans.append(self.launch_run_prediction_charge_min_max(best_soc_min, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_NOMINAL, all_n, end_record))
+            hans.append(self.launch_run_prediction_charge_min_max(best_soc_min, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV10, all_n, end_record))
+            # These two candidates (full-charge loop_soc and best_soc_min) are pre-simulated here and
+            # never re-launched by the results/results10/results90 block below (they are excluded there
+            # by the `if try_soc not in resultmid` gate), so they must get a pv90 result of their own
+            # here too - otherwise they are scored with cost90=None while every other candidate in the
+            # same ranking loop gets the three-scenario blend, systematically advantaging these two
+            # extreme candidates (see task-7 fix round 1, Finding 2).
+            #
+            # These two extra launches also feed the same `hans` loop that computes all_min_soc/
+            # all_max_soc below, so at run_pv90 the SoC-pruning envelope is built from three scenarios
+            # instead of two. This only ever widens the envelope (min/max over a superset can only move
+            # outward or stay put, never inward), so it can only relax the pruning below, never discard
+            # a candidate that would otherwise have been tried - it cannot silently drop a viable SoC.
+            if run_pv90:
+                hans.append(self.launch_run_prediction_charge_min_max(loop_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV90, all_n, end_record))
+                hans.append(self.launch_run_prediction_charge_min_max(best_soc_min, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV90, all_n, end_record))
             id = 0
             for han in hans:
                 (
@@ -1525,6 +1851,34 @@ class Plan:
                         final_iboost,
                         final_carbon_g,
                     ]
+                elif id == 4:
+                    result90[loop_soc] = [
+                        cost,
+                        import_kwh_battery,
+                        import_kwh_house,
+                        export_kwh,
+                        soc_min,
+                        soc,
+                        soc_min_minute,
+                        battery_cycle,
+                        metric_keep,
+                        final_iboost,
+                        final_carbon_g,
+                    ]
+                elif id == 5:
+                    result90[best_soc_min] = [
+                        cost,
+                        import_kwh_battery,
+                        import_kwh_house,
+                        export_kwh,
+                        soc_min,
+                        soc,
+                        soc_min_minute,
+                        battery_cycle,
+                        metric_keep,
+                        final_iboost,
+                        final_carbon_g,
+                    ]
                 id += 1
 
         # Assemble list of SoC's to try
@@ -1569,12 +1923,15 @@ class Plan:
         # Run the simulations in parallel
         results = []
         results10 = []
+        results90 = []
         for try_soc in try_socs:
             if try_soc not in resultmid:
-                hanres = self.launch_run_prediction_charge(try_soc, window_n, charge_limit, charge_window, export_window, export_limits, False, all_n, end_record)
+                hanres = self.launch_run_prediction_charge(try_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_NOMINAL, all_n, end_record)
                 results.append(hanres)
-                hanres10 = self.launch_run_prediction_charge(try_soc, window_n, charge_limit, charge_window, export_window, export_limits, True, all_n, end_record)
+                hanres10 = self.launch_run_prediction_charge(try_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV10, all_n, end_record)
                 results10.append(hanres10)
+                if run_pv90:
+                    results90.append(self.launch_run_prediction_charge(try_soc, window_n, charge_limit, charge_window, export_window, export_limits, PV_SCENARIO_PV90, all_n, end_record))
 
         # Get results from sims if we simulated them
         for try_soc in try_socs:
@@ -1583,6 +1940,8 @@ class Plan:
                 hanres10 = results10.pop(0)
                 resultmid[try_soc] = hanres.get()
                 result10[try_soc] = hanres10.get()
+                if run_pv90:
+                    result90[try_soc] = results90.pop(0).get()
 
         window_results = {}
         # Now we have all the results, we can pick the best SoC
@@ -1601,9 +1960,20 @@ class Plan:
             # Simulate with medium PV
             (cost, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g) = resultmid[try_soc]
             (cost10, import_kwh_battery10, import_kwh_house10, export_kwh10, soc_min10, soc10, soc_min_minute10, battery_cycle10, metric_keep10, final_iboost10, final_carbon_g10) = result10[try_soc]
+            soc90 = None
+            cost90 = None
+            final_iboost90 = 0.0
+            if try_soc in result90:
+                (cost90, _, _, _, _, soc90, _, _, _, final_iboost90, _) = result90[try_soc]
 
             # Compute the metric from simulation results
-            metric, battery_value = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh)
+            metric, battery_value = self.compute_metric(
+                end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh, soc90=soc90, cost90=cost90, final_iboost90=final_iboost90
+            )
+
+            # Keep the unadjusted metric: the adjustments below are ranking hints for this function only, so a
+            # caller checking whether the plan actually improved has to compare on this instead
+            metric_plan = metric
 
             # Metric adjustment based on current charge limit when inside the window
             # to try to avoid constant small changes to SoC target by forcing to keep the current % during a charge period
@@ -1655,6 +2025,7 @@ class Plan:
             # and it doesn't fall below the soc_keep threshold
             if (metric + min_improvement_scaled) <= best_metric_first and metric <= best_metric:
                 best_metric = metric
+                best_metric_plan = metric_plan
                 best_soc = try_soc
                 best_cost = cost
                 best_soc_min = soc_min
@@ -1669,7 +2040,7 @@ class Plan:
                 first = False
 
         # Add margin last
-        best_soc = min(best_soc + self.best_soc_margin, self.soc_max)
+        best_soc = min(best_soc, self.soc_max)
 
         if self.debug_enable:
             if not all_n:
@@ -1707,7 +2078,7 @@ class Plan:
                         window_results,
                     )
                 )
-        return best_soc, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep, best_cycle, best_carbon, best_import
+        return best_soc, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan
 
     def optimise_export(self, window_n, record_charge_windows, try_charge_limit, charge_window, export_window, export_limit, all_n=None, end_record=None, freeze_only=False, allow_freeze=True):
         """
@@ -1715,6 +2086,7 @@ class Plan:
         """
         best_export = False
         best_metric = 9999999
+        best_metric_plan = 9999999
         off_metric = 9999999
         off_cost = 9999999
         best_cost = 0
@@ -1752,6 +2124,8 @@ class Plan:
         # Collect all options
         results = []
         results10 = []
+        results90 = []
+        run_pv90 = self.pv_metric90_weight > 0
         try_options = []
         for loop_limit in loop_options:
             # Loop on window size
@@ -1785,8 +2159,10 @@ class Plan:
                 this_export_limit = this_export_limit + loop_limit - int(loop_limit)
                 try_options.append([start, this_export_limit])
 
-                results.append(self.launch_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, False, all_n, end_record))
-                results10.append(self.launch_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, True, all_n, end_record))
+                results.append(self.launch_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, PV_SCENARIO_NOMINAL, all_n, end_record))
+                results10.append(self.launch_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, PV_SCENARIO_PV10, all_n, end_record))
+                if run_pv90:
+                    results90.append(self.launch_run_prediction_export(this_export_limit, start, window_n, try_charge_limit, charge_window, try_export_window, try_export, PV_SCENARIO_PV90, all_n, end_record))
 
         # Get results from sims
         try_results = []
@@ -1795,11 +2171,12 @@ class Plan:
             hanres10 = results10.pop(0)
             result = hanres.get()
             result10 = hanres10.get()
-            try_results.append(try_option + [result, result10])
+            result90 = results90.pop(0).get() if run_pv90 else None
+            try_results.append(try_option + [result, result10, result90])
 
         window_results = {}
         for try_option in try_results:
-            start, this_export_limit, hanres, hanres10 = try_option
+            start, this_export_limit, hanres, hanres10, hanres90 = try_option
 
             # Simulate with medium PV
             cost, import_kwh_battery, import_kwh_house, export_kwh, soc_min, soc, soc_min_minute, battery_cycle, metric_keep, final_iboost, final_carbon_g = hanres
@@ -1816,9 +2193,20 @@ class Plan:
                 final_iboost10,
                 final_carbon_g10,
             ) = hanres10
+            soc90 = None
+            cost90 = None
+            final_iboost90 = 0.0
+            if hanres90 is not None:
+                (cost90, _, _, _, _, soc90, _, _, _, final_iboost90, _) = hanres90
 
             # Compute the metric from simulation results
-            metric, battery_value = self.compute_metric(end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh)
+            metric, battery_value = self.compute_metric(
+                end_record, soc, soc10, cost, cost10, final_iboost, final_iboost10, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh, soc90=soc90, cost90=cost90, final_iboost90=final_iboost90
+            )
+
+            # Keep the unadjusted metric: the adjustments below are ranking hints for this function only, so a
+            # caller checking whether the plan actually improved has to compare on this instead
+            metric_plan = metric
 
             if this_export_limit == 100.0:
                 # Minor weighting to off
@@ -1833,11 +2221,13 @@ class Plan:
                 pwindow = export_window[window_n]
                 dwindow = self.export_window[0]
                 if self.minutes_now >= pwindow["start"] and self.minutes_now < pwindow["end"] and ((self.minutes_now >= dwindow["start"] and self.minutes_now < dwindow["end"]) or (dwindow["end"] == pwindow["start"])):
-                    metric -= max(0.5, self.metric_min_improvement_export)
-                    # Only relax the cost gate (further below) for an option that actually covers the current
-                    # minute. The option start is varied during optimisation, so a future-starting option is
-                    # not the in-progress export and must not receive the cost-gate commitment.
+                    # Only reward an option that actually covers the current minute. The option start is varied
+                    # during optimisation, so a future-starting option is not the in-progress export and must
+                    # receive neither the metric bonus nor the cost-gate commitment - giving both options the
+                    # same bonus cancels it out and lets "stop now, restart later in this window" win, which is
+                    # the export flapping this commitment exists to prevent.
                     if start <= self.minutes_now:
+                        metric -= max(0.5, self.metric_min_improvement_export)
                         keep_export = True
 
             # Round metric to 4 DP
@@ -1896,6 +2286,7 @@ class Plan:
             # Also require cost improvement to prevent exports that only game metric_keep without actual savings (issue #2984)
             if (metric <= off_metric) and (metric <= best_metric) and ((cost + min_improvement_scaled) <= off_cost):
                 best_metric = metric
+                best_metric_plan = metric_plan
                 best_export = this_export_limit
                 best_cost = cost
                 best_soc_min = soc_min
@@ -1947,7 +2338,7 @@ class Plan:
                     )
                 )
 
-        return best_export, best_start, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep, best_cycle, best_carbon, best_import
+        return best_export, best_start, best_metric, best_cost, best_soc_min, best_soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan
 
     def window_sort_func(self, window):
         """
@@ -2259,15 +2650,86 @@ class Plan:
                 },
             )
 
+    def prune_dead_plan_slots(self):
+        """Model-based clipping: remove plan slots that do nothing in the central forecast.
+
+        Each active charge/export slot inside the record window is trialled in turn: the slot is
+        removed (export -> 100, charge -> 0) and the whole plan re-simulated in the nominal (50%)
+        scenario only - one simulation per trial via run_prediction_metric(nominal_only=True). The
+        removal is kept when the nominal metric does not get worse, so slots whose value exists only
+        in the pv10/pv90 branches (or nowhere at all - phantom exports, dead freezes) are dropped.
+        If the pessimistic scenario materialises in reality, the next plan recompute re-creates a
+        genuine slot from actual state, so nothing is permanently lost.
+
+        Runs after the pre-clip scoring snapshot (see calculate_plan), so plan selection still
+        compares plans as optimised (#4403). Manual windows are preserved. Later removals are
+        compared against the running baseline, so an earlier accepted removal cannot make a later
+        one look free.
+
+        A window covering the current minute is trialled like any other - it is the slot being
+        executed right now, so a dead one left in place is precisely the spurious command that
+        reaches the inverter. This does not reopen #4402: that regression came from writing back a
+        window change scored on optimise_export's adjusted metric (commitment bonus and tie-break
+        weightings), and the fix was to gate on the unadjusted whole-plan metric, which is what this
+        trial uses. An in-progress export worth anything at all fails the gate and is kept.
+        """
+        eps = 0.02
+        record_limit = self.end_record + self.minutes_now
+        baseline = None
+        start_metric = None
+        pruned = 0
+        trials = 0
+        for typ, windows, limits, off_value in (("export", self.export_window_best, self.export_limits_best, 100.0), ("charge", self.charge_window_best, self.charge_limit_best, 0)):
+            for window_n, window in enumerate(windows):
+                limit = limits[window_n]
+                active = (limit < 100.0) if typ == "export" else (limit > 0)
+                if not active:
+                    continue
+                if window["end"] <= self.minutes_now or window["start"] >= record_limit:
+                    continue
+                if window["start"] in self.manual_all_times:
+                    continue
+                if baseline is None:
+                    baseline = self.run_prediction_metric(self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=self.end_record, nominal_only=True)[0]
+                    start_metric = baseline
+                limits[window_n] = off_value
+                trial = self.run_prediction_metric(self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=self.end_record, nominal_only=True)[0]
+                trials += 1
+                if trial <= baseline + eps:
+                    if self.debug_enable:
+                        self.log("Prune dead {} slot {} {}-{} limit {} - nominal metric {} vs baseline {}".format(typ, window_n, self.time_abs_str(window["start"]), self.time_abs_str(window["end"]), limit, dp2(trial), dp2(baseline)))
+                    baseline = trial
+                    pruned += 1
+                else:
+                    limits[window_n] = limit
+        if pruned:
+            # The trials run on the nominal scenario only, so report the full metric and cost of the
+            # pruned plan rather than the nominal figure the trials compared on
+            metric, battery_value, cost, metric_keep, battery_cycle, final_carbon_g, import_kwh, export_kwh = self.run_prediction_metric(
+                self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=self.end_record
+            )
+            curr = self.currency_symbols[1]
+            self.log(
+                "Pruned {} dead plan slot(s) in {} trial(s), nominal metric {}{} -> {}{}, plan now metric {}{}, cost {}{}, cycle {}kWh, import {}kWh".format(
+                    pruned, trials, dp2(start_metric), curr, dp2(baseline), curr, dp2(metric), curr, dp2(cost), curr, dp2(battery_cycle), dp2(import_kwh)
+                )
+            )
+        return pruned
+
     def clip_charge_slots(self, minutes_now, predict_soc, charge_window_best, charge_limit_best, record_charge_windows, step):
         """
         Clip charge slots that are useless as they don't charge at all
         set the 'target' field in the charge window for HTML reporting
+
+        Both clip-up branches raise the limit to the full battery so that adjacent windows share a limit and can
+        be merged, which is only sound when the limit had no influence on the simulated charge. The achieved SoC
+        can land just under the limit even when the limit never clamped it (e.g. charge loss/rounding), and can dip
+        a hair below its own peak for the same reason, so both tests need a margin of one charge step to tell a real effect from rounding.
         """
+        charge_step = self.battery_rate_max_charge * self.battery_rate_max_scaling * step
         for window_n in range(min(record_charge_windows, len(charge_window_best))):
             window = charge_window_best[window_n]
             limit = charge_limit_best[window_n]
-            limit_percent = calc_percent_limit(limit, self.soc_max)
             window_start = max(window["start"], minutes_now)
             window_end = max(window["end"], minutes_now)
             window_length = window_end - window_start
@@ -2291,23 +2753,21 @@ class Plan:
                             soc_max = max(soc_max, predict_soc[minute])
 
                     soc_m1 = predict_soc[predict_minute_end_m1]
-                    soc_min_percent = calc_percent_limit(soc_min, self.soc_max)
 
                     if self.debug_enable:
                         self.log("Examine charge window {} from {} - {} (minute {}) limit {} - min soc {} max soc {} soc_m1 {}".format(window_n, window_start, window_end, predict_minute_start, limit, soc_min, soc_max, soc_m1))
 
-                    if (soc_min_percent > (limit_percent + 1)) and (limit != self.reserve):
-                        charge_limit_best[window_n] = 0
-                        window["target"] = 0
-                        if self.debug_enable:
-                            self.log("Clip off charge window {} from {} - {} from limit {} to new limit {} min percent {} limit percent {}".format(window_n, window_start, window_end, limit, charge_limit_best[window_n], soc_min_percent, limit_percent))
-                    elif soc_max < limit:
+                    # Removing a charge window that never charges is prune_dead_plan_slots' job - it asks the
+                    # model whether the nominal plan changes without the slot, which subsumes the old
+                    # never-reaches-limit and freeze-at-100% removal branches. What is left here narrows the
+                    # limit to what the window can actually achieve, so adjacent windows share a limit and merge.
+                    if soc_max < (limit - charge_step):
                         # Work out what can be achieved in the window and set the target to match that
                         window["target"] = soc_max
                         charge_limit_best[window_n] = self.soc_max
                         if self.debug_enable:
                             self.log("Clip up charge window {} from {} - {} from limit {} to new limit {} target set to {}".format(window_n, window_start, window_end, limit, charge_limit_best[window_n], window["target"]))
-                    elif (soc_max > soc_m1) and soc_max == limit:
+                    elif (soc_max > (soc_m1 + charge_step)) and soc_max == limit:
                         window["target"] = soc_max
                         charge_limit_best[window_n] = self.soc_max
                         if self.debug_enable:
@@ -2357,15 +2817,16 @@ class Plan:
                     if self.debug_enable:
                         self.log("Examine export window {} from {} - {} (minute {}) limit {} - starting soc {} ending soc {}".format(window_n, window_start, window_end, predict_minute_start, limit, soc_min, soc_max))
 
-                    # Export level adjustments for safety
-                    if limit == 99.0:
-                        if dp1(soc_min) == dp1(self.soc_max) and dp1(soc_max) == dp1(self.soc_max) and window["start"] not in self.manual_freeze_export_times:
-                            # Reserve slot, so set to 100% if we are already at 100% (but not for manual overrides)
-                            window["target"] = 100
-                            export_limits_best[window_n] = 100.0
-                            if self.debug_enable:
-                                self.log("Clip freeze export off as already at 100% - window {} from {} - {} from limit {} to new limit {} target set to {}".format(window_n, window_start, window_end, limit, export_limits_best[window_n], window["target"]))
-                    elif soc_min > limit_soc:
+                    # Export level adjustment: narrow the requested limit towards what the simulation says is
+                    # actually achievable, so the target sent to the inverter matches the simulated plan.
+                    #
+                    # Removing a window that achieves nothing is prune_dead_plan_slots' job - it asks the model
+                    # directly (does the nominal plan change without this slot?) instead of inferring it from the
+                    # SoC trace, and subsumes the removal branches that used to live here: freeze-at-100%,
+                    # no-SoC-above-reserve (#4171/#4434), phantom export (#4453/#4487) and target-unreachable.
+                    # That includes the window covering the current minute, so a dead slot is never left
+                    # commanding the inverter.
+                    if limit != 99.0 and soc_min > limit_soc:
                         # Give it 10 minute margin
                         target_soc = max(limit_soc, soc_min)
                         limit_soc = max(limit_soc, soc_min - 10 * self.battery_rate_max_discharge * self.battery_rate_max_scaling_discharge)
@@ -2373,12 +2834,6 @@ class Plan:
                         export_limits_best[window_n] = calc_percent_limit(limit_soc, self.soc_max) + (limit - int(limit))
                         if limit != export_limits_best[window_n] and self.debug_enable:
                             self.log("Clip up export window {} from {} - {} from limit {} to new limit {} target set to {}".format(window_n, window_start, window_end, limit, export_limits_best[window_n], window["target"]))
-                    elif soc_max < limit_soc:
-                        # Clip off the window
-                        window["target"] = 100.0
-                        export_limits_best[window_n] = 100.0
-                        if self.debug_enable:
-                            self.log("Clip off export window {} from {} - {} from limit {} to new limit {}".format(window_n, window_start, window_end, limit, export_limits_best[window_n]))
             else:
                 self.log("Warn: Clip export window {} as it's already passed".format(window_n))
                 export_limits_best[window_n] = 100.0
@@ -2419,19 +2874,19 @@ class Plan:
         for window_n in range(len(self.charge_limit_best)):
             self.charge_window_best[window_n]["target"] = self.charge_limit_best[window_n]
 
-    def tweak_plan(self, end_record, best_metric, metric_keep):
+    def tweak_plan(self, end_record):
         """
         Tweak existing plan only
+
+        The metric is measured from the plan we were handed rather than taken from the caller: optimise_swap_export
+        runs immediately before this and mutates the plan without its return value being used, so the caller's
+        metric is already stale. Each window change below is then only kept when it improves on that baseline.
         """
         record_charge_windows = max(self.max_charge_windows(end_record + self.minutes_now, self.charge_window_best), 1)
         record_export_windows = max(self.max_charge_windows(end_record + self.minutes_now, self.export_window_best), 1)
-        self.log("Tweak plan optimisation started")
-        best_soc = self.soc_max
-        best_cost = best_metric
-        best_keep = metric_keep
-        best_cycle = 0
-        best_carbon = 0
-        best_import = 0
+        selected = self.plan_metric_now(end_record)
+        curr = self.currency_symbols[1]
+        self.log("Tweak plan optimisation started metric {}{}, cost {}{}".format(dp2(selected[0]), curr, dp2(selected[1]), curr))
         count = 0
         window_sorted, window_index = self.sort_window_by_time_combined(self.charge_window_best[:record_charge_windows], self.export_window_best[:record_export_windows])
         for key in window_sorted:
@@ -2442,8 +2897,8 @@ class Plan:
                 if not self.allow_this_charge_window(window_n):
                     continue
 
-                window_start = self.charge_window_best[window_n]["start"]
-                best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import = self.optimise_charge_limit(
+                snapshot = self.plan_window_snapshot(typ, window_n)
+                best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan = self.optimise_charge_limit(
                     window_n,
                     record_charge_windows,
                     self.charge_limit_best,
@@ -2453,13 +2908,15 @@ class Plan:
                     end_record=end_record,
                 )
                 self.charge_limit_best[window_n] = best_soc
+                candidate = (best_metric_plan, best_cost, best_keep, best_cycle, best_carbon, best_import)
+                selected = self.keep_window_change_if_improved(selected, candidate, typ, window_n, snapshot)
             elif typ == "d":
-                window_start = self.export_window_best[window_n]["start"]
                 if not self.allow_this_export_window(window_n):
                     continue
 
+                snapshot = self.plan_window_snapshot(typ, window_n)
                 self.export_window_best[window_n]["start"] = self.export_window_best[window_n].get("start_orig", self.export_window_best[window_n]["start"])
-                best_soc, best_start, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import = self.optimise_export(
+                best_soc, best_start, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan = self.optimise_export(
                     window_n,
                     record_export_windows,
                     self.charge_limit_best,
@@ -2471,11 +2928,18 @@ class Plan:
                 self.export_limits_best[window_n] = best_soc
                 self.export_window_best[window_n]["start_orig"] = self.export_window_best[window_n].get("start_orig", self.export_window_best[window_n]["start"])
                 self.export_window_best[window_n]["start"] = best_start
+                candidate = (best_metric_plan, best_cost, best_keep, best_cycle, best_carbon, best_import)
+                selected = self.keep_window_change_if_improved(selected, candidate, typ, window_n, snapshot)
             count += 1
             if count >= 8:
                 break
 
-        self.log("Tweak optimisation finished metric {} cost {} metric_keep {} cycle {} carbon {} import {}".format(dp2(best_metric), dp2(best_cost), dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_import)))
+        best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import = selected
+        self.log(
+            "Tweak optimisation finished metric {}{}, cost {}{}, metric_keep {}kWh, cycle {}kWh, carbon {}kg, import {}kWh, changed {} window(s)".format(
+                dp2(best_metric), curr, dp2(best_cost), curr, dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_import), count
+            )
+        )
         return best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import
 
     def plan_write_debug(self, debug_mode, name, pv_forecast_minute_step, pv_forecast_minute10_step, load_minutes_step, load_minutes_step10, end_record, test=False, prediction=None):
@@ -2655,7 +3119,7 @@ class Plan:
                 if not self.allow_this_export_window(window_n):
                     continue
 
-                new_soc, new_start, new_metric, new_cost, new_soc_min, new_soc_min_minute, new_keep, new_cycle, new_carbon, new_import = self.optimise_export(
+                new_soc, new_start, new_metric, new_cost, new_soc_min, new_soc_min_minute, new_keep, new_cycle, new_carbon, new_import, new_metric_plan = self.optimise_export(
                     window_n, record_export_windows, self.charge_limit_best, self.charge_window_best, self.export_window_best, self.export_limits_best, end_record=self.end_record
                 )
                 self.export_limits_best[window_n] = new_soc
@@ -3044,6 +3508,11 @@ class Plan:
         Second pass optimisation of the charge and export windows
         """
         self.log("Second pass optimisation started")
+
+        # Baseline the plan we were handed, for the same reason as tweak_plan: optimise_swap_export has already
+        # mutated it since the caller's metric was measured.
+        selected = self.plan_metric_now(self.end_record)
+
         count = 0
         window_sorted, window_index = self.sort_window_by_time_combined(self.charge_window_best[:record_charge_windows], self.export_window_best[:record_export_windows])
         for key in window_sorted:
@@ -3051,7 +3520,8 @@ class Plan:
             window_n = window_index[key]["id"]
             if typ == "c":
                 if self.allow_this_charge_window(window_n):
-                    best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import = self.optimise_charge_limit(
+                    snapshot = self.plan_window_snapshot(typ, window_n)
+                    best_soc, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan = self.optimise_charge_limit(
                         window_n,
                         record_charge_windows,
                         self.charge_limit_best,
@@ -3061,10 +3531,12 @@ class Plan:
                         end_record=self.end_record,
                     )
                     self.charge_limit_best[window_n] = best_soc
+                    candidate = (best_metric_plan, best_cost, best_keep, best_cycle, best_carbon, best_import)
+                    selected = self.keep_window_change_if_improved(selected, candidate, typ, window_n, snapshot)
             elif typ == "d":
                 if self.allow_this_export_window(window_n):
-                    average = self.export_window_best[window_n]["average"]
-                    best_soc, best_start, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import = self.optimise_export(
+                    snapshot = self.plan_window_snapshot(typ, window_n)
+                    best_soc, best_start, best_metric, best_cost, soc_min, soc_min_minute, best_keep, best_cycle, best_carbon, best_import, best_metric_plan = self.optimise_export(
                         window_n,
                         record_export_windows,
                         self.charge_limit_best,
@@ -3076,9 +3548,16 @@ class Plan:
                     self.export_limits_best[window_n] = best_soc
                     self.export_window_best[window_n]["start_orig"] = self.export_window_best[window_n].get("start_orig", self.export_window_best[window_n]["start"])
                     self.export_window_best[window_n]["start"] = best_start
+                    candidate = (best_metric_plan, best_cost, best_keep, best_cycle, best_carbon, best_import)
+                    selected = self.keep_window_change_if_improved(selected, candidate, typ, window_n, snapshot)
             if (count % 16) == 0:
-                self.log("Final optimisation type {} window {} metric {} metric_keep {} best_carbon {} best_import {} cost {}".format(typ, window_n, best_metric, dp2(best_keep), dp0(best_carbon), dp2(best_import), dp2(best_cost)))
+                log_metric, log_cost, log_keep, log_cycle, log_carbon, log_import = selected
+                self.log("Final optimisation type {} window {} metric {} metric_keep {} best_carbon {} best_import {} cost {}".format(typ, window_n, log_metric, dp2(log_keep), dp0(log_carbon), dp2(log_import), dp2(log_cost)))
             count += 1
+
+        # best_battery_value and best_soc_min stay as the caller passed them in, as they did before this pass
+        # measured its own metric
+        best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import = selected
         self.log("Second pass optimisation finished metric {} cost {} metric_keep {} cycle {} carbon {} import {}".format(best_metric, dp2(best_cost), dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_import)))
 
         self.plan_write_debug(debug_mode, "plan_pass2.html", self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
@@ -3201,7 +3680,7 @@ class Plan:
                             continue
 
                         if self.calculate_best_charge and (window_start not in self.manual_all_times):
-                            if not printed_set:
+                            if not printed_set and self.debug_enable:
                                 self.log(
                                     "Optimise price set {}{}, pass {}, price {}{}, start_at_low {}, best_price_charge {}{}, best_metric {}{}, best_cost {}{}, best_cycle {}kWh, best_carbon {}kg, best_import {}kWh".format(
                                         price_key,
@@ -3231,7 +3710,7 @@ class Plan:
                             if (price_key > best_price_charge_level) and (self.charge_limit_best[window_n] == 0) and not pass_type == "low":
                                 continue
 
-                            n_best_soc, n_best_metric, n_best_cost, n_soc_min, n_soc_min_minute, n_best_keep, n_best_cycle, n_best_carbon, n_best_import = self.optimise_charge_limit(
+                            n_best_soc, n_best_metric, n_best_cost, n_soc_min, n_soc_min_minute, n_best_keep, n_best_cycle, n_best_carbon, n_best_import, n_best_metric_plan = self.optimise_charge_limit(
                                 window_n,
                                 record_charge_windows,
                                 self.charge_limit_best,
@@ -3264,7 +3743,7 @@ class Plan:
 
                                 if self.debug_enable:
                                     self.log(
-                                        "Best charge limit pass {}, window {}, time {} - {}, cost {}{}, charge_limit {}kWh, (adjusted) min {} @ {} (margin added {} and min {} max {}) with metric {}{}, cost {}{}, cycle {}kWh, carbon {}kg, import {}kWh, windows {}".format(
+                                        "Best charge limit pass {}, window {}, time {} - {}, cost {}{}, charge_limit {}kWh, (adjusted) min {} @ {} (min {} max {}) with metric {}{}, cost {}{}, cycle {}kWh, carbon {}kg, import {}kWh, windows {}".format(
                                             pass_type,
                                             window_n,
                                             self.time_abs_str(self.charge_window_best[window_n]["start"]),
@@ -3274,7 +3753,6 @@ class Plan:
                                             dp2(best_soc),
                                             dp2(best_soc_min),
                                             self.time_abs_str(best_soc_min_minute),
-                                            self.best_soc_margin,
                                             self.best_soc_min,
                                             self.best_soc_max,
                                             dp2(best_metric),
@@ -3329,7 +3807,7 @@ class Plan:
                             continue
 
                         if self.allow_this_export_window(window_n):
-                            if not printed_set:
+                            if not printed_set and self.debug_enable:
                                 self.log(
                                     "Optimise price set {}{}, pass {}, price {}{}, start_at_low {}, best_price_export {}{}, level {}{}, best_metric {}{}, best_cost {}{}, best_cycle {}kWh, best_carbon {}kg, best_import {}kWh".format(
                                         price_key,
@@ -3362,7 +3840,7 @@ class Plan:
                             # Try to optimise the export window
                             keep_start = self.export_window_best[window_n]["start"]
                             self.export_window_best[window_n]["start"] = self.export_window_best[window_n].get("start_orig", self.export_window_best[window_n]["start"])
-                            n_best_soc, n_best_start, n_best_metric, n_best_cost, n_soc_min, n_soc_min_minute, n_best_keep, n_best_cycle, n_best_carbon, n_best_import = self.optimise_export(
+                            n_best_soc, n_best_start, n_best_metric, n_best_cost, n_soc_min, n_soc_min_minute, n_best_keep, n_best_cycle, n_best_carbon, n_best_import, n_best_metric_plan = self.optimise_export(
                                 window_n,
                                 record_export_windows,
                                 self.charge_limit_best,
@@ -3403,7 +3881,7 @@ class Plan:
 
                                 if self.debug_enable:
                                     self.log(
-                                        "Best export limit window {}, time {} - {}, cost {}{}. export_limit {}kWh, (adjusted) min {}kWh @ {} (margin added {}kWh and min {}kWh) with metric {}{}, cost {}{}, cycle {}kWh, carbon {}kg, import {}kWh".format(
+                                        "Best export limit window {}, time {} - {}, cost {}{}. export_limit {}kWh, (adjusted) min {}kWh @ {} (min {}kWh) with metric {}{}, cost {}{}, cycle {}kWh, carbon {}kg, import {}kWh".format(
                                             window_n,
                                             self.time_abs_str(self.export_window_best[window_n]["start"]),
                                             self.time_abs_str(self.export_window_best[window_n]["end"]),
@@ -3412,7 +3890,6 @@ class Plan:
                                             best_soc,
                                             dp2(best_soc_min),
                                             self.time_abs_str(best_soc_min_minute),
-                                            self.best_soc_margin,
                                             self.best_soc_min,
                                             dp2(best_metric),
                                             curr,
@@ -3423,8 +3900,9 @@ class Plan:
                                             dp2(best_import),
                                         )
                                     )
-            # Log set of charge and export windows
-            if self.calculate_best_charge:
+            # Log set of charge and export windows - the full window list is long and repeats after
+            # every pass, so it is debug only
+            if self.calculate_best_charge and self.debug_enable:
                 self.log(
                     "Best charge windows best_metric {}{}, best_cost {}{}, best_carbon {}kg, best_import {}kWh, metric_keep {}kWh, end_record {}, windows {}".format(
                         dp2(best_metric),
@@ -3439,7 +3917,7 @@ class Plan:
                     )
                 )
 
-            if self.calculate_best_export:
+            if self.calculate_best_export and self.debug_enable:
                 self.log(
                     "Best export windows best_metric {}{}, best_cost {}{}, best_carbon {}kg, best_import {}kWh, metric_keep {}kWh, end_record {}, windows {}".format(
                         dp2(best_metric),
@@ -3466,6 +3944,7 @@ class Plan:
         """
         Select the charge and export price levels and create the high level plan
         """
+        curr = self.currency_symbols[1]
         record_charge_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.charge_window_best), 1)
         record_export_windows = max(self.max_charge_windows(self.end_record + self.minutes_now, self.export_window_best), 1)
 
@@ -3530,7 +4009,6 @@ class Plan:
                 region_size = int(16 * 60)
                 min_region_size = int(120)
                 while region_size >= min_region_size:
-                    self.log(">> Region optimisation pass width {}".format(region_size))
                     # step_size = int(max(region_size / 2, min_region_size))
                     step_size = region_size
                     fast_mode = not (region_size == min_region_size)
@@ -3589,6 +4067,7 @@ class Plan:
                         if self.end_record + self.minutes_now - region - region_size < 0:
                             break
 
+                    self.log(">> Region optimisation pass width {} gives best_metric {}{}, best_cost {}{}, best_cycle {}kWh, best_import {}kWh".format(region_size, dp2(best_metric), curr, dp2(best_cost), curr, dp2(best_cycle), dp2(best_import)))
                     self.plan_write_debug(debug_mode, "plan_levels_{}.html".format(region_size), self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
                     region_size = int(region_size / 2)
 
@@ -3601,7 +4080,6 @@ class Plan:
 
         self.log("Optimise levels pass ended at {}, duration {:.1f} seconds tried {} combinations".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())), time.time() - start_time, len(tried_list)))
 
-        curr = self.currency_symbols[1]
         self.log(
             "Set best_price_charge_level {}{}, best_price_export_level {}{}, best_price_charge {}{}, best_cost_export {}{}, best_metric {}{}, best_keep {}kWh, best_cycle {}kWh, best_carbon {}kg, best_import {}kWh".format(
                 dp2(best_price_charge_level), curr, dp2(best_price_export_level), curr, dp2(best_price_charge), curr, dp2(best_price_export), curr, dp2(best_metric), curr, dp2(best_keep), dp2(best_cycle), dp0(best_carbon), dp2(best_import)
@@ -3648,10 +4126,6 @@ class Plan:
             record_export_windows,
             debug_mode=debug_mode,
         )
-        # Swaps
-        self.optimise_swap_export(record_charge_windows, record_export_windows, debug_mode=debug_mode)
-        self.plan_write_debug(debug_mode, "plan_swap_final.html", self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
-
         # Second pass optimisation
         if self.calculate_second_pass:
             # Full second pass (slower)
@@ -3660,14 +4134,20 @@ class Plan:
             )
         else:
             # Tweak plan (faster)
-            best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import = self.tweak_plan(self.end_record, best_metric, best_keep)
+            best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import = self.tweak_plan(self.end_record)
 
         # Export more solar - enable freeze export on idle solar windows if it doesn't cost too much
         if self.export_more_solar:
             best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import = self.optimise_solar(best_metric, best_cost, best_keep, best_cycle, best_carbon, best_import, record_export_windows, debug_mode=debug_mode)
 
-        # Charge swap runs last, once all other passes have settled, so a strictly-improving pairwise
-        # charge move is not subsequently undone by a non-monotonic pass (tweak/second/solar).
+        # Swaps run once all other passes have settled. The export swap can only defer an export that
+        # already exists when it runs, and tweak/second/solar all turn exports on - tweak_plan only walks
+        # the first few windows of the plan, so the exports it adds are always at the front, exactly the
+        # ones the swap exists to push back. Running the swap before them left those pinned in place
+        # (#4478). The charge swap follows for the mirror-image reason: a strictly-improving pairwise
+        # charge move must not be subsequently undone by a non-monotonic pass.
+        self.optimise_swap_export(record_charge_windows, record_export_windows, debug_mode=debug_mode)
+        self.plan_write_debug(debug_mode, "plan_swap_final.html", self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
         self.optimise_swap_charge(record_charge_windows, debug_mode=debug_mode)
 
         self.plan_write_debug(debug_mode, "plan_raw.html", self.pv_forecast_minute_step, self.pv_forecast_minute10_step, self.load_minutes_step, self.load_minutes_step10, self.end_record)
@@ -3729,7 +4209,7 @@ class Plan:
                 else:
                     self.export_limits_best[window_n] = 100.0
 
-    def run_prediction(self, charge_limit, charge_window, export_window, export_limits, pv10, end_record, save=None, step=PREDICT_STEP):
+    def run_prediction(self, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, save=None, step=PREDICT_STEP):
         """
         Run a prediction scenario given a charge limit, options to save the results or not to HA entity
         """
@@ -3754,7 +4234,7 @@ class Plan:
             iboost_running,
             iboost_running_solar,
             iboost_running_full,
-        ) = pred.run_prediction(charge_limit, charge_window, export_window, export_limits, pv10, end_record, save, step)
+        ) = pred.run_prediction(charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, save, step)
         self.predict_soc = predict_soc
         self.car_charging_soc_next = car_charging_soc_next
         self.iboost_next = iboost_next
@@ -4065,14 +4545,8 @@ class Plan:
                     )
 
                 # Compute battery value now and at end of plan
-                rate_min_now = self.rate_min_forward.get(self.minutes_now, self.rate_min) / self.inverter_loss / self.battery_loss + self.metric_battery_cycle
-                rate_min_now = max(min(rate_min_now, self.rate_max * self.inverter_loss * self.battery_loss - self.metric_battery_cycle), 0)
-                rate_min_end = self.rate_min_forward.get(self.minutes_now + end_record, self.rate_min) / self.inverter_loss / self.battery_loss + self.metric_battery_cycle
-                rate_min_end = max(min(rate_min_end, self.rate_max * self.inverter_loss * self.battery_loss - self.metric_battery_cycle), 0)
-                rate_export_min_now = self.rate_export_min * self.inverter_loss * self.battery_loss_discharge - self.metric_battery_cycle - rate_min_now
-                rate_export_min_end = self.rate_export_min * self.inverter_loss * self.battery_loss_discharge - self.metric_battery_cycle - rate_min_end
-                value_kwh_now = self.metric_battery_value_scaling * max(rate_min_now, 1.0, rate_export_min_now)
-                value_kwh_end = self.metric_battery_value_scaling * max(rate_min_end, 1.0, rate_export_min_end)
+                value_kwh_now = self.metric_battery_value_scaling * self.battery_value_rate(self.minutes_now)
+                value_kwh_end = self.metric_battery_value_scaling * self.battery_value_rate(self.minutes_now + end_record)
 
                 self.dashboard_item(
                     self.prefix + ".soc_kw_best",

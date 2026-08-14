@@ -27,10 +27,15 @@ from tests.test_infra import reset_inverter
 # ---------------------------------------------------------------------------
 
 MINUTES_PER_DAY = 1440
+CLOCK_STEP_MINUTES = 5            # predbat runs on a 5 minute cadence, so start times are multiples of 5
 RATE_HISTORY_DAYS = 3             # days of past + future rates to generate
 RATE_FUTURE_DAYS = 2
 
 PV10_FRACTION = 0.6               # pv10 = pv * this fraction
+# pv90 = pv * this factor. Deliberately NOT the mirror of PV10_FRACTION (which would be 1.4):
+# solar upside is bounded by clear-sky while the downside is not, so a real p90 sits much closer
+# to the central forecast than the p10 does. 1.25 is in the range Solcast typically produces.
+PV90_FACTOR = 1.25                # pv90 = pv * this factor
 GAUSSIAN_PV_SIGMA_MINUTES = 180   # 3-hour std dev for PV bell curve
 PV_SUNRISE_MINUTE_MIN = 240       # 04:00 earliest sunrise
 PV_SUNRISE_MINUTE_MAX = 480       # 08:00 latest sunrise
@@ -284,10 +289,21 @@ def generate_random_scenario(scenario_id, seed):
     load_day_kwh = generate_load_day(daily_kwh, load_type, base_kw, morning_peak_kw, evening_peak_kw, morning_peak_minute, evening_peak_minute)
     pv_day_kw = generate_pv_day(peak_kw, peak_hour, sunrise_minute, sunset_minute)
 
+    # --- Clock ---
+    # Drawn last so that re-generating an existing seed leaves every other parameter unchanged.
+    # A random minute-of-day (on predbat's 5 minute run cadence) means scenarios start at every point
+    # of the tariff and solar day - overnight cheap windows, the evening peak, mid-generation - and
+    # land part way through a plan slot, which is the only way partially-elapsed (in-progress) slots
+    # get exercised.
+    clock_minutes_now = rng.randrange(0, MINUTES_PER_DAY, CLOCK_STEP_MINUTES)
+
     return {
         "id": scenario_id,
         "seed": seed,
         "params": {
+            "clock": {
+                "minutes_now": clock_minutes_now,
+            },
             "battery": {
                 "soc_max_kwh": soc_max_kwh,
                 "initial_soc_percent": initial_soc_percent,
@@ -440,25 +456,36 @@ def expand_load_minutes(day_kwh_profile, minutes_now=0, history_days=14):
     return result
 
 
-def expand_pv_forecast(day_kw_profile, forecast_minutes, pv10_fraction=PV10_FRACTION):
-    """Build predbat pv_forecast_minute and pv_forecast_minute10 from a daily profile.
+def expand_pv_forecast(day_kw_profile, forecast_minutes, minutes_now=0, pv10_fraction=PV10_FRACTION, pv90_factor=PV90_FACTOR):
+    """Build predbat pv_forecast_minute, pv_forecast_minute10 and pv_forecast_minute90 from a daily profile.
+
+    The p90 series matters because without one the PV90 upside scenario falls back to a copy of the p50
+    and becomes inert - identical to nominal apart from load scaling - so a benchmark run against these
+    scenarios could not tell whether PV90 helps or hurts.
 
     Args:
         day_kw_profile: list[float] of 1440 per-minute kW values
-        forecast_minutes: how many minutes forward to generate (e.g. 2880 = 48h)
+        forecast_minutes: how many minutes forward from now to cover (e.g. 2880 = 48h)
+        minutes_now: current minute-of-day. The series is keyed by absolute minutes from midnight
+            because step_data_history reads forward data at (minute + minutes_now), so it has to run
+            to minutes_now + forecast_minutes or the tail of the horizon silently has no PV.
         pv10_fraction: fraction of normal forecast used for the P10 (pessimistic) forecast
+        pv90_factor: multiple of normal forecast used for the P90 (optimistic) forecast
 
     Returns:
-        tuple(dict[int, float], dict[int, float]) = (pv_forecast_minute, pv_forecast_minute10)
+        tuple(dict[int, float], dict[int, float], dict[int, float]) =
+            (pv_forecast_minute, pv_forecast_minute10, pv_forecast_minute90)
     """
     pv_normal = {}
     pv10 = {}
-    for minute in range(0, forecast_minutes + 1):
+    pv90 = {}
+    for minute in range(0, minutes_now + forecast_minutes + 1):
         idx = minute % MINUTES_PER_DAY
         kw = day_kw_profile[idx]
         pv_normal[minute] = kw / 60.0         # kW -> kWh per minute (predbat format)
         pv10[minute] = kw * pv10_fraction / 60.0
-    return pv_normal, pv10
+        pv90[minute] = kw * pv90_factor / 60.0
+    return pv_normal, pv10, pv90
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +525,15 @@ def apply_scenario_to_predbat(my_predbat, scenario):
     my_predbat.forecast_plan_hours = 24
     my_predbat.forecast_days = 1
 
+    # --- Clock: each scenario has its own time of day ---
+    # Scenario files written before this existed carry no "clock" entry; those keep the template's
+    # own minutes_now so previously recorded benchmark results stay comparable. The value is absolute
+    # (minutes from midnight), so applying scenarios in a loop cannot accumulate.
+    clock = params.get("clock")
+    if clock and "minutes_now" in clock:
+        my_predbat.minutes_now = clock["minutes_now"]
+        my_predbat.now_utc = my_predbat.midnight_utc + datetime.timedelta(minutes=my_predbat.minutes_now)
+
     # --- Expand time-series from stored daily profiles ---
     minutes_now = my_predbat.minutes_now
     forecast_minutes = my_predbat.forecast_minutes
@@ -516,9 +552,10 @@ def apply_scenario_to_predbat(my_predbat, scenario):
     my_predbat.best_soc_min = 0.0
 
 
-    pv_normal, pv10 = expand_pv_forecast(data["pv_day_kw"], forecast_minutes)
+    pv_normal, pv10, pv90 = expand_pv_forecast(data["pv_day_kw"], forecast_minutes, minutes_now=minutes_now)
     my_predbat.pv_forecast_minute = pv_normal
     my_predbat.pv_forecast_minute10 = pv10
+    my_predbat.pv_forecast_minute90 = pv90
     my_predbat.calculate_second_pass = False
 
     # --- Rebuild PV step dicts via step_data_history ---
@@ -535,6 +572,21 @@ def apply_scenario_to_predbat(my_predbat, scenario):
         cloud_factor=min(my_predbat.metric_cloud_coverage + 0.2, 1.0) if my_predbat.metric_cloud_coverage else None,
         flip=True,
     )
+
+    # --- Rescan the new rates before anything consumes their summaries ---
+    # Replacing rate_import/rate_export above does not update the min/max/average summaries or
+    # rate_min_forward - those only move when rate_scan runs. Without this the whole scenario is
+    # planned against the TEMPLATE's rates: on scenario 10, rate_min_forward stayed at the template's
+    # 18.081 while the scenario's cheapest forward import was 5.54, so battery_value_rate credited
+    # leftover battery at 3.4x its replacement cost and every window charged to 100%. set_rate_thresholds
+    # and rate_scan_window below both read these, so the rescan has to come first.
+    # rate_scan only recomputes rate_min_forward when print is True, so it is called explicitly here
+    # rather than turning the per-scenario logging on.
+    if my_predbat.rate_import:
+        my_predbat.rate_scan(my_predbat.rate_import, print=False)
+        my_predbat.rate_min_forward = my_predbat.rate_min_forward_calc(my_predbat.rate_import)
+    if my_predbat.rate_export:
+        my_predbat.rate_scan_export(my_predbat.rate_export, print=False)
 
     # --- Rebuild rate thresholds and charge/export windows ---
     if my_predbat.rate_import or my_predbat.rate_export:

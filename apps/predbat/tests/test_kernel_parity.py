@@ -20,14 +20,19 @@ build_kernel.sh; if that fails the test is skipped with a loud notice, unless
 PREDBAT_KERNEL_REQUIRED=1 is set (CI) in which case it fails.
 """
 
+import array
 import copy
+import ctypes
+import gc
 import os
 import random
 import subprocess
 
 import prediction_kernel
+from const import PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90
 from prediction import Prediction
 from prediction_kernel import create_kernel_context, run_prediction_kernel, load_kernel
+from utils import remove_intersecting_windows
 from tests.test_infra import reset_inverter, reset_rates
 from tests.test_model import run_model_tests
 
@@ -360,19 +365,19 @@ def compare_results(name, python_result, kernel_result):
     return failed
 
 
-def dual_run(name, my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit, charge_window, export_window, export_limits, pv10, end_record):
+def dual_run(name, my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, pv90_step=None, load90_step=None):
     """Run one scenario through both engines and compare, returns True on failure"""
     # Python engine first (kernel disabled so run_prediction cannot dispatch)
     my_predbat.prediction_kernel_enable = False
-    prediction = Prediction(my_predbat, pv_step, pv10_step, load_step, load10_step)
-    python_result = prediction.run_prediction(charge_limit, charge_window, export_window, export_limits, pv10, end_record, save=None, cache=False)
+    prediction = Prediction(my_predbat, pv_step, pv10_step, load_step, load10_step, pv90_step, load90_step)
+    python_result = prediction.run_prediction(charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, save=None, cache=False)
 
     # Kernel run on the identical Prediction state
     prediction.kernel_handle = create_kernel_context(prediction)
     if not prediction.kernel_handle:
         print("ERROR: Scenario {} kernel context creation failed".format(name))
         return True
-    kernel_result = run_prediction_kernel(prediction, charge_limit, charge_window, export_window, export_limits, pv10, end_record, 5, False)
+    kernel_result = run_prediction_kernel(prediction, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, 5, False)
     if kernel_result is None:
         print("ERROR: Scenario {} kernel run failed".format(name))
         return True
@@ -381,8 +386,53 @@ def dual_run(name, my_predbat, pv_step, pv10_step, load_step, load10_step, charg
 
     # Also check the run_prediction dispatch glue path picks the kernel and agrees
     prediction.prediction_kernel_enable = True
-    dispatch_result = prediction.run_prediction(charge_limit, charge_window, export_window, export_limits, pv10, end_record, save=None, cache=False)
+    dispatch_result = prediction.run_prediction(charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, save=None, cache=False)
     failed |= compare_results(name + "_dispatch", kernel_result, dispatch_result)
+    return failed
+
+
+def run_marshalling_tests():
+    """Check the ctypes buffer helpers, returns True on failure.
+
+    double_array/int32_array build their buffers with from_buffer, which returns a view over an
+    array.array rather than a copy. If ctypes did not keep the backing object alive the kernel would
+    read freed memory - silently, and only sometimes - so that guarantee is asserted here rather than
+    assumed, along with the values surviving the round trip.
+    """
+    print("**** Running kernel marshalling tests ****")
+    failed = False
+
+    # The typecode chosen for the backing array must match the ctypes element exactly. from_buffer
+    # only checks the buffer is large enough, so a wider backing type is accepted and then read as
+    # interleaved garbage - a silent corruption rather than an exception.
+    for name, typecode, ctype in (("DOUBLE_TYPECODE", prediction_kernel.DOUBLE_TYPECODE, ctypes.c_double), ("INT32_TYPECODE", prediction_kernel.INT32_TYPECODE, ctypes.c_int32)):
+        if typecode is not None and array.array(typecode).itemsize != ctypes.sizeof(ctype):
+            print("ERROR: {} is '{}' with itemsize {} but the ctypes element is {} bytes".format(name, typecode, array.array(typecode).itemsize, ctypes.sizeof(ctype)))
+            failed = True
+
+    for name, builder, values, typecode in (("double_array", prediction_kernel.double_array, [0.0, -1.5, 3.25, 1e6], prediction_kernel.DOUBLE_TYPECODE), ("int32_array", prediction_kernel.int32_array, [0, -7, 42, 100000], prediction_kernel.INT32_TYPECODE)):
+        # Build from a temporary so the source list/array is unreferenced by the time it is read
+        buffer = builder(list(values))
+        gc.collect()
+        got = [buffer[i] for i in range(len(values))]
+        if got != values:
+            print("ERROR: {} round trip expected {} but got {}".format(name, values, got))
+            failed = True
+        # Only the from_buffer path holds a view that needs its backing kept alive; the fallback
+        # copies the values, so it has nothing to retain and is safe without _objects. Truthiness
+        # rather than "is not None": an empty _objects would mean nothing is retained, which is just
+        # as unsafe as the attribute being absent.
+        if typecode is not None and not getattr(buffer, "_objects", None):
+            print("ERROR: {} did not retain its backing buffer - the kernel could read freed memory".format(name))
+            failed = True
+
+        empty = builder([])
+        if len(empty) != 0:
+            print("ERROR: {}([]) should be empty, got length {}".format(name, len(empty)))
+            failed = True
+
+    if not failed:
+        print("PASS")
     return failed
 
 
@@ -598,16 +648,80 @@ def run_edge_case_tests(my_predbat):
         for key, value in overrides.items():
             setattr(my_predbat, key, value)
         pv_step, pv10_step, load_step, load10_step = make_step_data(my_predbat, pv_kw=pv_kw, load_kw=load_kw)
-        for pv10 in [False, True]:
+        for pv_scenario in (PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10):
             failed |= dual_run(
-                "{}_pv10_{}".format(name, pv10), my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit[:], [dict(window) for window in charge_window], [dict(window) for window in export_window], export_limits[:], pv10, end_record
+                "{}_scenario_{}".format(name, pv_scenario),
+                my_predbat,
+                pv_step,
+                pv10_step,
+                load_step,
+                load10_step,
+                charge_limit[:],
+                [dict(window) for window in charge_window],
+                [dict(window) for window in export_window],
+                export_limits[:],
+                pv_scenario,
+                end_record,
             )
+
+    # pv90: the kernel must select the p90 arrays, skip the pv10 charge de-rate, and skip the
+    # io_adjusted worst-case import rate. Distinct series per scenario so a wrong selection shows up.
+    #
+    # Two profiles are needed because the three pv90-specific behaviours are not all observable in one:
+    #  - "charge" is PV-rich with a charge window, so it pins the array selection (export volume differs
+    #    per scenario) and the pv10 charge de-rate (final_soc differs), but every scenario ends up
+    #    exporting, which makes import_rate - and therefore the io_adjusted substitution - unobservable.
+    #  - "import" is load-dominated with an empty battery, so all three scenarios import and the
+    #    io_adjusted worst-case rate substitution moves the metric. load90 must stay above pv90 here
+    #    (load_kw > 4 * pv_kw, given the *0.5 / *2.0 p90 derivation below) or pv90 would export too.
+    pv90_cases = [
+        # name, pv_kw, load_kw, charge_limit, charge_window
+        ("pv90_charge", 2.0, 0.5, [100.0], [{"start": minutes_now, "end": minutes_now + 120, "average": 5.0}]),
+        ("pv90_import", 0.5, 3.0, [], []),
+    ]
+    for case_name, pv_kw, load_kw, charge_limit, charge_window in pv90_cases:
+        reset_inverter(my_predbat)
+        reset_rates(my_predbat, 10.0, 5.0)
+        my_predbat.battery_rate_max_export = my_predbat.battery_rate_max_discharge
+        pv_step, pv10_step, load_step, load10_step = make_step_data(my_predbat, pv_kw=pv_kw, load_kw=load_kw)
+        pv90_step = {minute: value * 2.0 for minute, value in pv_step.items()}
+        load90_step = {minute: value * 0.5 for minute, value in load_step.items()}
+        my_predbat.charge_scaling10 = 0.5
+        my_predbat.io_adjusted = {minute: 1 for minute in range(0, my_predbat.forecast_minutes + my_predbat.minutes_now)}
+        # reset_rates leaves rate_max equal to the flat import rate, which would make the pv10 worst-case
+        # substitution (import_rate = rate_max) a no-op and hide a kernel that wrongly applied it to pv90
+        my_predbat.rate_max = 50.0
+        for scenario in (PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90):
+            failed |= dual_run(
+                "{}_scenario_{}".format(case_name, scenario),
+                my_predbat,
+                pv_step,
+                pv10_step,
+                load_step,
+                load10_step,
+                charge_limit[:],
+                [dict(window) for window in charge_window],
+                [],
+                [],
+                scenario,
+                my_predbat.forecast_minutes,
+                pv90_step=pv90_step,
+                load90_step=load90_step,
+            )
+        my_predbat.io_adjusted = {}
     return failed
 
 
 def run_random_sweep_tests(my_predbat, count=150):
-    """Seeded random configuration sweep comparing both engines, returns True on failure"""
+    """Seeded random configuration sweep comparing both engines, returns True on failure.
+
+    Every seed is run against all three PV scenarios. Drawing one scenario per seed instead would
+    trade away coverage of nominal and pv10 - the two scenarios every user runs at the default
+    pv_metric90_weight of 0 - to buy coverage of pv90; running all three is strictly additive and
+    the sweep is fast enough to absorb the 3x.
+    """
     failed = False
+    scenario_counts = {PV_SCENARIO_NOMINAL: 0, PV_SCENARIO_PV10: 0, PV_SCENARIO_PV90: 0}
     for seed in range(count):
         rng = random.Random(seed)
         reset_inverter(my_predbat)
@@ -616,17 +730,145 @@ def run_random_sweep_tests(my_predbat, count=150):
         apply_random_scenario(my_predbat, rng)
         pv_step, pv10_step, load_step, load10_step = make_step_data(my_predbat, rng=rng)
 
+        # p90 series derived from a separate generator so the main rng stream - and therefore every
+        # pre-existing random scenario - is unchanged by the addition of the pv90 case
+        rng90 = random.Random(seed + 1000000)
+        pv90_step = {minute: round(value * rng90.uniform(1.0, 2.0), 3) for minute, value in pv_step.items()}
+        load90_step = {minute: round(value * rng90.uniform(0.5, 1.0), 3) for minute, value in load_step.items()}
+
         charge_window = make_windows(rng, my_predbat.minutes_now, my_predbat.forecast_minutes, rng.randint(0, 3), align=rng.choice([5, 5, 30, 3]))
         charge_limit = [rng.choice([0.0, my_predbat.reserve, my_predbat.soc_max, round(rng.uniform(0, my_predbat.soc_max), 2)]) for _ in charge_window]
         export_window = make_windows(rng, my_predbat.minutes_now, my_predbat.forecast_minutes, rng.randint(0, 3), align=rng.choice([5, 5, 30]))
         export_limits = [rng.choice([100.0, 99.0, 0.0, round(rng.uniform(0, 100), 1)]) for _ in export_window]
         end_record = rng.choice([my_predbat.forecast_minutes, my_predbat.forecast_minutes - 30, rng.randrange(0, my_predbat.forecast_minutes, 5)])
-        pv10 = rng.choice([False, True])
 
-        failed |= dual_run("random_{}".format(seed), my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit, charge_window, export_window, export_limits, pv10, end_record)
+        # No scenario is drawn from rng here: the draw that used to sit at this position was the last
+        # use of rng in the loop body, so looping the scenarios instead leaves every previously
+        # generated configuration (windows, limits, end_record, step data) bit-for-bit unchanged.
+        for pv_scenario in (PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90):
+            scenario_counts[pv_scenario] += 1
+            failed |= dual_run(
+                "random_{}_s{}".format(seed, pv_scenario), my_predbat, pv_step, pv10_step, load_step, load10_step, charge_limit, charge_window, export_window, export_limits, pv_scenario, end_record, pv90_step=pv90_step, load90_step=load90_step
+            )
+            if failed:
+                print("Random sweep failed at seed {} scenario {}".format(seed, pv_scenario))
+                break
         if failed:
-            print("Random sweep failed at seed {}".format(seed))
             break
+    print("Random sweep ran {} configurations: nominal {}, pv10 {}, pv90 {}".format(sum(scenario_counts.values()), scenario_counts[PV_SCENARIO_NOMINAL], scenario_counts[PV_SCENARIO_PV10], scenario_counts[PV_SCENARIO_PV90]))
+    return failed
+
+
+def make_intersecting_windows(rng, minutes_now, forecast_minutes):
+    """Build a charge/export layout that deliberately exercises window clipping.
+
+    The generic sweep places a handful of windows at random, so an export window landing strictly
+    inside a charge window - the split case, and the subtlest part of the clipping - almost never
+    comes up. Here export windows are positioned relative to the charge windows on purpose: covering
+    them entirely, overlapping either end, sitting inside them, and touching exactly at a boundary.
+    Short windows and short remnants are included because the 5 minute minimum only applies to
+    remnants clipping itself created, never to a window that was left alone.
+    """
+    charge_window = []
+    minute = minutes_now
+    for _ in range(rng.randint(1, 5)):
+        length = rng.choice([5, 10, 30, 60, 120, 240])
+        end = min(minute + length, minutes_now + forecast_minutes)
+        if end <= minute:
+            break
+        charge_window.append({"start": minute, "end": end, "average": round(rng.uniform(0, 40), 2)})
+        minute = end + rng.choice([0, 0, 5, 30])
+        if minute >= minutes_now + forecast_minutes:
+            break
+
+    export_window = []
+    for window in charge_window:
+        mode = rng.choice(["inside", "inside", "overlap_start", "overlap_end", "cover", "touch_start", "touch_end", "clear", "tiny_remnant"])
+        start, end = window["start"], window["end"]
+        span = end - start
+        if mode == "inside" and span >= 20:
+            dstart = start + rng.randrange(5, max(span - 10, 6), 5)
+            dend = min(dstart + rng.choice([5, 10, 30]), end - 1)
+            if dend <= dstart:
+                continue
+        elif mode == "overlap_start":
+            dstart, dend = max(start - rng.choice([5, 30]), minutes_now), start + max(span // 3, 5)
+        elif mode == "overlap_end":
+            dstart, dend = end - max(span // 3, 5), end + rng.choice([5, 30])
+        elif mode == "cover":
+            dstart, dend = start, end
+        elif mode == "touch_start":
+            dstart, dend = max(start - 30, minutes_now), start
+        elif mode == "touch_end":
+            dstart, dend = end, end + 30
+        elif mode == "tiny_remnant" and span >= 10:
+            # Leave only a couple of minutes at the end, below the 5 minute minimum
+            dstart, dend = start, end - rng.choice([1, 2, 3])
+        else:
+            dstart, dend = end + 60, end + 90
+        dstart = max(min(dstart, minutes_now + forecast_minutes), minutes_now)
+        dend = max(min(dend, minutes_now + forecast_minutes), dstart)
+        if dend > dstart:
+            export_window.append({"start": dstart, "end": dend, "average": round(rng.uniform(0, 40), 2)})
+
+    export_window.sort(key=lambda w: w["start"])
+    return charge_window, export_window
+
+
+def run_clipping_parity_tests(my_predbat, count=250):
+    """Compare both engines on layouts built to exercise window clipping, returns True on failure.
+
+    The kernel clips intersecting charge windows itself (clip_intersecting_charge_windows in
+    prediction_kernel.cpp) rather than having Python do it first, so this is the sweep that pins
+    those two implementations together.
+    """
+    failed = False
+    split_layouts = 0
+    for seed in range(count):
+        rng = random.Random(500000 + seed)
+        reset_inverter(my_predbat)
+        reset_rates(my_predbat, 10.0, 5.0)
+        my_predbat.battery_rate_max_export = my_predbat.battery_rate_max_discharge
+        apply_random_scenario(my_predbat, rng)
+        pv_step, pv10_step, load_step, load10_step = make_step_data(my_predbat, rng=rng)
+
+        charge_window, export_window = make_intersecting_windows(rng, my_predbat.minutes_now, my_predbat.forecast_minutes)
+        charge_limit = [rng.choice([0.0, my_predbat.reserve, my_predbat.soc_max, round(rng.uniform(0, my_predbat.soc_max), 2)]) for _ in charge_window]
+        export_limits = [rng.choice([100.0, 99.0, 0.0, round(rng.uniform(0, 100), 1)]) for _ in export_window]
+        end_record = rng.choice([my_predbat.forecast_minutes, my_predbat.forecast_minutes - 30])
+
+        # Count the layouts that actually split a charge window, so a generator that stopped
+        # producing them would show up rather than silently weakening this sweep
+        clipped_limits, clipped_windows = remove_intersecting_windows(charge_limit, charge_window, export_limits, export_window)
+        if len(clipped_windows) > len(charge_window):
+            split_layouts += 1
+
+        for pv_scenario in (PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10):
+            failed |= dual_run(
+                "clip_{}_s{}".format(seed, pv_scenario),
+                my_predbat,
+                pv_step,
+                pv10_step,
+                load_step,
+                load10_step,
+                charge_limit,
+                charge_window,
+                export_window,
+                export_limits,
+                pv_scenario,
+                end_record,
+            )
+            if failed:
+                print("Clipping sweep failed at seed {} scenario {}".format(seed, pv_scenario))
+                print("   charge {} limits {}".format([(w["start"], w["end"]) for w in charge_window], charge_limit))
+                print("   export {} limits {}".format([(w["start"], w["end"]) for w in export_window], export_limits))
+                break
+        if failed:
+            break
+    print("Clipping sweep ran {} layouts, {} of which split a charge window".format(count, split_layouts))
+    if split_layouts == 0:
+        print("ERROR: clipping sweep generated no window splits - the sweep is not exercising the split path")
+        failed = True
     return failed
 
 
@@ -669,9 +911,12 @@ def run_kernel_parity_tests(my_predbat):
 
     state = snapshot_scenario_state(my_predbat)
     try:
-        failed = run_edge_case_tests(my_predbat)
+        failed = run_marshalling_tests()
+        failed |= run_edge_case_tests(my_predbat)
         if not failed:
             failed |= run_random_sweep_tests(my_predbat)
+        if not failed:
+            failed |= run_clipping_parity_tests(my_predbat)
     finally:
         restore_scenario_state(my_predbat, state)
 

@@ -1225,6 +1225,10 @@ def test_call_adjust_export_immediate(test_name, my_predbat, ha, inv, dummy_item
     ha.service_store_enable = True
     if clear:
         ha.service_store = []
+        # Also drop discharge-domain dedup memory so this call is judged fresh rather than
+        # against whatever the previous sub-test happened to send - needed now that several
+        # target_soc values collapse onto the same discharge_stop call (batpred#4464 fix).
+        my_predbat.last_service_hash.pop("discharge", None)
 
     print("**** Running Test: {} ****".format(test_name))
 
@@ -1249,7 +1253,7 @@ def test_call_adjust_export_immediate(test_name, my_predbat, ha, inv, dummy_item
 
     if repeat:
         pass
-    elif freeze or soc == inv.soc_percent:
+    elif freeze:
         if charge_stop:
             expected.append(["charge_stop", {"device_id": "DID0"}])
         expected.append(["discharge_freeze", {"device_id": "DID0", "target_soc": int(soc), "power": power}])
@@ -1258,6 +1262,8 @@ def test_call_adjust_export_immediate(test_name, my_predbat, ha, inv, dummy_item
             expected.append(["charge_stop", {"device_id": "DID0"}])
         expected.append(["discharge_start", {"device_id": "DID0", "target_soc": int(soc), "power": power}])
     else:
+        # soc >= inv.soc_percent (including exact equality - target reached, nothing left to
+        # discharge, not a deliberate freeze - batpred#4464)
         if charge_stop:
             expected.append(["charge_stop", {"device_id": "DID0"}])
         else:
@@ -1651,7 +1657,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
     saved_rest_v3 = inv.rest_v3
     saved_sleep = inv.sleep
     inv.sleep = lambda seconds: None
-    inv.rest_discharge_target_unwritable = None
+    inv.base.rest_discharge_target_unwritable = {}
 
     start_time = "03:33:00"
     end_time = "04:44:00"
@@ -1686,7 +1692,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
         if inv.base.had_errors:
             print("ERROR: {}: a string register reading the target back must count as a successful write".format(test_name))
             failed = True
-        if inv.rest_discharge_target_unwritable is not None:
+        if inv.base.rest_discharge_target_unwritable.get(inv.id) is not None:
             print("ERROR: {}: a successful write must not mark the register unwritable".format(test_name))
             failed = True
 
@@ -1723,7 +1729,319 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
         inv.rest_api = saved_rest_api
         inv.rest_v3 = saved_rest_v3
         inv.sleep = saved_sleep
-        inv.rest_discharge_target_unwritable = None
+        inv.base.rest_discharge_target_unwritable = {}
+
+    return failed
+
+
+def test_discharge_target_read_back(test_name, ha, inv, dummy_rest):
+    """
+    Regression test for issue #4404: spurious "REST failed to setExportTarget" warnings.
+
+    GivTCP reports the raw invertor registers as strings, so rest_setDischargeTarget's read back
+    check compared '20' against the int 20 and never matched. Every export slot burned all five
+    retries (five redundant register writes) and then recorded an error status, even though the
+    write had actually landed.
+
+    The same cycle also has to cope with an inverter that does not expose the export target at
+    all - reading it back as None must not be treated as a real target of 0 that needs raising to
+    the reserve, or Predbat writes to an entity that isn't there on every cycle.
+    """
+    failed = False
+    print("Test: {}".format(test_name))
+
+    saved_reserve_percent = inv.reserve_percent
+    saved_rest_data = inv.rest_data
+    saved_rest_api = inv.rest_api
+    saved_rest_v3 = inv.rest_v3
+    saved_had_errors = inv.base.had_errors
+    saved_record_status = inv.base.record_status
+    saved_target_soc = ha.dummy_items.get("number.discharge_target_soc")
+
+    # Capture the error statuses so the unrelated fixture warnings (the H M format time entities
+    # this inverter has no entity for) don't mask what the export target write itself recorded
+    errors = []
+
+    def capture_record_status(message, debug="", had_errors=False, notify=False, extra=""):
+        """Record error statuses so the test can assert on the export target ones only."""
+        if had_errors:
+            errors.append(message)
+        return saved_record_status(message, debug=debug, had_errors=had_errors, notify=notify, extra=extra)
+
+    def target_errors():
+        """Return the captured error statuses that relate to the export target."""
+        return [message for message in errors if "ExportTarget" in message or "discharge_target_soc" in message]
+
+    inv.base.record_status = capture_record_status
+
+    start_time = "03:33:00"
+    end_time = "04:44:00"
+    ts = datetime.strptime(start_time, "%H:%M:%S")
+    te = datetime.strptime(end_time, "%H:%M:%S")
+
+    try:
+        # Case 1: GivTCP reports the register back as a string - the write must be seen as successful
+        inv.rest_api = "dummy"
+        inv.rest_v3 = True
+        inv.rest_data = {"Control": {"Mode": "Timed Export"}, "raw": {"invertor": {"discharge_target_soc_1": "4"}}}
+        dummy_rest.clear_queue()
+        dummy_rest.rest_data = copy.deepcopy(inv.rest_data)
+        polled = copy.deepcopy(inv.rest_data)
+        polled["raw"]["invertor"]["discharge_target_soc_1"] = "20"
+        dummy_rest.queue_rest_data(polled)
+        dummy_rest.get_commands()
+        del errors[:]
+
+        if not inv.rest_setDischargeTarget(20):
+            print("ERROR: {}: string read back of the export target should count as success".format(test_name))
+            failed = True
+        if target_errors():
+            print("ERROR: {}: string read back of the export target should not record an error, got {}".format(test_name, target_errors()))
+            failed = True
+        commands = dummy_rest.get_commands()
+        if len(commands) != 1:
+            print("ERROR: {}: export target should be written once, got {} writes".format(test_name, len(commands)))
+            failed = True
+
+        # Case 2: an export target that can not be read must not be written to, on the REST path
+        inv.reserve_percent = 20
+        inv.rest_data = {
+            "Control": {"Enable_Discharge_Schedule": "on", "Mode": "Timed Export"},
+            "Timeslots": {"Discharge_start_time_slot_1": start_time, "Discharge_end_time_slot_1": end_time},
+            "raw": {"invertor": {"discharge_target_soc_1": None}},
+        }
+        dummy_rest.clear_queue()
+        dummy_rest.rest_data = copy.deepcopy(inv.rest_data)
+        dummy_rest.get_commands()
+        del errors[:]
+
+        inv.adjust_force_export(True, ts, te)
+        if [command for command in dummy_rest.get_commands() if "setDischargeTarget" in command[0]]:
+            print("ERROR: {}: unreadable REST export target should not be written".format(test_name))
+            failed = True
+        if target_errors():
+            print("ERROR: {}: unreadable REST export target should not record an error, got {}".format(test_name, target_errors()))
+            failed = True
+
+        # Case 3: the same on the entity path, where the configured entity has no state
+        inv.rest_data = None
+        inv.rest_api = None
+        inv.reserve_percent = 20
+        ha.dummy_items["select.discharge_start_time"] = start_time
+        ha.dummy_items["select.discharge_end_time"] = end_time
+        ha.dummy_items["switch.scheduled_discharge_enable"] = "on"
+        ha.dummy_items["sensor.predbat_GE_0_scheduled_discharge_enable"] = "on"
+        ha.dummy_items["number.discharge_target_soc"] = None
+        ha.dummy_items["select.inverter_mode"] = "Timed Export"
+        ha.dummy_items["switch.inverter_button"] = "off"
+        del errors[:]
+
+        inv.adjust_force_export(True, ts, te)
+        if ha.get_state("number.discharge_target_soc") is not None:
+            print("ERROR: {}: unreadable export target entity should not be written, got {}".format(test_name, ha.get_state("number.discharge_target_soc")))
+            failed = True
+        if target_errors():
+            print("ERROR: {}: unreadable export target entity should not record an error, got {}".format(test_name, target_errors()))
+            failed = True
+    finally:
+        inv.reserve_percent = saved_reserve_percent
+        inv.rest_data = saved_rest_data
+        inv.rest_api = saved_rest_api
+        inv.rest_v3 = saved_rest_v3
+        inv.base.record_status = saved_record_status
+        inv.base.had_errors = saved_had_errors
+        ha.dummy_items["number.discharge_target_soc"] = saved_target_soc
+
+    return failed
+
+
+def test_discharge_target_settle_delay(test_name, ha, inv, dummy_rest):
+    """
+    Regression test for issue #4421: spurious "REST failed to setExportTarget got 0" warnings
+    even though GivTCP's own log confirms the write succeeded.
+
+    Exercises the raw.invertor.discharge_target_soc_1 fallback path specifically (Control has no
+    Discharge_Target_SOC_1 key in this fixture, so the primary signal can't match). That field is
+    only refreshed by GivTCP's own background self_run poll cycle, not synchronously with the
+    setDischargeTarget POST - reading it back immediately can therefore catch data from before
+    GivTCP has next polled and exposed the write. rest_setDischargeTarget must settle briefly
+    (self.sleep) between the POST and each readback, on every attempt - not just between retries -
+    giving that poll cycle a chance to catch up before it's checked.
+
+    Simulates exactly that race: the first queued runAll response is still the stale pre-write value
+    (as if GivTCP's self_run hadn't polled since the write), the second is the real post-write value.
+    The write must still be recognised as a success once the fallback catches up, and a sleep must
+    have happened before each of the two readbacks, not only between them.
+    """
+    failed = False
+    print("Test: {}".format(test_name))
+
+    saved_rest_data = inv.rest_data
+    saved_rest_api = inv.rest_api
+    saved_rest_v3 = inv.rest_v3
+    saved_sleep = inv.sleep
+
+    sleep_calls = []
+
+    def counting_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    inv.sleep = counting_sleep
+
+    try:
+        inv.rest_api = "dummy"
+        inv.rest_v3 = True
+        inv.rest_data = {"Control": {"Mode": "Timed Export"}, "raw": {"invertor": {"discharge_target_soc_1": "0"}}}
+        dummy_rest.clear_queue()
+        dummy_rest.rest_data = copy.deepcopy(inv.rest_data)
+        # First readback: still the stale pre-write value (GivTCP's cache hasn't caught up yet).
+        stale = copy.deepcopy(inv.rest_data)
+        dummy_rest.queue_rest_data(stale)
+        # Second readback: the real post-write value.
+        settled = copy.deepcopy(inv.rest_data)
+        settled["raw"]["invertor"]["discharge_target_soc_1"] = "20"
+        dummy_rest.queue_rest_data(settled)
+        dummy_rest.get_commands()
+
+        if not inv.rest_setDischargeTarget(20):
+            print("ERROR: {}: write should be recognised as successful once the stale cache catches up".format(test_name))
+            failed = True
+
+        commands = dummy_rest.get_commands()
+        if len(commands) != 2:
+            print("ERROR: {}: export target should be POSTed once per attempt (2 attempts needed here), got {} writes".format(test_name, len(commands)))
+            failed = True
+
+        if len(sleep_calls) < 2:
+            print("ERROR: {}: expected a settle sleep before each of the 2 readbacks, got {} sleep call(s)".format(test_name, len(sleep_calls)))
+            failed = True
+    finally:
+        inv.sleep = saved_sleep
+        inv.rest_data = saved_rest_data
+        inv.rest_api = saved_rest_api
+        inv.rest_v3 = saved_rest_v3
+
+    return failed
+
+
+def test_discharge_target_control_signal(test_name, ha, inv, dummy_rest):
+    """
+    Regression test for issue #4421 (follow-up): rest_setDischargeTarget must trust
+    Control.Discharge_Target_SOC_1 as the primary success signal, not just the raw register.
+
+    Traced against GivTCP's own source: write.py's setDischargeTarget() calls
+    updateControlCache() synchronously the moment it accepts the write, setting
+    Control.Discharge_Target_SOC_1 immediately - well before raw.invertor.discharge_target_soc_1
+    is next refreshed by the separate, much slower self_run background poll (tens of seconds on
+    some installs, not a fixed short delay). Checking Control first means a write that GivTCP has
+    genuinely accepted is recognised straight away, on the very first readback, rather than only
+    once the (unrelated, much later) background poll happens to catch up.
+
+    Simulates the synchronous case: the very first queued runAll response already has
+    Control.Discharge_Target_SOC_1 set to the target (raw.invertor still stale, as GivTCP's own
+    background poll wouldn't have run yet) - the write must be recognised as successful on attempt
+    0, without needing any of the later retries the raw-only fallback would require.
+    """
+    failed = False
+    print("Test: {}".format(test_name))
+
+    saved_rest_data = inv.rest_data
+    saved_rest_api = inv.rest_api
+    saved_rest_v3 = inv.rest_v3
+
+    try:
+        inv.rest_api = "dummy"
+        inv.rest_v3 = True
+        inv.rest_data = {"Control": {"Mode": "Timed Export"}, "raw": {"invertor": {"discharge_target_soc_1": "0"}}}
+        dummy_rest.clear_queue()
+        dummy_rest.rest_data = copy.deepcopy(inv.rest_data)
+        # Control is updated synchronously by GivTCP's write handler - raw.invertor is still stale,
+        # as if the background self_run poll hasn't run since the write.
+        settled_control = copy.deepcopy(inv.rest_data)
+        settled_control["Control"]["Discharge_Target_SOC_1"] = "20"
+        dummy_rest.queue_rest_data(settled_control)
+        dummy_rest.get_commands()
+
+        if not inv.rest_setDischargeTarget(20):
+            print("ERROR: {}: write should be recognised as successful from Control.Discharge_Target_SOC_1 alone".format(test_name))
+            failed = True
+
+        commands = dummy_rest.get_commands()
+        if len(commands) != 1:
+            print("ERROR: {}: Control signalling success on the first readback should need only 1 POST, got {}".format(test_name, len(commands)))
+            failed = True
+    finally:
+        inv.rest_data = saved_rest_data
+        inv.rest_api = saved_rest_api
+        inv.rest_v3 = saved_rest_v3
+
+    return failed
+
+
+def test_force_export_unchanged_times_HM_format(test_name, ha, inv):
+    """
+    Regression test for GS_fb00 (Solis) 'count register writes 0' bug.
+
+    When force_export=True, the H M format time entities and the scheduled_discharge_enable
+    switch should be written on every PredBat cycle — even when the times are unchanged and
+    HA already shows the switch as 'on'.  Before the fix, adjust_force_export skipped all
+    writes when times were identical, resulting in 0 register writes and the inverter never
+    actually exporting.
+
+    The button (schedule_write_button) must also be pressed so the Solis hardware applies
+    the time-slot schedule.
+    """
+    failed = False
+    print("Test: {}".format(test_name))
+
+    # Simulate GS_fb00 / H M format configuration
+    inv.rest_data = None
+    inv.inv_charge_time_format = "H M"
+    inv.inv_time_button_press = True
+
+    export_time = "07:58:00"
+    export_end = "09:02:00"
+
+    # Pre-set all discharge entities to the *same* time that will be written,
+    # and the switch to "on" — this is the "stable state" where the bug triggered.
+    ha.dummy_items["select.discharge_start_time"] = export_time
+    ha.dummy_items["select.discharge_end_time"] = export_end
+    ha.dummy_items["time.discharge_start_hour"] = export_time
+    ha.dummy_items["time.discharge_end_hour"] = export_end
+    ha.dummy_items["switch.scheduled_discharge_enable"] = "on"
+    ha.dummy_items["number.discharge_target_soc"] = inv.reserve_percent
+    ha.dummy_items["select.inverter_mode"] = "Timed Export"
+    ha.dummy_items["switch.inverter_button"] = "off"
+
+    inv.base.args["discharge_start_time"] = "select.discharge_start_time"
+    inv.base.args["discharge_end_time"] = "select.discharge_end_time"
+    inv.base.args["discharge_start_hour"] = "time.discharge_start_hour"
+    inv.base.args["discharge_end_hour"] = "time.discharge_end_hour"
+    inv.base.args["scheduled_discharge_enable"] = "switch.scheduled_discharge_enable"
+
+    before_writes = inv.count_register_writes
+
+    ts = datetime.strptime(export_time, "%H:%M:%S")
+    te = datetime.strptime(export_end, "%H:%M:%S")
+    inv.adjust_force_export(True, ts, te)
+
+    # Time entities must be written even though times are unchanged (H M format always writes)
+    if ha.dummy_items.get("time.discharge_start_hour") != export_time:
+        print(f"ERROR: {test_name}: discharge_start_hour should still be {export_time} got {ha.dummy_items.get('time.discharge_start_hour')}")
+        failed = True
+    if ha.dummy_items.get("time.discharge_end_hour") != export_end:
+        print(f"ERROR: {test_name}: discharge_end_hour should still be {export_end} got {ha.dummy_items.get('time.discharge_end_hour')}")
+        failed = True
+
+    # Register write count must have increased by at least 2 (discharge_start_hour + discharge_end_hour)
+    if inv.count_register_writes < before_writes + 2:
+        print(f"ERROR: {test_name}: count_register_writes should have increased by at least 2, was {before_writes} now {inv.count_register_writes}")
+        failed = True
+
+    # The schedule_write_button must be pressed so the Solis hardware applies the schedule
+    if ha.dummy_items.get("switch.inverter_button") != "on":
+        print(f"ERROR: {test_name}: inverter_button (schedule_write_button) should be 'on' (pressed), got {ha.dummy_items.get('switch.inverter_button')}")
+        failed = True
 
     return failed
 
@@ -1952,6 +2270,54 @@ def test_input_datetime_charge_window(test_name, ha, inv, dummy_rest, direction,
             print("ERROR: discharge_end_time should be {} got {}".format(new_end, ha.dummy_items.get("input_datetime.discharge_end_time")))
             failed = True
 
+    return failed
+
+
+def test_battery_scaling_invalid_value_clamped(test_name, my_predbat):
+    """
+    Verify Inverter.__init__ guards against a zero or negative battery_scaling read from args
+    rather than letting it propagate into soc_max = nominal_capacity * battery_scaling.
+    A cloud API legitimately reporting 0% battery State of Health (e.g. Solis, issue #4494) must
+    not silently collapse soc_max to zero - and since 0 is ambiguous (could mean a flaky API
+    response or a genuinely unhealthy battery), Predbat must not guess a value either; it should
+    retain the last value that was actually read as valid, falling back to 1.0 only when nothing
+    valid has ever been read.
+    """
+    failed = False
+    print("**** Running Test: {} ****".format(test_name))
+
+    # A prior test in this run may have left givtcp_rest pointing at a dummy REST URL, which
+    # would otherwise make this plain construction attempt (and retry) a real REST read.
+    my_predbat.args["givtcp_rest"] = None
+    if "battery_scaling_last_known" in my_predbat.args:
+        del my_predbat.args["battery_scaling_last_known"]
+
+    # No prior valid reading exists yet - falls back to 1.0
+    for bad_scaling in (0.0, -0.5):
+        my_predbat.args["battery_scaling"] = [bad_scaling]
+        inv = Inverter(my_predbat, 0)
+        if inv.battery_scaling != 1.0:
+            print("ERROR: battery_scaling should fall back to 1.0 when source reads {} and no prior value exists, got {}".format(bad_scaling, inv.battery_scaling))
+            failed = True
+
+    # A valid reading passes through unchanged, and is remembered
+    my_predbat.args["battery_scaling"] = [0.72]
+    inv = Inverter(my_predbat, 0)
+    if inv.battery_scaling != 0.72:
+        print("ERROR: battery_scaling should pass a valid value through unchanged, got {}".format(inv.battery_scaling))
+        failed = True
+
+    # A subsequent invalid reading retains the last known-good value (0.72), not 1.0 - it must
+    # not be assumed the battery is now "fully healthy" just because the reading is unusable
+    for bad_scaling in (0.0, -0.5):
+        my_predbat.args["battery_scaling"] = [bad_scaling]
+        inv = Inverter(my_predbat, 0)
+        if inv.battery_scaling != 0.72:
+            print("ERROR: battery_scaling should retain last known-good value 0.72 when source reads {}, got {}".format(bad_scaling, inv.battery_scaling))
+            failed = True
+
+    del my_predbat.args["battery_scaling"]
+    del my_predbat.args["battery_scaling_last_known"]
     return failed
 
 
@@ -2299,6 +2665,8 @@ def run_inverter_tests(my_predbat_dummy):
     )
     if failed:
         return failed
+
+    failed |= test_battery_scaling_invalid_value_clamped("battery_scaling_invalid_value_clamped", my_predbat)
 
     failed |= test_rest_battery_capacity_fallback("rest_capacity_fallback", my_predbat)
     if failed:
@@ -2672,9 +3040,9 @@ charge_start_service:
     failed |= test_call_adjust_export_immediate("export_immediate1", my_predbat, ha, inv, dummy_items, 100, repeat=True)
     failed |= test_call_adjust_export_immediate("export_immediate3", my_predbat, ha, inv, dummy_items, 0, repeat=False, charge_stop=True)
     failed |= test_call_adjust_export_immediate("export_immediate4", my_predbat, ha, inv, dummy_items, 50)
-    failed |= test_call_adjust_export_immediate("export_immediate5", my_predbat, ha, inv, dummy_items, 49)
+    failed |= test_call_adjust_export_immediate("export_immediate5", my_predbat, ha, inv, dummy_items, 49, clear=True)
     failed |= test_call_adjust_export_immediate("export_immediate6", my_predbat, ha, inv, dummy_items, 49, repeat=True)
-    failed |= test_call_adjust_export_immediate("export_immediate6", my_predbat, ha, inv, dummy_items, 49, discharge_start_time="00:00:00", discharge_end_time="09:00:00")
+    failed |= test_call_adjust_export_immediate("export_immediate6", my_predbat, ha, inv, dummy_items, 49, discharge_start_time="00:00:00", discharge_end_time="09:00:00", clear=True)
     failed |= test_call_adjust_export_immediate("export_immediate7", my_predbat, ha, inv, dummy_items, 50, freeze=True)
     failed |= test_call_adjust_export_immediate("export_immediate8", my_predbat, ha, inv, dummy_items, 50, freeze=False, no_freeze=True)
     failed |= test_call_adjust_export_immediate("export_immediate9", my_predbat, ha, inv, dummy_items, 30.0)
@@ -2855,6 +3223,23 @@ charge_start_service:
 
     # Regression test: an export target register that never reads back must be reported once, not every cycle
     failed |= test_discharge_target_unreadable_register("discharge_target_unreadable_register", ha, inv, dummy_rest)
+    if failed:
+        return failed
+
+    # Regression test for issue #4404: export target read back must cope with string and missing values
+    failed |= test_discharge_target_read_back("discharge_target_read_back", ha, inv, dummy_rest)
+    if failed:
+        return failed
+
+    # Regression test for issue #4421: settle before each readback so a slow-to-update GivTCP cache
+    # isn't misread as a failed write
+    failed |= test_discharge_target_settle_delay("discharge_target_settle_delay", ha, inv, dummy_rest)
+    if failed:
+        return failed
+
+    # Regression test for issue #4421 (follow-up): trust Control.Discharge_Target_SOC_1, GivTCP's
+    # synchronous write-time signal, ahead of the much slower raw.invertor background-poll fallback
+    failed |= test_discharge_target_control_signal("discharge_target_control_signal", ha, inv, dummy_rest)
     if failed:
         return failed
 

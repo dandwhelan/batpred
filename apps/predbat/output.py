@@ -29,19 +29,19 @@ from prediction import Prediction
 # own "reasons" params - published once here rather than duplicating the rendered sentence on
 # every row (per maintainer review on PR #4311).
 REASON_TEMPLATES = {
-    "demand_rising": "Battery level is expected to rise from solar generation; no charging or exporting is scheduled this slot.",
-    "demand_falling": "Battery is expected to discharge to cover house demand; no charging or exporting is scheduled this slot.",
-    "demand_steady": "Battery level is expected to stay steady; no charging or exporting is scheduled this slot.",
+    "demand_rising": "Demand — battery level is expected to rise from solar generation; no charging or exporting is scheduled this slot.",
+    "demand_falling": "Demand — the battery is expected to discharge to cover house load; no charging or exporting is scheduled this slot.",
+    "demand_steady": "Demand — battery level is expected to stay steady; no charging or exporting is scheduled this slot.",
     # Used for the first half of a split slot where the export window only starts partway through -
     # deliberately worded without the "nothing is scheduled this slot" clause of the plain demand
     # reasons above, which would contradict the export reason sitting alongside it in the same slot.
-    "demand_before_export_rising": "Until the export window starts partway through this slot, the battery level is expected to rise from solar generation.",
-    "demand_before_export_falling": "Until the export window starts partway through this slot, the battery is expected to discharge to cover house demand.",
-    "demand_before_export_steady": "Until the export window starts partway through this slot, the battery level is expected to stay steady.",
-    "freeze_charge": "Freeze charging — the battery holds at the current level rather than charging further this slot (import rate {rate}p/kWh vs. your {threshold}p/kWh threshold).",
+    "demand_before_export_rising": "Until {split_time}, the battery level is expected to rise from solar generation.",
+    "demand_before_export_falling": "Until {split_time}, the battery is expected to discharge to cover house demand.",
+    "demand_before_export_steady": "Until {split_time}, the battery level is expected to stay steady.",
+    "freeze_charge": "Freeze charging — the battery holds at the current level rather than charging further this slot (import rate {rate}p/kWh vs. the calculated {threshold}p/kWh threshold).",
     "hold_charge_at_target": "Holding — the battery is already predicted to be at or above the {target_percent}% target for this window without charging further.",
     "charge_low_rate": "Charging up to {target_percent}% at the import rate for this slot of ({rate}p/kWh).",
-    "freeze_export_below_threshold": "Freezing export — excess solar is exported to the grid (export rate {rate}p/kWh vs. your {threshold}p/kWh threshold).",
+    "freeze_export": "Freezing export — solar surplus passes straight to the grid, but it's not worth discharging the battery to sell more this slot.",
     "hold_export_unreachable": "Export window active but not triggered — the battery isn't predicted to reach the {target_percent}% level needed to export this slot.",
     "export_high_rate": "Exporting down to {target_percent}% at the export rate of ({rate}p/kWh) using stored energy back to the grid.",
     "manual_override_charge": "You manually set this slot to charge.",
@@ -525,6 +525,21 @@ class Output:
                 state=self.rate_average,
                 attributes={"friendly_name": "Next+1 low rate cost", "state_class": "measurement", "unit_of_measurement": self.currency_symbols[1], "icon": "mdi:currency-usd"},
             )
+
+    def rate_range_text(self, rate_dict, start_minute, end_minute, fallback_value):
+        """
+        Format a rate as a single value, or a "{min}-{max}" range when the minutes from
+        start_minute to end_minute (a merged/rowspan plan cell) don't all share the same rate.
+        """
+        values = set()
+        for minute in range(start_minute, end_minute, self.plan_interval_minutes):
+            values.add(dp2(rate_dict.get(minute, fallback_value)))
+        if not values:
+            return "{:.2f}".format(fallback_value)
+        low, high = min(values), max(values)
+        if low == high:
+            return "{:.2f}".format(low)
+        return "{:.2f}-{:.2f}".format(low, high)
 
     def adjust_symbol(self, adjust_type):
         """
@@ -1045,6 +1060,11 @@ class Output:
             rate_start = minute_timestamp
             rate_value_import = dp2(self.rate_import.get(minute, 0))
             rate_value_export = dp2(self.rate_export.get(minute, 0))
+            # Default to a single value; overridden to a "{min}-{max}" range below when this row
+            # turns out to be the first of a merged/rowspan cell whose minutes span more than one
+            # distinct rate - only the first row of a span is ever actually rendered as a tooltip.
+            rate_text_import = "{:.2f}".format(rate_value_import)
+            rate_text_export = "{:.2f}".format(rate_value_export)
             charge_window_n = -1
             export_window_n = -1
             periods_left = int((end_plan - minute + self.plan_interval_minutes - 1) / self.plan_interval_minutes)
@@ -1088,6 +1108,7 @@ class Output:
                     in_span = True
                     start_span = True
                     minute_relative_end = self.charge_window_best[charge_window_n]["end"] - minute_now_align
+                    rate_text_import = self.rate_range_text(self.rate_import, minute, charge_end_minute, rate_value_import)
                 else:
                     rowspan = 0
 
@@ -1099,6 +1120,7 @@ class Output:
                     in_span = True
                     start_span = True
                     minute_relative_end = self.export_window_best[export_window_n]["end"] - minute_now_align
+                    rate_text_export = self.rate_range_text(self.rate_export, minute, export_end_minute, rate_value_export)
                 else:
                     rowspan = 0
 
@@ -1278,7 +1300,7 @@ class Output:
                         state_color = "#EEEEEE"
                         raw_state = "FrzChrg"
                         limit_percent = soc_percent
-                        reason_parts.append({"code": "freeze_charge", "params": {"rate": "{:.2f}".format(rate_value_import), "threshold": "{:.2f}".format(import_cost_threshold)}})
+                        reason_parts.append({"code": "freeze_charge", "params": {"rate": rate_text_import, "threshold": "{:.2f}".format(import_cost_threshold)}})
                     elif limit_percent <= soc_percent_min_window:
                         state = "HoldChrg&rarr;"
                         state_color = "#34DBEB"
@@ -1288,7 +1310,7 @@ class Output:
                         state = "Chrg&nearr;"
                         state_color = "#3AEE85"
                         raw_state = "Chrg"
-                        reason_parts.append({"code": "charge_low_rate", "params": {"target_percent": limit_percent, "rate": "{:.2f}".format(rate_value_import)}})
+                        reason_parts.append({"code": "charge_low_rate", "params": {"target_percent": limit_percent, "rate": rate_text_import}})
 
                     if self.charge_window_best[charge_window_n]["start"] in self.manual_charge_times:
                         state += " &#8526;"
@@ -1308,18 +1330,19 @@ class Output:
                     start = self.export_window_best[export_window_n]["start"]
                     if start > minute:
                         soc_change_this = self.predict_soc_best.get(max(start - self.minutes_now, 0), 0.0) - self.predict_soc_best.get(minute_relative_start, 0.0)
+                        split_time_str = (self.midnight_utc + timedelta(minutes=start)).strftime("%H:%M")
                         # Same near-flat tolerance as the whole-slot demand arrow above - testing
                         # soc_change_this >= 0 first would make the steady case unreachable and
                         # render a flat pre-window period as rising
                         if abs(soc_change_this) < 0.05:
                             state = " &rarr;"
-                            reason_parts.append({"code": "demand_before_export_steady", "params": {}})
+                            reason_parts.append({"code": "demand_before_export_steady", "params": {"split_time": split_time_str}})
                         elif soc_change_this >= 0:
                             state = " &nearr;"
-                            reason_parts.append({"code": "demand_before_export_rising", "params": {}})
+                            reason_parts.append({"code": "demand_before_export_rising", "params": {"split_time": split_time_str}})
                         else:
                             state = " &searr;"
-                            reason_parts.append({"code": "demand_before_export_falling", "params": {}})
+                            reason_parts.append({"code": "demand_before_export_falling", "params": {"split_time": split_time_str}})
                         state_color = "#FFFFFF"
                         show_limit = ""
                         had_state = True
@@ -1341,7 +1364,7 @@ class Output:
                     state += "FrzExp&rarr;"
                     raw_state = "FrzExp"
                     show_limit = ""  # suppress displaying the limit (of 99) when freeze exporting as its a meaningless number
-                    reason_parts.append({"code": "freeze_export_below_threshold", "params": {"rate": "{:.2f}".format(rate_value_export), "threshold": "{:.2f}".format(export_cost_threshold)}})
+                    reason_parts.append({"code": "freeze_export", "params": {}})
                 elif limit < 100:
                     if not had_state:
                         state = ""
@@ -1357,7 +1380,7 @@ class Output:
                     else:
                         state += "Exp&searr;"
                         raw_state = "Exp"
-                        reason_parts.append({"code": "export_high_rate", "params": {"target_percent": dp2(target), "rate": "{:.2f}".format(rate_value_export)}})
+                        reason_parts.append({"code": "export_high_rate", "params": {"target_percent": dp2(target), "rate": rate_text_export}})
                     show_limit = str(dp2(target))
                     raw_state_target = str(dp2(target))
 
@@ -1812,9 +1835,10 @@ class Output:
         battery_level_midnight = self.soc_kwh_history.get(self.minutes_now, 0)
         battery_change_hour = battery_level_now - battery_level_hour
         battery_change_midnight = battery_level_now - battery_level_midnight
-        rate_min = self.rate_min_forward.get(self.minutes_now, self.rate_min) / self.inverter_loss / self.battery_loss + self.metric_battery_cycle
-        rate_export_min = self.rate_export_min * self.inverter_loss * self.battery_loss_discharge - self.metric_battery_cycle - rate_min
-        rate_forward = max(rate_min, 1.0, rate_export_min)
+        # Shared with the planner's own metric so the reported battery value matches the plan it
+        # reports on. This previously omitted the rate_max ceiling that battery_value_rate applies,
+        # which over-valued the battery here relative to the plan on flat or near-flat tariffs.
+        rate_forward = self.battery_value_rate(self.minutes_now)
         value_increase_hour = battery_change_hour * rate_forward * self.metric_battery_value_scaling
         value_increase_day = battery_change_midnight * rate_forward * self.metric_battery_value_scaling
 
@@ -2567,14 +2591,48 @@ class Output:
             load_value_pred += forecast_value_pred
             load_value_pred_raw += forecast_value_pred
 
-            # Ignore periods of import as assumed to be deliberate (battery charging periods overnight for example)
+            # For FUTURE minutes only, apply load_scaling, load_scaling_dynamic, and
+            # manual_load_adjust so the published predicted/adjusted curves (and their
+            # today_remaining attribute) match step_data_history() (fetch.py), which the plan
+            # itself uses to build load_minutes_step as
+            # (value + load_extra) * scaling_dynamic * scale_fixed, where load_extra includes
+            # manual_load_adjust, scaling_dynamic is load_scaling_dynamic, and scale_fixed
+            # includes the flat load_scaling. load_scaling_dynamic carries saving-session/
+            # free-electricity-event scaling as well as any per-window override from
+            # rates_import_override/the manual API (e.g. a "power up" event) - a first pass at
+            # this fix (#4506) only applied the flat load_scaling and missed both of these,
+            # confirmed against a real follow-up report on issue #4496 where a 1.5x
+            # load_scaling_dynamic override for a 2-hour power-up event wasn't reflected in
+            # today_remaining at all.
+            #
+            # Minutes already elapsed today are deliberately left untouched: load_total_pred_now
+            # below feeds the actual-vs-predicted divergence ratio, which compares actual
+            # consumption against the raw model, not an adjusted one.
+            if minute >= minutes_now:
+                manual_adjust = 0.0
+                if self.manual_load_adjust:
+                    manual_adjust = self.manual_load_adjust.get(minute, 0) * step / float(self.plan_interval_minutes)
+                    manual_adjust = max(manual_adjust, -load_value_pred)
+                load_value_pred += manual_adjust
+                load_value_pred_raw += manual_adjust
+
+                scaling_dynamic = self.load_scaling_dynamic.get(minute, 1.0) if self.load_scaling_dynamic else 1.0
+                load_value_pred *= self.load_scaling * scaling_dynamic
+                load_value_pred_raw *= self.load_scaling * scaling_dynamic
+
+            # Track (but no longer exclude) periods where import exceeds raw load, assumed to
+            # include deliberate battery charging (overnight for example). The house's own load
+            # during that minute was still genuinely consumed regardless of how much extra was
+            # imported to charge the battery, so it stays in the actual/predicted totals - only
+            # the import beyond that load was going to the battery, not the load itself.
+            # Previously this zeroed the whole bucket's load out of both totals, which silently
+            # dropped real consumption on any install that routinely grid-charges overnight
+            # (batpred#4154, #2537).
             car_value_actual = load_value_today_raw - load_value_today
             car_value_pred = load_value_pred_raw - load_value_pred
             if minute < minutes_now and import_value_today >= load_value_today_raw:
-                import_ignored_load_actual += load_value_today
-                load_value_today = 0
-                import_ignored_load_pred += load_value_pred
-                load_value_pred = 0
+                import_ignored_load_actual += import_value_today - load_value_today_raw
+                import_ignored_load_pred += import_value_today - load_value_today_raw
 
             # Only count totals until now
             if minute < minutes_now:
@@ -2873,11 +2931,21 @@ class Output:
 
         self.log("Calculating data from yesterday for savings calculation")
 
-        yesterday_load_step = self.step_data_history(self.load_minutes, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
-        yesterday_pv_step = self.step_data_history(self.pv_today, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
-        yesterday_pv_step_zero = self.step_data_history(None, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
-        minutes_back = self.minutes_now + 1
+        # step_data_history() only fills in offsets up to self.forecast_minutes + plan_interval_minutes.
+        # The History view built below needs a full "yesterday" (24h) plus "today so far" up to now, i.e.
+        # offsets up to 24*60 + self.minutes_now - widen forecast_minutes before building these step arrays,
+        # not just later when the "yesterday" plan_html is rendered, or any offset beyond the live plan's
+        # normal horizon silently reads back as zero load/PV for the rest of the day.
         end_record = 24 * 60
+        forecast_minutes_before_yesterday_step = self.forecast_minutes
+        self.forecast_minutes = max(self.forecast_minutes, end_record + self.minutes_now)
+        try:
+            yesterday_load_step = self.step_data_history(self.load_minutes, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
+            yesterday_pv_step = self.step_data_history(self.pv_today, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
+            yesterday_pv_step_zero = self.step_data_history(None, 0, forward=False, scale_today=1.0, scale_fixed=1.0, base_offset=24 * 60 + self.minutes_now)
+        finally:
+            self.forecast_minutes = forecast_minutes_before_yesterday_step
+        minutes_back = self.minutes_now + 1
 
         # Get yesterday's SoC
         try:

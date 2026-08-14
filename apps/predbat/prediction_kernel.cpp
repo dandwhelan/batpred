@@ -26,8 +26,11 @@
 #include <mutex>
 #include <vector>
 
-#define PK_ABI_VERSION 102
-#define PK_PARITY_REVISION 103
+// Bumped past this fork's previous 102/103 on the merge of upstream v8.48.1 - see the matching
+// note on KERNEL_ABI_VERSION in prediction_kernel.py. Both sides changed the context struct and
+// the hot loop, so no binary built before this merge may be trusted.
+#define PK_ABI_VERSION 103
+#define PK_PARITY_REVISION 104
 #define PK_MAX_CARS 4
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 
@@ -67,6 +70,8 @@ struct PkContext {
     const double *load;               // load kWh per step (central)
     const double *pv10;               // PV forecast kWh per step (PV10)
     const double *load10;             // load kWh per step (PV10)
+    const double *pv90;               // PV forecast kWh per step (PV90)
+    const double *load90;             // load kWh per step (PV90)
     const double *temp_charge_cap;    // temperature rate cap base (soc_max*adjust/60) per step, charge curve
     const double *temp_discharge_cap; // temperature rate cap base per step, discharge curve
     const int32_t *io_flag;           // io_adjusted flag per step
@@ -160,7 +165,7 @@ struct PkScenario {
 
     int32_t n_charge;
     int32_t n_export;
-    int32_t pv10;
+    int32_t pv_scenario;          // 0 = nominal, 1 = pv10, 2 = pv90
     int32_t end_record;
     int32_t step;
 };
@@ -189,7 +194,7 @@ struct PkResult {
 // Deep-copied context storage so Python-side buffers can be freed after create
 struct ContextStore {
     std::vector<double> rate_import, rate_export, alert_keep;
-    std::vector<double> pv, load, pv10, load10;
+    std::vector<double> pv, load, pv10, load10, pv90, load90;
     std::vector<double> temp_charge_cap, temp_discharge_cap;
     std::vector<int32_t> io_flag;
     std::vector<double> charge_curve, discharge_curve;
@@ -238,6 +243,92 @@ inline double rate_curve(double soc_key, double rate_setting, double rate_max, d
 // Build per-step window membership, mirroring Prediction.find_charge_window_optimised():
 // dict keyed by absolute minute stepping 5 from each window start, last window wins,
 // looked up at minute_absolute = minutes_now + k*5 (so misaligned windows never match).
+// Mirrors remove_intersecting_windows() in utils.py, which the Python engine applies before
+// simulating. Charge windows that collide with an enabled export window are trimmed, and a window
+// with an export landing inside it is split in two. Two rules are easy to get wrong and are pinned
+// by tests: a window that was never clipped survives whatever its length, while a remnant clipping
+// itself created is dropped below 5 minutes; and windows that merely touch at a boundary overlap
+// arithmetically but remove nothing, so they must not count as clipped.
+//
+// PARITY: any change here must be mirrored in utils.remove_intersecting_windows and vice versa.
+static void clip_intersecting_charge_windows(std::vector<int32_t> &out_start, std::vector<int32_t> &out_end, std::vector<double> &out_limit, int32_t n_charge, const int32_t *charge_start, const int32_t *charge_end, const double *charge_limit, int32_t n_export, const int32_t *export_start,
+                                             const int32_t *export_end, const double *export_limits)
+{
+    // Enabled export windows only - the sole candidates for clipping anything - in start order
+    std::vector<std::pair<int32_t, int32_t>> export_active;
+    export_active.reserve(n_export);
+    for (int32_t n = 0; n < n_export; n++) {
+        if (export_limits[n] < 100.0) {
+            export_active.emplace_back(export_start[n], export_end[n]);
+        }
+    }
+    std::sort(export_active.begin(), export_active.end());
+
+    out_start.clear();
+    out_end.clear();
+    out_limit.clear();
+    out_start.reserve(n_charge);
+    out_end.reserve(n_charge);
+    out_limit.reserve(n_charge);
+
+    if (export_active.empty()) {
+        for (int32_t n = 0; n < n_charge; n++) {
+            out_start.push_back(charge_start[n]);
+            out_end.push_back(charge_end[n]);
+            out_limit.push_back(charge_limit[n]);
+        }
+        return;
+    }
+
+    for (int32_t n = 0; n < n_charge; n++) {
+        int32_t start = charge_start[n];
+        int32_t end = charge_end[n];
+        const double limit = charge_limit[n];
+
+        if (!(limit > 0.0)) {
+            // A disabled charge window can never be clipped
+            out_start.push_back(start);
+            out_end.push_back(end);
+            out_limit.push_back(limit);
+            continue;
+        }
+
+        bool clipped = false;
+        for (const auto &dw : export_active) {
+            const int32_t dstart = dw.first;
+            const int32_t dend = dw.second;
+            if ((dstart < end) && (dend >= start)) {
+                if (dstart <= start) {
+                    if (start != dend) {
+                        start = dend;
+                        clipped = true;
+                    }
+                } else if (dend >= end) {
+                    if (end != dstart) {
+                        end = dstart;
+                        clipped = true;
+                    }
+                } else {
+                    // Two segments - emit the head now, carry on clipping the tail
+                    if ((dstart - start) >= 5) {
+                        out_start.push_back(start);
+                        out_end.push_back(dstart);
+                        out_limit.push_back(limit);
+                    }
+                    start = dend;
+                    clipped = true;
+                }
+            }
+        }
+
+        if (!clipped || ((end - start) >= 5)) {
+            out_start.push_back(start);
+            out_end.push_back(end);
+            out_limit.push_back(limit);
+        }
+    }
+}
+
 void build_window_membership(std::vector<int32_t> &member, int32_t n_windows, const int32_t *starts, const int32_t *ends, const double *limits, bool is_export, int32_t minutes_now, int32_t n_steps)
 {
     member.assign(n_steps, -1);
@@ -288,6 +379,8 @@ int64_t pk_context_create(const PkContext *in)
     store->load.assign(in->load, in->load + n);
     store->pv10.assign(in->pv10, in->pv10 + n);
     store->load10.assign(in->load10, in->load10 + n);
+    store->pv90.assign(in->pv90, in->pv90 + n);
+    store->load90.assign(in->load90, in->load90 + n);
     store->temp_charge_cap.assign(in->temp_charge_cap, in->temp_charge_cap + n);
     store->temp_discharge_cap.assign(in->temp_discharge_cap, in->temp_discharge_cap + n);
     store->io_flag.assign(in->io_flag, in->io_flag + n);
@@ -309,6 +402,8 @@ int64_t pk_context_create(const PkContext *in)
     store->ctx.load = store->load.data();
     store->ctx.pv10 = store->pv10.data();
     store->ctx.load10 = store->load10.data();
+    store->ctx.pv90 = store->pv90.data();
+    store->ctx.load90 = store->load90.data();
     store->ctx.temp_charge_cap = store->temp_charge_cap.data();
     store->ctx.temp_discharge_cap = store->temp_discharge_cap.data();
     store->ctx.io_flag = store->io_flag.data();
@@ -352,14 +447,24 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
         return 2;
     }
 
-    const bool pv10 = s->pv10 != 0;
+    const int32_t pv_scenario = s->pv_scenario;
+    const bool is_pv10 = pv_scenario == 1;
+    const bool is_pv90 = pv_scenario == 2;
     const int32_t step = s->step;
     const int32_t n_steps = c->n_steps;
     const bool inverter_hybrid = c->inverter_hybrid != 0;
 
     // Window membership - prediction.py:494-495 / find_charge_window_optimised
     std::vector<int32_t> charge_window_optimised, export_window_optimised;
-    build_window_membership(charge_window_optimised, s->n_charge, s->charge_start, s->charge_end, s->charge_limit, false, c->minutes_now, n_steps);
+
+    // The caller hands over the raw charge windows; clipping them against the export windows used to
+    // be done in Python on every simulation, which cost more than the simulation itself
+    std::vector<int32_t> clipped_start, clipped_end;
+    std::vector<double> clipped_limit;
+    clip_intersecting_charge_windows(clipped_start, clipped_end, clipped_limit, s->n_charge, s->charge_start, s->charge_end, s->charge_limit, s->n_export, s->export_start, s->export_end, s->export_limits);
+    const int32_t n_charge_clipped = static_cast<int32_t>(clipped_start.size());
+
+    build_window_membership(charge_window_optimised, n_charge_clipped, clipped_start.data(), clipped_end.data(), clipped_limit.data(), false, c->minutes_now, n_steps);
     build_window_membership(export_window_optimised, s->n_export, s->export_start, s->export_end, s->export_limits, true, c->minutes_now, n_steps);
 
     // Initial state - prediction.py:435-490
@@ -383,6 +488,9 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
     double final_metric_keep = metric_keep;
     double final_iboost_kwh = iboost_today_kwh;
     double final_carbon_g = carbon_g;
+    double final_import_kwh_battery = import_kwh_battery;
+    double final_import_kwh_house = import_kwh_house;
+    double final_export_kwh = export_kwh;
     double charge_rate_now = c->charge_rate_now;
     double discharge_rate_now = c->discharge_rate_now;
     const bool car_enable = c->num_cars > 0;
@@ -416,11 +524,11 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
     const double battery_rate_max_discharge = c->battery_rate_max_discharge;
     const double battery_rate_max_export = c->battery_rate_max_export;
     const double battery_rate_min = c->battery_rate_min;
-    // PV10 de-rating of the charge rate - prediction.py:547-551
-    const double battery_rate_max_scaling = pv10 ? c->battery_rate_max_scaling10 : c->battery_rate_max_scaling;
+    // PV10 de-rating of the charge rate - prediction.py:587-592. PV90 is the upside case, no de-rate.
+    const double battery_rate_max_scaling = is_pv10 ? c->battery_rate_max_scaling10 : c->battery_rate_max_scaling;
     const double battery_rate_max_scaling_discharge = c->battery_rate_max_scaling_discharge;
-    const double *pv_step = pv10 ? c->pv10 : c->pv;
-    const double *load_step = pv10 ? c->load10 : c->load;
+    const double *pv_step = is_pv10 ? c->pv10 : (is_pv90 ? c->pv90 : c->pv);
+    const double *load_step = is_pv10 ? c->load10 : (is_pv90 ? c->load90 : c->load);
 
     // Simulate each forward step - prediction.py:570-1200
     for (int32_t k = 0; k < n_steps; k++) {
@@ -430,7 +538,7 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
 
         // Rates - prediction.py:577-580
         double import_rate = c->rate_import[k];
-        if (c->io_flag[k] && pv10 && minute > 30) {
+        if (c->io_flag[k] && is_pv10 && minute > 30) {
             import_rate = c->rate_max; // Assume in worst case that slot goes away and max rate applies
         }
         double export_rate = c->rate_export[k];
@@ -463,7 +571,7 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
         // Find charge limit - prediction.py:609-620
         double charge_limit_n = 0;
         if (charge_window_active) {
-            charge_limit_n = s->charge_limit[charge_window_n];
+            charge_limit_n = clipped_limit[charge_window_n];
             if (c->set_charge_freeze && (calc_percent_limit(charge_limit_n, soc_max) == reserve_percent)) {
                 // Charge freeze via reserve
                 charge_limit_n = std::max(soc, reserve);
@@ -972,6 +1080,9 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
             final_metric_keep = metric_keep;
             final_iboost_kwh += iboost_amount;
             final_carbon_g = carbon_g;
+            final_import_kwh_battery = import_kwh_battery;
+            final_import_kwh_house = import_kwh_house;
+            final_export_kwh = export_kwh;
 
             // Record soc min - prediction.py:1183-1186
             if (soc < soc_min) {
@@ -982,9 +1093,9 @@ int32_t pk_run(int64_t handle, const PkScenario *s, PkResult *out)
     }
 
     out->final_metric = final_metric;
-    out->import_kwh_battery = import_kwh_battery;
-    out->import_kwh_house = import_kwh_house;
-    out->export_kwh = export_kwh;
+    out->import_kwh_battery = final_import_kwh_battery;
+    out->import_kwh_house = final_import_kwh_house;
+    out->export_kwh = final_export_kwh;
     out->soc_min = soc_min;
     out->final_soc = final_soc;
     out->battery_cycle = final_battery_cycle;
