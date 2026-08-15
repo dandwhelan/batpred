@@ -43,6 +43,20 @@ jobs:
         cd coverage
         python3 ../apps/predbat/verify_kernel_binary.py ../apps/predbat/prediction_kernel_lib_x86_64.so
 
+    # The i686 and armv7l binaries take a different arithmetic path in round_py:
+    # __int128 is a 64-bit-target extension, so those builds scale through uint64_t
+    # instead. Nothing above executes that path - this runner is x86_64 and the
+    # 32-bit binaries are never run - so build the same source with -DPK_NO_INT128,
+    # which forces the narrow path on a 64-bit host, and put it through the full
+    # parity suite.
+    - name: Verify the 32-bit (narrow integer) rounding path
+      env:
+        EXTRA_CXXFLAGS: "-DPK_NO_INT128"
+      run: |
+        bash apps/predbat/build_kernel.sh "${RUNNER_TEMP}/prediction_kernel_narrow.so"
+        cd coverage
+        python3 ../apps/predbat/verify_kernel_binary.py "${RUNNER_TEMP}/prediction_kernel_narrow.so"
+
   # Cross-build the prediction kernel binaries for every platform and commit them
   # back to the PR branch when they change (same auto-fix pattern as pre-commit)
   kernel-binaries:
@@ -54,11 +68,28 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ github.head_ref }}
+    - uses: actions/setup-python@v4
+      with:
+        python-version: 3.x
     - uses: mlugg/setup-zig@v2
       with:
         version: 0.16.0
     - name: Cross-build prediction kernel binaries
       run: bash apps/predbat/build_kernel_cross.sh
+
+    # Verify before committing, not after. The pre-commit job checked the binary as
+    # it was when the PR was opened, i.e. the previous one; the binaries this job
+    # regenerates are what actually ships, and the run triggered by pushing them
+    # needs manual approval, so without this step they can merge unverified.
+    # x86_64 is the only one this runner can execute natively - the others rely on
+    # the source-level parity coverage in the pre-commit job.
+    - name: Verify the freshly built x86_64 binary before committing
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        cd coverage
+        python3 ../apps/predbat/verify_kernel_binary.py ../apps/predbat/prediction_kernel_lib_x86_64.so
+
     - name: Commit updated kernel binaries
       run: |
         git add apps/predbat/prediction_kernel_lib_*.so

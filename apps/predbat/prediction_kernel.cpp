@@ -468,6 +468,17 @@ int32_t pk_parity_revision(void)
     return PK_PARITY_REVISION;
 }
 
+// Test-only hook exposing round_py so tests/test_round_py_parity.py can drive it
+// directly and diff it against CPython's round(), which is the real parity target.
+// Nothing in the prediction path calls this; it exists because round_py sits in an
+// anonymous namespace and would otherwise only be reachable through a full
+// simulation, which never feeds it the extreme magnitudes that broke the old
+// snprintf implementation.
+double pk_round_py_test(double value, int32_t ndigits)
+{
+    return round_py(value, static_cast<int>(ndigits));
+}
+
 // Create a per-plan context; deep-copies all arrays. Returns a handle (>0) or 0 on error.
 int64_t pk_context_create(const PkContext *in)
 {
