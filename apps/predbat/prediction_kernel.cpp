@@ -39,14 +39,118 @@ namespace {
 // Mirror of CPython round(x, n): correctly-rounded decimal rounding (ties to even).
 // snprintf performs a correctly-rounded binary->decimal conversion and strtod a
 // correctly-rounded decimal->binary conversion, matching CPython's _Py_dg_dtoa path.
-double round_py(double value, int ndigits)
+// The buffer must fit DBL_MAX ("%.*f" of 1e308 is ~310 digits before the point plus
+// ndigits after it) - a short buffer silently truncates and strtod then parses a
+// completely different number.
+double round_py_slow(double value, int ndigits)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%.*f", ndigits, value);
+    return strtod(buf, nullptr);
+}
+
+// Exact integer fast path for round_py, ~20x faster than the snprintf/strtod route
+// and bit-identical to it (verified against CPython round() directly, and by the
+// kernel parity suite).
+//
+// Writing the input as value = +/- M * 2^E with M a 53-bit integer:
+//   E >= 0  -> value is integer-valued, so rounding to ndigits >= 0 is a no-op.
+//   E <  0  -> the exact product value * 10^ndigits is the rational M*10^n / 2^P
+//              (P = -E), so the correctly-rounded (half-to-even) decimal integer q
+//              can be computed in exact integer arithmetic, no floating point involved.
+// q / 10^n is then a ratio of two exactly-representable doubles, and IEEE division
+// is correctly rounded, which reproduces the decimal->binary half of the old path.
+// Inputs outside the range where those guarantees hold defer to round_py_slow.
+//
+// The scaling is done in the narrowest integer type that cannot overflow: M*10^n fits
+// in uint64_t up to ndigits 3 (2^53 * 10^3 < 2^63), which covers the kernel's two hot
+// calls (ndigits 1 and 3) and is ~2x cheaper than __int128 even on 64-bit hosts. Wider
+// ndigits (the once-per-run 6) needs __int128, which is a 64-bit-target extension - the
+// addon also ships i686 and armv7l binaries (see build_kernel_cross.sh), and on those
+// the wide cases simply fall through to round_py_slow.
+const double PK_POW10[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15};
+const uint64_t PK_IPOW10[] = {1ULL, 10ULL, 100ULL, 1000ULL, 10000ULL, 100000ULL, 1000000ULL, 10000000ULL, 100000000ULL, 1000000000ULL, 10000000000ULL, 100000000000ULL, 1000000000000ULL, 10000000000000ULL, 100000000000000ULL, 1000000000000000ULL};
+
+// -DPK_NO_INT128 forces the narrow-only path on a 64-bit host so it can be tested
+// without a cross toolchain
+#if defined(__SIZEOF_INT128__) && !defined(PK_NO_INT128)
+#define PK_ROUND_MAX_DIGITS 15
+typedef unsigned __int128 pk_round_wide;
+#else
+#define PK_ROUND_MAX_DIGITS 3
+typedef uint64_t pk_round_wide;
+#endif
+#define PK_ROUND_NARROW_DIGITS 3
+
+// Computes round_half_even(mantissa * 10^ndigits / 2^shift) exactly in UInt.
+// Returns false when the result would not be exactly representable as a double,
+// in which case the caller must fall back to the slow path.
+template <typename UInt>
+inline bool round_scaled(uint64_t mantissa, int ndigits, int shift, uint64_t &out)
+{
+    const int width = static_cast<int>(sizeof(UInt)) * 8;
+    const UInt num = static_cast<UInt>(mantissa) * static_cast<UInt>(PK_IPOW10[ndigits]);
+    UInt rounded;
+    if (shift >= width) {
+        // num < 2^(width-1) <= 2^(shift-1), i.e. strictly below the halfway point
+        rounded = 0;
+    } else {
+        const UInt quot = num >> shift;
+        const UInt rem = num - (quot << shift);
+        const UInt half = static_cast<UInt>(1) << (shift - 1);
+        rounded = quot;
+        if (rem > half) {
+            rounded = quot + 1;
+        } else if (rem == half && (quot & 1)) {
+            rounded = quot + 1; // ties to even
+        }
+    }
+    if (rounded >> 53) {
+        return false;
+    }
+    out = static_cast<uint64_t>(rounded);
+    return true;
+}
+
+inline double round_py(double value, int ndigits)
 {
     if (!std::isfinite(value)) {
         return value;
     }
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.*f", ndigits, value);
-    return strtod(buf, nullptr);
+    if (ndigits >= 0 && ndigits <= PK_ROUND_MAX_DIGITS) {
+        uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const int biased = static_cast<int>((bits >> 52) & 0x7FF);
+        const uint64_t frac = bits & 0xFFFFFFFFFFFFFULL;
+
+        uint64_t mantissa;
+        int exponent;
+        if (biased == 0) {
+            if (frac == 0) {
+                return value; // +/- 0.0
+            }
+            mantissa = frac;
+            exponent = -1074;
+        } else {
+            mantissa = frac | (1ULL << 52);
+            exponent = biased - 1075;
+        }
+
+        if (exponent >= 0) {
+            return value; // integer-valued
+        }
+
+        const int shift = -exponent; // always >= 1 here
+        if (shift <= 100) {
+            uint64_t rounded;
+            const bool ok = (ndigits <= PK_ROUND_NARROW_DIGITS) ? round_scaled<uint64_t>(mantissa, ndigits, shift, rounded) : round_scaled<pk_round_wide>(mantissa, ndigits, shift, rounded);
+            if (ok) {
+                const double out = static_cast<double>(rounded) / PK_POW10[ndigits];
+                return (bits >> 63) ? -out : out;
+            }
+        }
+    }
+    return round_py_slow(value, ndigits);
 }
 
 // Mirror of utils.py calc_percent_limit() for a scalar value
