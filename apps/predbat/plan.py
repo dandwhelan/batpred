@@ -1586,8 +1586,18 @@ class Plan:
                 self.publish_charge_limit(self.charge_limit_best, self.charge_window_best, best=True, soc=self.predict_soc_best)
                 self.publish_export_limit(self.export_window_best, self.export_limits_best, best=True)
 
-                # Compute marginal energy cost matrix (what-if extra load scenarios)
-                self.calculate_marginal_costs()
+                # Compute marginal energy cost matrix (what-if extra load scenarios).
+                # This runs 28 what-if simulations, which measured ~155ms on a Pi 5 - about
+                # a fifth of a no-recompute cycle. The matrix is derived from
+                # charge_limit_best/export_window_best, so between recomputes it re-derives
+                # the same plan and lands on the same numbers. Recompute it with the plan it
+                # describes, and on the first pass after a restart when there is none yet.
+                if recompute or not getattr(self, "marginal_costs_matrix", None):
+                    self.calculate_marginal_costs()
+                else:
+                    # Matrix still valid, but re-publish so the live cells on the sensor
+                    # (grid_import_now/grid_export_now, read from minutes_now) stay current
+                    self.publish_marginal_costs()
 
                 # HTML data
                 text = self.short_textual_plan(soc_min, soc_min_minute, pv_forecast_minute_step, pv_forecast_minute10_step, load_minutes_step, load_minutes_step10, self.end_record)

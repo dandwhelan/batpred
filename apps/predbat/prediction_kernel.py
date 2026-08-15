@@ -318,11 +318,26 @@ def kernel_context_free(handle):
         KERNEL_LIB.pk_context_free(handle)
 
 
-def create_kernel_context(pred):
+def create_kernel_context(pred, invariant_cache=None):
     """Build the per-plan static context for a Prediction object and hand it to the kernel.
 
     Returns the kernel context handle (>0) or 0 when the kernel is unavailable or
     the context could not be built; 0 means the Python engine will be used.
+
+    invariant_cache is an opt-in optimisation for callers that build many contexts
+    differing only in the load forecast - currently just calculate_marginal_costs(),
+    which runs 28 what-if simulations off one plan. Pass the same empty dict to every
+    call in such a batch: the first populates it and the rest reuse everything except
+    the three load arrays, which are always rebuilt from pred. The per-step loop is
+    the dominant cost of this function (find_battery_temperature_cap alone is ~28% of
+    it), so skipping it for the invariant fields is most of the saving.
+
+    ONLY pass a shared cache when every input other than load_minutes_step,
+    load_minutes_step10 and load_minutes_step90 is identical across the batch -
+    rates, PV, battery temperature, curves, carbon, gas, iBoost and car slots
+    included. A stale cache silently produces a context describing different
+    conditions, which the parity suite would not catch because the Python engine
+    would be handed the same wrong data.
     """
     lib = load_kernel(log=pred.log)
     if not lib:
@@ -336,75 +351,134 @@ def create_kernel_context(pred):
             return 0
         n_steps = forecast_minutes // PREDICT_STEP
 
-        rate_import = []
-        rate_export = []
-        alert_keep = []
-        io_flag = []
-        pv = []
-        load = []
-        pv10 = []
-        load10 = []
-        pv90 = []
-        load90 = []
-        temp_charge_cap = []
-        temp_discharge_cap = []
-        carbon = []
-        gas_rate = []
-        iboost_plan_load = []
-        car_load_flat = [0.0] * (num_cars * n_steps)
-        car_rate_flat = [0.0] * (num_cars * n_steps)
-        for k in range(n_steps):
-            minute = k * PREDICT_STEP
-            minute_absolute = minute + minutes_now
-            rate_import.append(pred.rate_import.get(minute_absolute, 0))
-            rate_export.append(pred.rate_export.get(minute_absolute, 0))
-            alert_keep.append(pred.all_active_keep.get(minute_absolute, 0))
-            io_flag.append(1 if pred.io_adjusted.get(minute_absolute, 0) else 0)
-            pv.append(pred.pv_forecast_minute_step[minute])
-            load.append(pred.load_minutes_step[minute])
-            pv10.append(pred.pv_forecast_minute10_step[minute])
-            load10.append(pred.load_minutes_step10[minute])
-            pv90.append(pred.pv_forecast_minute90_step[minute])
-            load90.append(pred.load_minutes_step90[minute])
-            # Pre-compute the temperature rate cap base (before the min against the max rate,
-            # which the kernel applies per lookup) - mirrors utils.py find_battery_temperature_cap
-            battery_temperature = pred.battery_temperature_prediction.get(minute, pred.battery_temperature)
-            temp_charge_cap.append(find_battery_temperature_cap(battery_temperature, pred.battery_temperature_charge_curve, pred.soc_max, float("inf")))
-            temp_discharge_cap.append(find_battery_temperature_cap(battery_temperature, pred.battery_temperature_discharge_curve, pred.soc_max, float("inf")))
-            carbon.append(pred.carbon_intensity.get(minute, 0) if pred.carbon_intensity else 0)
-            # Gas rate pre-scaled by iboost_gas_scale - mirrors prediction.py:719/725
-            gas_rate.append((pred.rate_gas.get(minute_absolute, 99) * pred.iboost_gas_scale) if pred.rate_gas else 0)
-            iboost_plan_load.append(in_iboost_slot(minute_absolute, pred.iboost_plan) if pred.iboost_plan else 0)
-            if num_cars > 0:
-                car_load, car_rate_slot = in_car_slot(minute_absolute, num_cars, pred.car_charging_slots)
-                for car_n in range(num_cars):
-                    car_load_flat[car_n * n_steps + k] = car_load[car_n]
-                    car_rate_flat[car_n * n_steps + k] = car_rate_slot[car_n]
+        # A cache from a different plan shape cannot be reused
+        cached = invariant_cache if (invariant_cache and invariant_cache.get("n_steps") == n_steps and invariant_cache.get("minutes_now") == minutes_now and invariant_cache.get("num_cars") == num_cars) else None
 
-        # Raw power curve multipliers by SoC percent - mirrors utils.py get_curve_value
-        charge_curve = [get_curve_value(pred.battery_charge_power_curve, percent, 1.0) for percent in range(101)]
-        discharge_curve = [get_curve_value(pred.battery_discharge_power_curve, percent, 1.0) for percent in range(101)]
+        load = []
+        load10 = []
+        load90 = []
+        if cached is None:
+            rate_import = []
+            rate_export = []
+            alert_keep = []
+            io_flag = []
+            pv = []
+            pv10 = []
+            pv90 = []
+            temp_charge_cap = []
+            temp_discharge_cap = []
+            carbon = []
+            gas_rate = []
+            iboost_plan_load = []
+            car_load_flat = [0.0] * (num_cars * n_steps)
+            car_rate_flat = [0.0] * (num_cars * n_steps)
+            for k in range(n_steps):
+                minute = k * PREDICT_STEP
+                minute_absolute = minute + minutes_now
+                rate_import.append(pred.rate_import.get(minute_absolute, 0))
+                rate_export.append(pred.rate_export.get(minute_absolute, 0))
+                alert_keep.append(pred.all_active_keep.get(minute_absolute, 0))
+                io_flag.append(1 if pred.io_adjusted.get(minute_absolute, 0) else 0)
+                pv.append(pred.pv_forecast_minute_step[minute])
+                load.append(pred.load_minutes_step[minute])
+                pv10.append(pred.pv_forecast_minute10_step[minute])
+                load10.append(pred.load_minutes_step10[minute])
+                pv90.append(pred.pv_forecast_minute90_step[minute])
+                load90.append(pred.load_minutes_step90[minute])
+                # Pre-compute the temperature rate cap base (before the min against the max rate,
+                # which the kernel applies per lookup) - mirrors utils.py find_battery_temperature_cap
+                battery_temperature = pred.battery_temperature_prediction.get(minute, pred.battery_temperature)
+                temp_charge_cap.append(find_battery_temperature_cap(battery_temperature, pred.battery_temperature_charge_curve, pred.soc_max, float("inf")))
+                temp_discharge_cap.append(find_battery_temperature_cap(battery_temperature, pred.battery_temperature_discharge_curve, pred.soc_max, float("inf")))
+                carbon.append(pred.carbon_intensity.get(minute, 0) if pred.carbon_intensity else 0)
+                # Gas rate pre-scaled by iboost_gas_scale - mirrors prediction.py:719/725
+                gas_rate.append((pred.rate_gas.get(minute_absolute, 99) * pred.iboost_gas_scale) if pred.rate_gas else 0)
+                iboost_plan_load.append(in_iboost_slot(minute_absolute, pred.iboost_plan) if pred.iboost_plan else 0)
+                if num_cars > 0:
+                    car_load, car_rate_slot = in_car_slot(minute_absolute, num_cars, pred.car_charging_slots)
+                    for car_n in range(num_cars):
+                        car_load_flat[car_n * n_steps + k] = car_load[car_n]
+                        car_rate_flat[car_n * n_steps + k] = car_rate_slot[car_n]
+
+            # Raw power curve multipliers by SoC percent - mirrors utils.py get_curve_value
+            charge_curve = [get_curve_value(pred.battery_charge_power_curve, percent, 1.0) for percent in range(101)]
+            discharge_curve = [get_curve_value(pred.battery_discharge_power_curve, percent, 1.0) for percent in range(101)]
+
+            if invariant_cache is not None:
+                # ctypes arrays, not the Python lists: the arrays are what the context
+                # points at, and rebuilding them per call is itself measurable
+                invariant_cache.update(
+                    {
+                        "n_steps": n_steps,
+                        "minutes_now": minutes_now,
+                        "num_cars": num_cars,
+                        "rate_import": double_array(rate_import),
+                        "rate_export": double_array(rate_export),
+                        "alert_keep": double_array(alert_keep),
+                        "pv": double_array(pv),
+                        "pv10": double_array(pv10),
+                        "pv90": double_array(pv90),
+                        "temp_charge_cap": double_array(temp_charge_cap),
+                        "temp_discharge_cap": double_array(temp_discharge_cap),
+                        "io_flag": int32_array(io_flag),
+                        "charge_curve": double_array(charge_curve),
+                        "discharge_curve": double_array(discharge_curve),
+                        "carbon": double_array(carbon),
+                        "gas_rate": double_array(gas_rate),
+                        "iboost_plan_load": double_array(iboost_plan_load),
+                        "car_load_flat": double_array(car_load_flat),
+                        "car_rate_flat": double_array(car_rate_flat),
+                    }
+                )
+                cached = invariant_cache
+        else:
+            # Only the load forecast varies across a cached batch
+            for k in range(n_steps):
+                minute = k * PREDICT_STEP
+                load.append(pred.load_minutes_step[minute])
+                load10.append(pred.load_minutes_step10[minute])
+                load90.append(pred.load_minutes_step90[minute])
 
         ctx = PkContext()
-        ctx.rate_import = double_array(rate_import)
-        ctx.rate_export = double_array(rate_export)
-        ctx.alert_keep = double_array(alert_keep)
-        ctx.pv = double_array(pv)
+        # The kernel deep-copies every array in pk_context_create, so handing it the
+        # cached ctypes arrays is safe - nothing here is retained by the context
+        if cached is not None:
+            ctx.rate_import = cached["rate_import"]
+            ctx.rate_export = cached["rate_export"]
+            ctx.alert_keep = cached["alert_keep"]
+            ctx.pv = cached["pv"]
+            ctx.pv10 = cached["pv10"]
+            ctx.pv90 = cached["pv90"]
+            ctx.temp_charge_cap = cached["temp_charge_cap"]
+            ctx.temp_discharge_cap = cached["temp_discharge_cap"]
+            ctx.io_flag = cached["io_flag"]
+            ctx.charge_curve = cached["charge_curve"]
+            ctx.discharge_curve = cached["discharge_curve"]
+            ctx.carbon = cached["carbon"]
+            ctx.gas_rate = cached["gas_rate"]
+            ctx.iboost_plan_load = cached["iboost_plan_load"]
+            ctx.car_load_flat = cached["car_load_flat"]
+            ctx.car_rate_flat = cached["car_rate_flat"]
+        else:
+            ctx.rate_import = double_array(rate_import)
+            ctx.rate_export = double_array(rate_export)
+            ctx.alert_keep = double_array(alert_keep)
+            ctx.pv = double_array(pv)
+            ctx.pv10 = double_array(pv10)
+            ctx.pv90 = double_array(pv90)
+            ctx.temp_charge_cap = double_array(temp_charge_cap)
+            ctx.temp_discharge_cap = double_array(temp_discharge_cap)
+            ctx.io_flag = int32_array(io_flag)
+            ctx.charge_curve = double_array(charge_curve)
+            ctx.discharge_curve = double_array(discharge_curve)
+            ctx.carbon = double_array(carbon)
+            ctx.gas_rate = double_array(gas_rate)
+            ctx.iboost_plan_load = double_array(iboost_plan_load)
+            ctx.car_load_flat = double_array(car_load_flat)
+            ctx.car_rate_flat = double_array(car_rate_flat)
         ctx.load = double_array(load)
-        ctx.pv10 = double_array(pv10)
         ctx.load10 = double_array(load10)
-        ctx.pv90 = double_array(pv90)
         ctx.load90 = double_array(load90)
-        ctx.temp_charge_cap = double_array(temp_charge_cap)
-        ctx.temp_discharge_cap = double_array(temp_discharge_cap)
-        ctx.io_flag = int32_array(io_flag)
-        ctx.charge_curve = double_array(charge_curve)
-        ctx.discharge_curve = double_array(discharge_curve)
-        ctx.carbon = double_array(carbon)
-        ctx.gas_rate = double_array(gas_rate)
-        ctx.iboost_plan_load = double_array(iboost_plan_load)
-        ctx.car_load_flat = double_array(car_load_flat)
-        ctx.car_rate_flat = double_array(car_rate_flat)
 
         ctx.soc_kw = pred.soc_kw
         ctx.soc_max = pred.soc_max
