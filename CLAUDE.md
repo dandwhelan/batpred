@@ -45,6 +45,10 @@ source setup.csh
 
 The `run_all` script is a thin wrapper; you can run `unit_test.py` directly from the `coverage/` directory (it needs to be the working directory so relative paths resolve).
 
+**Live-instance collision**: `tests/test_web_if.py` posts to a hardcoded `http://127.0.0.1:5052`. On a machine that also runs a live Predbat instance bound to that port (e.g. via Docker), the test's POSTs — including `/restart` and mode changes — land on the live instance instead of the test's own web server. Changing `coverage/apps.yaml`'s `web_port` does not help, since the test's client target is hardcoded separately from the server it starts. Check for anything already bound to port 5052 (`docker ps`, `lsof -i :5052`) before running the full or `--quick` suite anywhere a live instance might be running.
+
+**Known flaky test**: `tests/test_manual_select.py` picks a dropdown option by weekday label (`"%a %H:%M"`) and can fail near midnight UTC, when the label's weekday falls behind the harness's "today" — `get_override_time_from_string` then resolves it into the past and `manual_select` returns `off`. A failure here in that window is not necessarily a regression; rerunning after the boundary passes should confirm.
+
 ## Code Quality
 
 All checks are enforced via pre-commit and must pass before merging:
@@ -181,7 +185,7 @@ This fork's kernel binaries are built with ABI/parity revision **103** (upstream
 
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.46.4). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.48.1). Fork changes on top of upstream:
 
 - **FIT support** — see the Feed-in Tariff section above
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
