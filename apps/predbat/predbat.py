@@ -35,7 +35,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v712.20"
+THIS_VERSION = "v712.21"
 
 # Restart Predbat if a component stays unhealthy for this long
 COMPONENT_ERROR_RESTART_MINUTES = 10
