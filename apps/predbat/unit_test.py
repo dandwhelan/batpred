@@ -22,6 +22,7 @@ from tests.test_perf import run_perf_test
 from tests.test_model import run_model_tests
 from tests.test_predict_pv_power import run_predict_pv_power_tests
 from tests.test_kernel_parity import run_kernel_parity_tests, run_model_kernel_tests
+from tests.test_round_py_parity import run_round_py_parity_tests
 from tests.test_execute import run_execute_tests
 from tests.test_load_car_energy import test_load_car_energy_warns_when_configured_entity_has_no_data
 from tests.test_octopus_slots import run_load_octopus_slots_tests
@@ -292,6 +293,7 @@ def main():
         ("predict_pv_power", run_predict_pv_power_tests, "predict_pv_power plan-interval scaling tests", False),
         ("model_kernel", run_model_kernel_tests, "Model tests run with the C++ prediction kernel enabled", False),
         ("kernel_parity", run_kernel_parity_tests, "C++ prediction kernel vs Python engine parity tests", False),
+        ("round_py_parity", run_round_py_parity_tests, "Kernel round_py vs CPython round() parity tests", False),
         ("inverter", run_inverter_tests, "Inverter tests", False),
         ("execute", run_execute_tests, "Execute tests", False),
         ("load_car_energy", test_load_car_energy_warns_when_configured_entity_has_no_data, "car_charging_energy configured-but-empty warning tests (#4458 follow-up)", False),

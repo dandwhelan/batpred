@@ -81,6 +81,7 @@ customauthorizer
 customisation
 Customise
 cvalue
+CXXFLAGS
 Daeamon
 dandwhelan
 darkgreen
@@ -328,8 +329,10 @@ mypy
 nattribute
 ncalls
 ndash
+ndigits
 nearr
 newtok
+nextafter
 njpwerner
 nobat
 nocharge
@@ -492,6 +495,8 @@ strptime
 Strømligning
 subclassing
 submessage
+subnormal
+subnormals
 substep
 sunspec
 sunsynk
@@ -533,6 +538,7 @@ typecode
 typecodes
 tzfile
 tzpath
+ULP
 unconfigured
 undiscounted
 unnormalised
