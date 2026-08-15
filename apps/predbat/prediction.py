@@ -104,11 +104,16 @@ class Prediction:
     Class to hold prediction input and output data and the run function
     """
 
-    def __init__(self, base=None, pv_forecast_minute_step=None, pv_forecast_minute10_step=None, load_minutes_step=None, load_minutes_step10=None, pv_forecast_minute90_step=None, load_minutes_step90=None, soc_kw=None, soc_max=None):
+    def __init__(
+        self, base=None, pv_forecast_minute_step=None, pv_forecast_minute10_step=None, load_minutes_step=None, load_minutes_step10=None, pv_forecast_minute90_step=None, load_minutes_step90=None, soc_kw=None, soc_max=None, kernel_invariant_cache=None
+    ):
         """Build a Prediction, optionally copying simulation state from a base PredBat instance.
 
         pv_forecast_minute90_step and load_minutes_step90 fall back to the nominal step arrays when None, so
         every existing call site that never requests the pv90 scenario keeps working unchanged.
+
+        kernel_invariant_cache is passed straight through to create_kernel_context() - see the
+        conditions documented there before sharing one between Predictions.
         """
         global PRED_GLOBAL
         if base:
@@ -222,7 +227,7 @@ class Prediction:
             self.prediction_kernel_enable = getattr(base, "prediction_kernel_enable", False)
             self.kernel_handle = 0
             if self.prediction_kernel_enable:
-                self.kernel_handle = create_kernel_context(self)
+                self.kernel_handle = create_kernel_context(self, invariant_cache=kernel_invariant_cache)
 
             # Store this dictionary in global so we can reconstruct it in the thread without passing the data
             PRED_GLOBAL["dict"] = self.__dict__.copy()

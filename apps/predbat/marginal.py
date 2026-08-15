@@ -70,6 +70,14 @@ class Marginal:
         matrix = {}
         all_costs = []
 
+        # Every cell below differs only in the load forecast: same plan, same rates, same
+        # PV, same battery temperature and curves. Without this the kernel context is
+        # rebuilt from scratch 28 times, and that rebuild measured ~13x the cost of the
+        # prediction it exists to serve. See create_kernel_context() for the conditions
+        # this relies on - they hold here because the only thing the loop varies is
+        # modified_load.
+        kernel_invariant_cache = {}
+
         for extra_kwh in MARGINAL_EXTRA_KWH_LEVELS:
             matrix[extra_kwh] = {}
             # Convert kWh/hour extra load to kWh per 5-minute step
@@ -89,7 +97,7 @@ class Marginal:
                 # Create a fresh Prediction with the modified load; this updates PRED_GLOBAL
                 # which is safe since we run synchronously (pool is idle at this point)
                 # No need to include 10% extra load as we only run normal simulations.
-                pred = Prediction(self, self.pv_forecast_minute_step, self.pv_forecast_minute_step, modified_load, modified_load)
+                pred = Prediction(self, self.pv_forecast_minute_step, self.pv_forecast_minute_step, modified_load, modified_load, kernel_invariant_cache=kernel_invariant_cache)
 
                 # Run prediction against the current best charge/discharge plan, no save to HA
                 (new_metric, *_) = pred.run_prediction(
