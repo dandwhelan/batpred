@@ -81,6 +81,7 @@ customauthorizer
 customisation
 Customise
 cvalue
+CXXFLAGS
 Daeamon
 dandwhelan
 darkgreen
@@ -328,6 +329,7 @@ mypy
 nattribute
 ncalls
 ndash
+ndigits
 nearr
 newtok
 nextafter
