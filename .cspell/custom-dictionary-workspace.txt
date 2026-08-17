@@ -25,6 +25,7 @@ armhf
 armv
 ASHP
 asyncio
+atfork
 authoriser
 autodocstring
 autoflake
@@ -51,6 +52,7 @@ byok
 cadata
 calib
 Cantarell
+CDLL
 cdn
 Cerbo
 cexxxx
@@ -77,6 +79,7 @@ corruptplans
 cprofile
 creds
 crosscharge
+ctypes
 customauthorizer
 customisation
 Customise
@@ -394,6 +397,7 @@ preseeded
 prevs
 protobuf
 psum
+pthread
 pvbat
 pvenergytotal
 pvlib
@@ -466,6 +470,7 @@ slugifies
 slugify
 slugifying
 snakeviz
+snprintf
 socb
 socketloop
 socs
@@ -492,6 +497,7 @@ stdlib
 stepline
 Stromligning
 strptime
+strtod
 Strømligning
 subclassing
 submessage
@@ -511,6 +517,7 @@ temperation
 Teslemetry
 testname
 thirdparty
+threadpool
 timea
 timeb
 timec
@@ -543,6 +550,9 @@ unconfigured
 undiscounted
 unnormalised
 unparseable
+unpickled
+unpickles
+unpushed
 unsmoothed
 unstaged
 unsubtracted
@@ -556,10 +566,14 @@ Victron
 visibilitychange
 vlabel
 waf
+waitpid
 Wallbox
 weblink
 welink
 Werror
+WEXITSTATUS
+WIFEXITED
+WNOHANG
 workmode
 writeonly
 wrongsha

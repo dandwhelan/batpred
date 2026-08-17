@@ -34,7 +34,6 @@ from config import CONFIG_API_OVERRIDE
 from predbat import THIS_VERSION
 
 DEBUG_EXCLUDE_LIST = [
-    "pool",
     "ha_interface",
     "components",
     "prediction",
