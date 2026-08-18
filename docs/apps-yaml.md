@@ -1772,9 +1772,42 @@ whether you are within an Octopus Energy "smart charge" slot
 - **car_charging_battery_size** - Car battery size in kWh
 - **car_charging_limit** - Percentage limit the car is set to charge to
 - **car_charging_soc** - Car's current charge level expressed as a percentage
+- **car_charging_soc_max_age** - Optional. Number of minutes after which a **car_charging_soc** sensor reading is no longer trusted, for a car that **car_charging_planned** reports as plugged in. Defaults to 0, which disables the check. See [Stale car SoC sensors](#stale-car-soc-sensors) below.
 - **ohme_login** - Ohme EV charger account login
 - **ohme_password** - Password for above Ohme account
 - **ohme_automatic_octopus_intelligent** - Controls whether Predbat talks directly to the above Ohme account
+
+## Stale car SoC sensors
+
+Some EV integrations stop updating the car's SoC sensor while the car is charging - the vehicle API
+goes quiet, or the car stops answering. The sensor keeps reporting the last value it saw, which is
+usually just under your charge limit, because that is where it got to before it froze.
+
+Predbat cannot tell that reading apart from a real one, and it is the worst possible value to be
+wrong about. A car that looks like it is already at its limit needs ~0 kWh, so:
+
+- No car charging is planned, and the real overnight load disappears from the plan. With that load
+  missing Predbat may decide the house battery is better exported than kept charged, and the battery
+  can end a cheap-rate window well short of its target.
+- The battery hold that **switch.predbat_car_charging_from_battery** provides never engages, because
+  it only applies while a car charging slot with energy in it is active. So the house battery can
+  discharge into the car.
+
+Setting **car_charging_soc_max_age** to a number of minutes makes Predbat check how long ago the SoC
+sensor actually updated. If it is older than that *and* the car is plugged in, Predbat logs a warning
+and plans as if the car were empty - it would rather charge a car that turns out to be full than
+strand the house battery.
+
+```yaml
+  car_charging_soc_max_age: 240
+```
+
+The check only applies to a car that **car_charging_planned** reports as plugged in. An unplugged car
+that has gone to sleep can legitimately stop reporting for days, and that is not a fault. It is also
+skipped for cars using **switch.predbat_car_charging_manual_soc**, which do not read a sensor at all.
+
+Pick a value longer than the gap your car normally leaves between updates while plugged in, or you
+will get false positives. Four hours is a reasonable starting point.
 
 ## Watch List - automatically start Predbat execution
 
