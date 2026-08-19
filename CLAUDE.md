@@ -47,6 +47,16 @@ The `run_all` script is a thin wrapper; you can run `unit_test.py` directly from
 
 **Live-instance collision**: `tests/test_web_if.py` posts to a hardcoded `http://127.0.0.1:5052`. On a machine that also runs a live Predbat instance bound to that port (e.g. via Docker), the test's POSTs — including `/restart` and mode changes — land on the live instance instead of the test's own web server. Changing `coverage/apps.yaml`'s `web_port` does not help, since the test's client target is hardcoded separately from the server it starts. Check for anything already bound to port 5052 (`docker ps`, `lsof -i :5052`) before running the full or `--quick` suite anywhere a live instance might be running.
 
+**Live-config collision**: the same hazard, one layer deeper. `CONFIG_ROOTS = ["/config", "/conf", "/homeassistant", "./"]` (`const.py`) is searched in order, so inside a container that bind-mounts a live deployment at `/config`, `config_root` resolves to *that deployment* and any test building a real object reads and writes the owner's files. `tests/test_optimise_all_windows.py` constructs a real `Compare`, whose `load_yaml()`/`save_yaml()` use `config_root + "/comparisons.yaml"`: run there it loads the owner's saved tariff comparisons, adds its own `base`/`double` fixtures and writes all of them back. That is also why it reports `Compare expected 2 results but got 13` in that setting — the count is the owner's comparisons, not a regression.
+
+**So run the suite in a throwaway container, never the live one.** The published image ships an empty `/config` of its own, so `--rm` discards anything written:
+
+```bash
+docker run --rm --network none --entrypoint sh -v "$PWD:/work" -w /work/coverage <predbat-image> -c 'PREDBAT_KERNEL_REQUIRED=1 python3 ../apps/predbat/unit_test.py --quick'
+```
+
+`--entrypoint sh` is required — the image's default entrypoint ignores the command and loops on "Please Update apps.yaml". `--network none` is fine for the suite (it only suppresses the GitHub manifest check), but the annual heat-pump smoke scripts need real network for Open-Meteo. Anything that calls `PredBat()` directly rather than through `unit_test.py` — `run_annual_tests.py`, for instance — also needs `PREDBAT_APPS_FILE` pointed at an apps.yaml, e.g. `/work/coverage/apps.yaml`.
+
 **Known flaky test**: `tests/test_manual_select.py` picks a dropdown option by weekday label (`"%a %H:%M"`) and can fail near midnight UTC, when the label's weekday falls behind the harness's "today" — `get_override_time_from_string` then resolves it into the past and `manual_select` returns `off`. A failure here in that window is not necessarily a regression; rerunning after the boundary passes should confirm.
 
 ## Code Quality
