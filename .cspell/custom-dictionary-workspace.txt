@@ -26,6 +26,7 @@ armv
 ASHP
 asyncio
 atfork
+atleast
 authoriser
 autodocstring
 autoflake
@@ -121,6 +122,7 @@ digestmod
 dimport
 dischargeenergytotal
 dischargefreeze
+Dischg
 diverter
 dlimit
 dnoregion
@@ -131,6 +133,7 @@ dwindow
 eauth
 Eddi
 elif
+elinter
 EMEA
 emqx
 emszzzz
@@ -156,6 +159,7 @@ Enpower
 entrez
 epod
 errorcode
+etoday
 etok
 euids
 EVDC
@@ -179,6 +183,7 @@ fontweight
 Forestfire
 formaction
 formmethod
+foxcloud
 foxess
 foxesscloud
 freelist
@@ -194,6 +199,7 @@ generationpower
 geserial
 geseriale
 getall
+getrusage
 Ginlong
 GivEnergy
 givtcp
@@ -235,6 +241,7 @@ idxs
 iflux
 importlimit
 inday
+inteless
 INTELLI
 intelligentdevice
 interp
@@ -289,6 +296,7 @@ mantissa
 markdownlint
 matplotlib
 maximise
+maxrss
 maxsoc
 mbuhansen
 mdlrc
@@ -301,6 +309,8 @@ meterpower
 metricb
 metricmid
 microinverters
+middlebox
+middleboxes
 minb
 minmax
 minsoc
@@ -347,6 +357,7 @@ noreferrer
 nosc
 nosuchrun
 NOTADB
+notsn
 nrgheat
 numpy
 OCPP
@@ -437,8 +448,10 @@ Roboto
 rowspan
 rstart
 rstrip
+rtol
 rtype
 ruamel
+RUSAGE
 Rvrt
 sapm
 saverestore
@@ -458,6 +471,7 @@ setattr
 setdefault
 SFMB
 SIGABRT
+SIGALRM
 sigcloud
 sigen
 sigencloud
@@ -478,6 +492,8 @@ sofar
 SolarEdge
 solarman
 solarnet
+solarsynk
+solarsynkv
 Solax
 solaxcloud
 solaxmodbus
@@ -488,6 +504,7 @@ sourcery
 Southwell
 Spacebar
 sparkline
+spki
 springfall
 starthour
 startminute
@@ -507,6 +524,7 @@ substep
 sunspec
 sunsynk
 supabase
+synkctl
 syscmd
 tabindex
 tasmota
@@ -539,6 +557,7 @@ trapz
 Trefor
 treforsiphone
 treforsouthwell
+triggerable
 tunables
 twinx
 typecode
@@ -547,6 +566,7 @@ tzfile
 tzpath
 ULP
 unconfigured
+underivable
 undiscounted
 unnormalised
 unparseable
@@ -560,6 +580,7 @@ urandom
 urlsafe
 useid
 userinterface
+Vallery
 varh
 venv
 Victron

@@ -74,6 +74,7 @@ from tests.test_saving_session import (
     test_saving_session_auto_join_toggle,
     test_saving_session_join_rejected,
     test_saving_session_bad_slot,
+    test_saving_session_custom_entity_no_rewrite_match,
 )
 from tests.test_secrets import run_secrets_tests
 from tests.test_ge_cloud import test_ge_cloud
@@ -88,6 +89,7 @@ from tests.test_hainterface_api import run_hainterface_api_tests
 from tests.test_hainterface_service import run_hainterface_service_tests
 from tests.test_hainterface_lifecycle import run_hainterface_lifecycle_tests
 from tests.test_hainterface_websocket import run_hainterface_websocket_tests
+from tests.test_history_chunking import run_history_chunking_tests
 from tests.test_web_if import run_test_web_if
 from tests.test_web_chart_currency import test_rates_chart_series_names_use_currency_symbol
 from tests.test_metrics_dashboard_soc_refresh import test_soc_chart_center_text_reads_live_data
@@ -122,6 +124,7 @@ from tests.test_manual_select import run_test_manual_select
 from tests.test_minute_array import test_minute_array
 from tests.test_minute_data import test_minute_data, test_minute_data_load, test_minute_data_no_smoothing_backwards, test_minute_data_no_smoothing_forward
 from tests.test_minute_data_import_export import test_minute_data_import_export
+from tests.test_faq_recorder_config import test_faq_recorder_config
 from tests.test_minute_data_state import test_minute_data_state
 from tests.test_minute_data_copy import run_minute_data_copy_tests
 from tests.test_format_time_ago import test_format_time_ago
@@ -166,6 +169,13 @@ from tests.test_deye_oauth import run_deye_oauth_tests
 from tests.test_deye_control import run_deye_control_tests
 from tests.test_deye_publish import run_deye_publish_tests
 from tests.test_deye_storage import run_deye_storage_tests
+from tests.test_sunsynk_const import run_sunsynk_const_tests
+from tests.test_sunsynk_auth import run_sunsynk_auth_tests
+from tests.test_sunsynk_api import run_sunsynk_api_tests
+from tests.test_sunsynk_control import run_sunsynk_control_tests
+from tests.test_sunsynk_publish import run_sunsynk_publish_tests
+from tests.test_sunsynk_storage import run_sunsynk_storage_tests
+from tests.test_sunsynk_config import run_sunsynk_config_tests
 from tests.test_enphase_api import run_enphase_api_tests
 from tests.test_solcast import run_solcast_tests
 from tests.test_open_meteo import run_open_meteo_tests
@@ -175,6 +185,7 @@ from tests.test_annual_load import test_annual_load, test_annual_load_octopus
 from tests.test_annual_weather import test_annual_weather
 from tests.test_annual_tariff import test_annual_tariff
 from tests.test_rate_add_io_slots import run_rate_add_io_slots_tests
+from tests.test_iog_charge_skew import run_iog_charge_skew_tests
 from tests.test_battery_curve_keys import run_battery_curve_keys_tests
 from tests.test_balance_inverters import run_balance_inverters_tests
 from tests.test_octopus_download_rates import test_octopus_download_rates_wrapper
@@ -204,6 +215,8 @@ from tests.test_component_base import test_component_base_all
 from tests.test_mock_base import test_mock_base_all
 from tests.test_solis import run_solis_tests
 from tests.test_load_ml import test_load_ml
+from tests.test_ml_memory import run_ml_memory_tests
+from tests.test_ml_training_perf import run_ml_training_perf_tests
 from tests.test_temperature import test_temperature
 from tests.test_oauth_mixin import run_oauth_mixin_tests
 from tests.test_fox_oauth import run_fox_oauth_tests
@@ -352,6 +365,7 @@ def main():
         ("minute_data", test_minute_data, "Minute data tests", False),
         ("minute_data_load", test_minute_data_load, "Minute data load tests", False),
         ("minute_data_import_export", test_minute_data_import_export, "Minute data import/export tests", False),
+        ("faq_recorder_config", test_faq_recorder_config, "FAQ recorder filter example matches the entities Predbat reads history for", False),
         ("minute_data_no_smoothing_backwards", test_minute_data_no_smoothing_backwards, "Minute data no-smoothing backwards tests", False),
         ("minute_data_no_smoothing_forward", test_minute_data_no_smoothing_forward, "Minute data no-smoothing forward tests", False),
         ("get_now_cumulative", test_get_now_from_cumulative, "Get now from cumulative tests", False),
@@ -428,6 +442,7 @@ def main():
         ("octopus_slots", run_load_octopus_slots_tests, "Load Octopus slots tests", False),
         ("multi_car_iog", run_multi_car_iog_tests, "Multi-car IOG tests", False),
         ("rate_add_io_slots", run_rate_add_io_slots_tests, "Rate add IO slots tests", False),
+        ("iog_charge_skew", run_iog_charge_skew_tests, "IOG earlier-charge skew characterisation tests", False),
         ("rate_replicate", test_rate_replicate, "Rate replicate comprehensive tests (missing slots, IO, offsets, gas)", False),
         ("find_charge_window", test_find_charge_window, "Find charge window gap handling tests", False),
         ("find_charge_rate", test_find_charge_rate, "Find charge rate tests", False),
@@ -445,6 +460,7 @@ def main():
         ("saving_session_default_rate", test_saving_session_default_rate, "Saving session default rate injection test", False),
         ("saving_session_axle_conflict", test_saving_session_axle_conflict, "Saving session Axle conflict avoidance test (issue #4120)", False),
         ("saving_session_auto_join_toggle", test_saving_session_auto_join_toggle, "Saving session auto-join toggle test (issue #4120)", False),
+        ("saving_session_custom_entity_no_rewrite_match", test_saving_session_custom_entity_no_rewrite_match, "Saving session custom entity no rewrite match test (issue #4573)", False),
         ("alert_feed", test_alert_feed, "Alert feed tests", False),
         ("fox_api", run_fox_api_tests, "Fox API tests", False),
         ("deye_const", run_deye_const_tests, "DEYE constants tests", False),
@@ -454,6 +470,13 @@ def main():
         ("deye_control", run_deye_control_tests, "DEYE control-logic tests", False),
         ("deye_publish", run_deye_publish_tests, "DEYE publish/config tests", False),
         ("deye_storage", run_deye_storage_tests, "DEYE storage persistence tests", False),
+        ("sunsynk_const", run_sunsynk_const_tests, "Sunsynk constants tests", False),
+        ("sunsynk_auth", run_sunsynk_auth_tests, "Sunsynk auth tests", False),
+        ("sunsynk_api", run_sunsynk_api_tests, "Sunsynk API tests", False),
+        ("sunsynk_control", run_sunsynk_control_tests, "Sunsynk control-logic tests", False),
+        ("sunsynk_publish", run_sunsynk_publish_tests, "Sunsynk publish tests", False),
+        ("sunsynk_storage", run_sunsynk_storage_tests, "Sunsynk storage tests", False),
+        ("sunsynk_config", run_sunsynk_config_tests, "Sunsynk config/INVERTER_DEF tests", False),
         ("enphase_api", run_enphase_api_tests, "Enphase API tests", False),
         ("solcast", run_solcast_tests, "Solcast API tests", False),
         ("open_meteo", run_open_meteo_tests, "Open-Meteo solar forecast provider tests", False),
@@ -510,6 +533,8 @@ def main():
         ("hainterface_lifecycle", run_hainterface_lifecycle_tests, "HAInterface lifecycle tests", False),
         # HAInterface websocket tests
         ("hainterface_websocket", run_hainterface_websocket_tests, "HAInterface websocket tests", False),
+        # History chunking (long windows fetched in pieces) tests
+        ("history_chunking", run_history_chunking_tests, "History chunking tests", False),
         # Carbon Intensity API unit tests
         ("carbon", test_carbon, "Carbon Intensity API comprehensive tests (fetch, cache, publish, config)", False),
         ("fit", run_fit_tests, "FIT (Feed-in Tariff) calculator tests (clipping, deemed-only, generation-only, export coexistence)", False),
@@ -575,6 +600,10 @@ def main():
         ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
         ("annual_integration", run_annual_integration_isolated, "Annual prediction integration tests", True),
         ("load_ml", test_load_ml, "ML Load Forecaster tests (MLP, training, persistence, validation)", True),
+        # ML training memory: dataset construction, normalisation dtype and statistics accuracy
+        ("ml_memory", run_ml_memory_tests, "ML training memory tests", False),
+        # Production-scale ML training harness against a captured history fixture
+        ("ml_training_perf", run_ml_training_perf_tests, "ML training performance tests", True),
         ("random", run_random_scenario_tests, "Random scenario plan regression against the committed baseline", False),
     ]
 
