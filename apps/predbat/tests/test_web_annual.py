@@ -1678,6 +1678,32 @@ def test_web_annual_results(my_predbat):
         print("  ERROR: the other, still-present scenarios must still get a row in the month table")
         failed = True
 
+    # Battery cycles is the last cell of a scenario row, so "<td>...</td></tr>" pins it
+    # exactly. Matching on the em dash alone would not: the unavailable-month and degraded
+    # suffixes both already contain one.
+    print("Test: a run stored before battery_cycles existed shows no cycles rather than a fabricated zero")
+    no_cycles = copy.deepcopy(sample_run_results())
+    for month_entry in no_cycles["months"]:
+        for scenario in (month_entry.get("scenarios") or {}).values():
+            scenario.pop("battery_cycles", None)
+    no_cycles_table = page._render_month_table(no_cycles)
+    if "<td>0</td></tr>" in no_cycles_table:
+        print("  ERROR: a month with no battery_cycles recorded rendered a fabricated zero, which reads as 'the battery really did zero cycles': {!r}".format(no_cycles_table))
+        failed = True
+    if "<td>—</td></tr>" not in no_cycles_table:
+        print("  ERROR: expected the battery cycles cell to be blanked with an em dash, matching the payback table, got {!r}".format(no_cycles_table))
+        failed = True
+
+    print("Test: a run that does record battery_cycles still shows the number")
+    with_cycles = copy.deepcopy(sample_run_results())
+    for month_entry in with_cycles["months"]:
+        for scenario in (month_entry.get("scenarios") or {}).values():
+            scenario["battery_cycles"] = 1.25
+    with_cycles_table = page._render_month_table(with_cycles)
+    if "<td>1.25</td></tr>" not in with_cycles_table:
+        print("  ERROR: a recorded battery_cycles value must still be rendered, got {!r}".format(with_cycles_table))
+        failed = True
+
     print("Test: a non-paying-back option says so rather than showing a number")
     no_payback = copy.deepcopy(results)
     no_payback["annual"]["payback"]["pv_only"] = {"pays_back": False, "years": None, "capital_gbp": 8000.0, "annual_saving_gbp": -10.0, "gross_annual_saving_gbp": -10.0, "predbat_annual_gbp": 0.0}

@@ -1910,6 +1910,11 @@ class AnnualPage:
                 if key not in month_scenarios:
                     continue
                 scenario = month_scenarios[key]
+                # A run stored before battery_cycles existed has no such key. Rendering the
+                # default as 0.00 would read as "this scenario really cycled the battery zero
+                # times" - the same fabricated-zero ambiguity this method's docstring rejects
+                # for a missing scenario - so say nothing, as the payback table already does.
+                cycles = scenario.get("battery_cycles")
                 text += "<tr><td>{}{}</td><td>{}</td><td>{}</td><td>{} kWh</td><td>{} kWh</td><td>{} kWh</td><td>{} kWh</td><td>{}</td></tr>\n".format(
                     name if first_row else "",
                     suffix if first_row else "",
@@ -1919,7 +1924,7 @@ class AnnualPage:
                     round(scenario.get("export_kwh", 0), 1),
                     round(scenario.get("pv_generated_kwh", 0), 1),
                     round(scenario.get("battery_throughput_kwh", 0), 1),
-                    round(scenario.get("battery_cycles", 0), 2),
+                    "—" if cycles is None else round(cycles, 2),
                 )
                 first_row = False
         text += "</table>\n"
