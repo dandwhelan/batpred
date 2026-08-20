@@ -9,6 +9,7 @@
 # pylint: disable=attribute-defined-outside-init
 # fmt on
 import time
+import re
 import requests
 import os
 import shutil
@@ -100,7 +101,42 @@ def run_test_web_if(my_predbat):
             ("GET", "/metrics"),
             ("GET", "/metrics/json"),
             ("GET", "/metrics_dashboard"),
+            ("GET", "/dash_content"),
+            ("GET", "/dash_entities"),
+            ("GET", "/api/dash_states"),
+            ("GET", "/api/plan_data"),
+            ("GET", "/annual"),
+            ("GET", "/annual_view"),
+            ("GET", "/annual_compare"),
+            ("GET", "/annual_status"),
+            ("GET", "/annual_plan"),
+            ("GET", "/annual_cost_preview"),
+            ("POST", "/annual"),
+            ("POST", "/annual_array"),
+            ("POST", "/annual_reset"),
+            ("POST", "/annual_delete"),
         ]
+
+        # The list above is hand-written, and used to drift: /dash_entities, /api/plan_data and
+        # four annual routes were registered in web.py with nothing ever requesting them. Compare it
+        # against what web.py actually registers so a new route cannot be added without a test.
+        registered = set(re.findall(r'router\.add_(get|post)\("([^"]+)"', open(os.path.join(original_dir, "..", "apps", "predbat", "web.py")).read()))
+        registered = {(method.upper(), path) for method, path in registered}
+        # Left out of the blanket sweep on purpose, and covered by test_web_annual.py instead:
+        # /annual_run spawns a real year-long simulation subprocess, and /annual_cancel and
+        # /annual_download only mean anything once a run is in progress or finished.
+        sweep_exempt = {("POST", "/annual_run"), ("POST", "/annual_cancel"), ("GET", "/annual_download")}
+        listed = set(all_endpoints)
+        unlisted = registered - listed - sweep_exempt
+        if unlisted:
+            print("ERROR: web.py registers endpoints that this test never requests:")
+            for method, path in sorted(unlisted):
+                print("  {:6s} {}".format(method, path))
+            failed = 1
+        stale = listed - registered
+        if stale:
+            print("ERROR: this test requests endpoints web.py no longer registers: {}".format(sorted(stale)))
+            failed = 1
 
         # Track accessed endpoints
         accessed_endpoints = set()
@@ -118,6 +154,12 @@ def run_test_web_if(my_predbat):
                 params = {"component_name": "web"}
             elif page == "/download":
                 params = {"file": "apps.yaml"}
+            elif page == "/annual_cost_preview":
+                # Every parameter is optional and arrives mid-keystroke, so a half-typed
+                # number has to come back as a cost rather than a 500
+                params = {"battery_kwh": "9.5", "solar_kwp": "4."}
+            elif page == "/annual_plan":
+                params = {"run": "missing", "day": "0"}
 
             if params:
                 res = requests.get(address, params=params)
@@ -132,6 +174,10 @@ def run_test_web_if(my_predbat):
                 acceptable_statuses.append(500)
             if page in ("/metrics", "/metrics/json"):
                 acceptable_statuses.append(503)
+            if page == "/annual_plan":
+                # No run has been stored in this temp directory, so a 404 with a JSON error is the
+                # correct answer - what matters is that it is not a 500
+                acceptable_statuses.append(404)
             if res.status_code in acceptable_statuses:
                 accessed_endpoints.add(("GET", page))
             else:
@@ -277,6 +323,43 @@ def run_test_web_if(my_predbat):
                 failed = 1
         else:
             print("ERROR: Unexpected response from /inverter_refresh: {} - {}".format(res.status_code, res.text))
+            failed = 1
+
+        # Test the annual prediction POST endpoints. These were registered in web.py with nothing
+        # ever requesting them, so a handler that raised on an empty or unknown form would have
+        # gone unnoticed until someone clicked the button.
+        print("Test POST /annual")
+        res = requests.post("http://127.0.0.1:5052/annual", data={"battery_kwh": "9.5"})
+        if res.status_code in [200]:
+            accessed_endpoints.add(("POST", "/annual"))
+        else:
+            print("ERROR: Unexpected response from /annual: {} - {}".format(res.status_code, res.text))
+            failed = 1
+
+        print("Test POST /annual_array")
+        res = requests.post("http://127.0.0.1:5052/annual_array", data={"array_op": "add"})
+        if res.status_code in [200]:
+            accessed_endpoints.add(("POST", "/annual_array"))
+        else:
+            print("ERROR: Unexpected response from /annual_array: {} - {}".format(res.status_code, res.text))
+            failed = 1
+
+        print("Test POST /annual_reset")
+        res = requests.post("http://127.0.0.1:5052/annual_reset", data={})
+        if res.status_code in [200]:
+            accessed_endpoints.add(("POST", "/annual_reset"))
+        else:
+            print("ERROR: Unexpected response from /annual_reset: {} - {}".format(res.status_code, res.text))
+            failed = 1
+
+        # Deleting a run that was never stored must still redirect to the comparison table rather
+        # than reporting a failure for something that is already true
+        print("Test POST /annual_delete")
+        res = requests.post("http://127.0.0.1:5052/annual_delete", data={"run": "no_such_run"})
+        if res.status_code in [200]:
+            accessed_endpoints.add(("POST", "/annual_delete"))
+        else:
+            print("ERROR: Unexpected response from /annual_delete: {} - {}".format(res.status_code, res.text))
             failed = 1
 
         # Test /component_restart POST

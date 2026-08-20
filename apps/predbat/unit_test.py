@@ -253,6 +253,7 @@ from tests.test_fetch_sensor_data import test_fetch_sensor_data
 from tests.test_update_time import test_update_time
 from tests.test_update_pred import run_update_pred_tests
 from tests.test_inverter_matrix import run_inverter_matrix_tests
+from tests.test_web_get_chart import run_web_get_chart_tests
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
 
@@ -454,6 +455,7 @@ def main():
         ("web_annual_pages", test_web_annual_pages, "Annual web tab config/viewer/compare page split and nav tests", False),
         ("web_history_table", run_web_history_table_tests, "Web /entity history table bucketing tests", False),
         ("web_charts", run_web_charts_tests, "Web chart rendering tests (percent/special-character units)", False),
+        ("web_get_chart", run_web_get_chart_tests, "get_chart series assembly tests (every chart tab, empty data, unknown chart)", False),
         ("web_chart_grouping", run_web_chart_grouping_tests, "Web /entity chart numeric vs timeline grouping tests", False),
         ("web_entity_unit_resolution", run_web_entity_unit_resolution_tests, "Web /entity chart unit/name resolution tests", False),
         ("nordpool", run_nordpool_test, "Nordpool tests", False),
