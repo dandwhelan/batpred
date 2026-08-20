@@ -29,6 +29,22 @@ Predbat now has some unit-level tests, to run them on your local machine:
 
 You can add --quick to run just the faster tests. If the tests fail then debug them.
 
+The runner keeps going after a failing test and lists everything that failed at the end. Add
+`--fail-fast` to stop at the first one instead, which is usually what you want while debugging a
+single test.
+
+Every test is handed the same `PredBat` instance, so a test can pass only because an earlier one
+left the right state behind - and, the other way round, a failing test can leave state that fails
+the tests after it. `--isolate` gives each test a freshly built instance:
+
+```bash
+./run_all --quick --isolate
+```
+
+It is slower, since building the instance is most of the cost of a short test, but a test that
+passes in the suite and fails under `--isolate` is coupled to whatever ran before it. If several
+tests fail in one run, re-run with `--isolate` to tell genuine failures from knock-on ones.
+
 For coverage analysis install the 'coverage' library with Python, or use the version installed from `requirements.txt`.
 
 1. ./run_cov --quick

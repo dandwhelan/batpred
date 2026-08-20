@@ -13,6 +13,7 @@ import time
 import sys
 import glob
 import argparse
+import traceback
 
 from predbat import PredBat
 from tests.test_infra import TestHAInterface
@@ -649,6 +650,8 @@ def main():
     parser.add_argument("--keyword", "-k", action="store", help="Run tests matching keyword pattern (e.g., -k carbon_ runs all carbon tests)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available tests")
     parser.add_argument("--quick", "-q", action="store_true", help="Skip slow tests (optimise_levels, optimise_windows, debug_cases)")
+    parser.add_argument("--isolate", action="store_true", help="Run every test against a freshly created PredBat instance, to find tests that only pass in suite order")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failing test instead of running the rest")
     parser.add_argument("--random-generate", action="store_true", help="Generate random benchmark scenarios and write to a YAML file")
     parser.add_argument("--random-count", type=int, default=100, metavar="N", help="Number of random scenarios to generate (default: 100)")
     parser.add_argument("--random-seed", type=int, default=0, metavar="N", help="Starting random seed (default: 0)")
@@ -751,10 +754,11 @@ def main():
         # Run all tests from the registry
         tests_to_run = TEST_REGISTRY
 
-    print(f"**** Running {len(tests_to_run)} test(s) ****")
+    print(f"**** Running {len(tests_to_run)} test(s){' isolated' if args.isolate else ''} ****")
     # Single loop to run all collected tests
     total_time = 0
     skipped_count = 0
+    failures = []
     for name, func, desc, slow in tests_to_run:
         if args.quick and slow:
             print(f"**** Skipping: {name} (slow) ****")
@@ -764,8 +768,20 @@ def main():
         # Show descriptive message for keyword/specific tests, simple for full suite
         print(f"**** Running: {name} - {desc} ****")
 
+        # Under --isolate each test gets its own instance, so a test that only passes because an
+        # earlier one left the right state behind fails here instead of years later when someone
+        # reorders the registry
+        instance = create_predbat() if args.isolate else my_predbat
+
         start_time = time.time()
-        test_failed = func(my_predbat)
+        try:
+            test_failed = func(instance)
+        except Exception:
+            # Report and carry on rather than abandoning the run: one test raising used to hide the
+            # state of every test after it
+            traceback.print_exc()
+            print(f"**** {name}: raised an exception ****")
+            test_failed = True
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -775,7 +791,10 @@ def main():
             else:
                 print(f"**** {name}: FAILED in {elapsed:.2f}s ****")
             failed = True
-            break
+            failures.append(name)
+            if args.fail_fast:
+                print("**** Stopping at the first failure (--fail-fast) ****")
+                break
         else:
             if args.keyword or args.test:
                 print(f"**** Test {name} PASSED in {elapsed:.2f}s ****")
@@ -784,7 +803,11 @@ def main():
 
     # Report results
     if failed:
-        print(f"**** ERROR: Some tests failed (total time: {total_time:.2f}s) ****")
+        print(f"**** ERROR: {len(failures)} test(s) failed (total time: {total_time:.2f}s): {', '.join(failures)} ****")
+        if len(failures) > 1 and not args.isolate:
+            # Every test shares one PredBat instance, so a failure can leave state behind that
+            # fails the tests after it. --isolate tells the two apart.
+            print("**** Note: tests share one PredBat instance, so later failures may be knock-on effects. Re-run with --isolate to tell genuine failures from knock-on ones. ****")
         sys.exit(1)
 
     if skipped_count > 0:

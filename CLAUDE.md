@@ -38,6 +38,12 @@ source setup.csh
 # List all available test names:
 ./run_all --list
 
+# Stop at the first failure (the runner otherwise reports every failing test):
+./run_all --fail-fast
+
+# Give each test a fresh PredBat instance, to find tests coupled to suite order:
+./run_all --quick --isolate
+
 # Coverage analysis:
 ./run_cov --quick
 # Then open htmlcov/index.html
