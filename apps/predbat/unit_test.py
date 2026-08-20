@@ -106,6 +106,8 @@ from tests.test_web_annual import (
     test_web_annual_plan_route,
     test_web_annual_post_numeric_coercion,
     test_web_annual_results,
+    test_web_annual_heat,
+    test_web_annual_predheat_prefill,
     test_web_annual_routes,
     test_web_annual_routes_registered,
     test_web_annual_run_refuses_while_running,
@@ -237,7 +239,8 @@ from tests.test_annual_bootstrap import test_annual_bootstrap
 from tests.test_annual_sampling import test_annual_sampling
 from tests.test_annual_scenarios import test_annual_scenarios
 from tests.test_annual_results import test_annual_results
-from tests.test_annual_integration import test_annual_integration
+from tests.test_annual_integration import test_annual_integration, test_annual_heat_integration
+from tests.test_annual_heat import test_annual_heat
 from tests.test_annual_cli import test_annual_cli, test_annual_cli_machine, test_annual_cli_machine_end_to_end
 from tests.test_annual_job import test_annual_job
 from tests.test_tariff_catalogue import test_tariff_catalogue
@@ -305,6 +308,16 @@ def run_annual_integration_isolated(my_predbat):
     the kind of coupling a test suite should not have.
     """
     return test_annual_integration(create_predbat())
+
+
+def run_annual_heat_integration_isolated(my_predbat):
+    """Run the annual heat pump integration test against a freshly created instance.
+
+    Isolated for the same reason as run_annual_integration_isolated: it plans a year of sampled days
+    and never sets up the state it depends on, so run against the shared instance it inherits whatever
+    ambient state happens to be there.
+    """
+    return test_annual_heat_integration(create_predbat())
 
 
 def run_window_cache_tests_isolated(my_predbat):
@@ -424,6 +437,8 @@ def main():
         ("web_annual_form", test_web_annual_form, "Annual web tab form tests", False),
         ("web_annual_routes", test_web_annual_routes, "Annual web tab route tests", False),
         ("web_annual_results", test_web_annual_results, "Annual web tab results tests", False),
+        ("web_annual_heat", test_web_annual_heat, "Annual web tab heat pump / gas heating section tests", False),
+        ("web_annual_predheat_prefill", test_web_annual_predheat_prefill, "Annual web tab Predheat prefill tests", False),
         ("web_annual_terminal_state", test_web_annual_terminal_state, "Annual web tab terminal-state claim/no-redirect-loop tests", False),
         ("web_annual_error_isolation", test_web_annual_error_isolation, "Annual web tab per-request error isolation tests", False),
         ("web_annual_routes_registered", test_web_annual_routes_registered, "Annual web tab route registration test", False),
@@ -591,6 +606,7 @@ def main():
         ("annual_job", test_annual_job, "Annual subprocess job control tests", False),
         ("annual_store", test_annual_store, "Annual run store tests", False),
         ("annual_costs", test_annual_costs, "Annual install cost and payback model tests", False),
+        ("annual_heat", test_annual_heat, "Annual prediction heat pump / gas boiler model tests", False),
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
         ("predheat", test_predheat, "PredHeat heat pump/gas prediction tests (tables, physics loop, scheduling)", False),
         ("web_mcp", test_web_mcp, "MCP server tests (OAuth flow, JWT tokens, PKCE, endpoint auth, tool dispatch)", False),
@@ -599,6 +615,7 @@ def main():
         ("update_time", test_update_time, "update_time clock frame tests (naive/aware agreement, manual slot round trip)", False),
         ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
         ("annual_integration", run_annual_integration_isolated, "Annual prediction integration tests", True),
+        ("annual_heat_integration", run_annual_heat_integration_isolated, "Annual prediction heat pump integration tests", True),
         ("load_ml", test_load_ml, "ML Load Forecaster tests (MLP, training, persistence, validation)", True),
         # ML training memory: dataset construction, normalisation dtype and statistics accuracy
         ("ml_memory", run_ml_memory_tests, "ML training memory tests", False),
