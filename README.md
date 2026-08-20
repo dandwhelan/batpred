@@ -6,7 +6,7 @@
 
 ## About this fork
 
-This is a personal fork of [springfall2008/batpred](https://github.com/springfall2008/batpred) with the following additions on top of upstream (currently based on upstream v8.46.4):
+This is a personal fork of [springfall2008/batpred](https://github.com/springfall2008/batpred) with the following additions on top of upstream (currently based on upstream v8.49.0):
 
 ### Feed-in Tariff (FIT) support
 
