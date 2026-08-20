@@ -252,6 +252,7 @@ from tests.test_web_mcp import test_web_mcp
 from tests.test_fetch_sensor_data import test_fetch_sensor_data
 from tests.test_update_time import test_update_time
 from tests.test_update_pred import run_update_pred_tests
+from tests.test_inverter_matrix import run_inverter_matrix_tests
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
 
@@ -363,6 +364,7 @@ def main():
         ("round_py_parity", run_round_py_parity_tests, "Kernel round_py vs CPython round() parity tests", False),
         ("prediction_batch", run_prediction_batch_tests, "Batched prediction fan-out tests", False),
         ("inverter", run_inverter_tests, "Inverter tests", False),
+        ("inverter_matrix", run_inverter_matrix_tests, "Inverter capability matrix tests (every INVERTER_DEF profile, SoC-target emulation, pause mode, REST writers)", False),
         ("execute", run_execute_tests, "Execute tests", False),
         ("multi_inverter_status", test_multi_inverter_status, "Multi-inverter headline status resolution tests (#4446)", False),
         ("load_car_energy", test_load_car_energy_warns_when_configured_entity_has_no_data, "car_charging_energy configured-but-empty warning tests (#4458 follow-up)", False),
