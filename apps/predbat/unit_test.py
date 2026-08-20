@@ -13,6 +13,7 @@ import time
 import sys
 import glob
 import argparse
+import traceback
 
 from predbat import PredBat
 from tests.test_infra import TestHAInterface
@@ -251,6 +252,12 @@ from tests.test_predheat import test_predheat
 from tests.test_web_mcp import test_web_mcp
 from tests.test_fetch_sensor_data import test_fetch_sensor_data
 from tests.test_update_time import test_update_time
+from tests.test_update_pred import run_update_pred_tests
+from tests.test_inverter_matrix import run_inverter_matrix_tests
+from tests.test_web_get_chart import run_web_get_chart_tests
+from tests.test_stromligning import run_stromligning_tests
+from tests.test_plugin_system import run_plugin_system_tests
+from tests.test_annual_http import test_annual_http
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
 
@@ -362,6 +369,7 @@ def main():
         ("round_py_parity", run_round_py_parity_tests, "Kernel round_py vs CPython round() parity tests", False),
         ("prediction_batch", run_prediction_batch_tests, "Batched prediction fan-out tests", False),
         ("inverter", run_inverter_tests, "Inverter tests", False),
+        ("inverter_matrix", run_inverter_matrix_tests, "Inverter capability matrix tests (every INVERTER_DEF profile, SoC-target emulation, pause mode, REST writers)", False),
         ("execute", run_execute_tests, "Execute tests", False),
         ("multi_inverter_status", test_multi_inverter_status, "Multi-inverter headline status resolution tests (#4446)", False),
         ("load_car_energy", test_load_car_energy_warns_when_configured_entity_has_no_data, "car_charging_energy configured-but-empty warning tests (#4458 follow-up)", False),
@@ -421,6 +429,7 @@ def main():
         ("add_now_to_octopus_slot", test_add_now_to_octopus_slot, "Add now to Octopus slot tests", False),
         ("octopus_slots_change", test_octopus_slots_change, "Octopus slots change-detection signature tests (in-progress re-clock vs genuine change)", False),
         ("plugin_startup", test_plugin_startup_order, "Plugin startup order tests", False),
+        ("plugin_system", run_plugin_system_tests, "Plugin discovery and hook tests (class-name, marker and function strategies, failure containment)", False),
         ("active_flag", test_active_flag, "Active flag cleared on exception tests", False),
         ("component_health_status", test_component_health_status, "Component errors fail the recorded run status tests", False),
         ("dynamic_load_car", test_dynamic_load_car_slot_cancellation, "Dynamic load car slot cancellation tests", False),
@@ -451,6 +460,7 @@ def main():
         ("web_annual_pages", test_web_annual_pages, "Annual web tab config/viewer/compare page split and nav tests", False),
         ("web_history_table", run_web_history_table_tests, "Web /entity history table bucketing tests", False),
         ("web_charts", run_web_charts_tests, "Web chart rendering tests (percent/special-character units)", False),
+        ("web_get_chart", run_web_get_chart_tests, "get_chart series assembly tests (every chart tab, empty data, unknown chart)", False),
         ("web_chart_grouping", run_web_chart_grouping_tests, "Web /entity chart numeric vs timeline grouping tests", False),
         ("web_entity_unit_resolution", run_web_entity_unit_resolution_tests, "Web /entity chart unit/name resolution tests", False),
         ("nordpool", run_nordpool_test, "Nordpool tests", False),
@@ -468,6 +478,7 @@ def main():
         ("find_charge_curve", run_find_charge_curve_tests, "Find charge curve tests", False),
         ("find_battery_size", run_find_battery_size_tests, "Find battery size tests", False),
         ("energydataservice", run_energydataservice_tests, "Energy data service tests", False),
+        ("stromligning", run_stromligning_tests, "Strømligning rate provider tests (15-minute intervals, unit scaling, bad timestamps)", False),
         ("saving_session", test_saving_session, "Saving session tests", False),
         ("saving_session_null", test_saving_session_null_octopoints, "Saving session null octopoints test (issue #3079)", False),
         ("saving_session_notify", test_saving_session_notify_config, "Saving session notification config tests", False),
@@ -608,6 +619,7 @@ def main():
         ("annual_cli_machine_end_to_end", test_annual_cli_machine_end_to_end, "Annual CLI machine mode end-to-end tests", False),
         ("annual_job", test_annual_job, "Annual subprocess job control tests", False),
         ("annual_store", test_annual_store, "Annual run store tests", False),
+        ("annual_http", test_annual_http, "Annual shared JSON-over-HTTP helper tests (statuses, transport failures, session reuse)", False),
         ("annual_costs", test_annual_costs, "Annual install cost and payback model tests", False),
         ("annual_heat", test_annual_heat, "Annual prediction heat pump / gas boiler model tests", False),
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
@@ -616,6 +628,7 @@ def main():
         ("web_apps_post", test_web_apps_post, "apps.yaml web write handler tests (paths, type coercion, rejections)", False),
         ("output_publish", test_output_publish, "output.py publishing tests (today_cost, rate windows, car plan, export limit)", False),
         ("update_time", test_update_time, "update_time clock frame tests (naive/aware agreement, manual slot round trip)", False),
+        ("update_pred", run_update_pred_tests, "update_pred main-loop and lifecycle tests (stage order, early returns, recompute decisions, watchdog)", False),
         ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
         ("annual_integration", run_annual_integration_isolated, "Annual prediction integration tests", True),
         ("annual_heat_integration", run_annual_heat_integration_isolated, "Annual prediction heat pump integration tests", True),
@@ -637,6 +650,8 @@ def main():
     parser.add_argument("--keyword", "-k", action="store", help="Run tests matching keyword pattern (e.g., -k carbon_ runs all carbon tests)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available tests")
     parser.add_argument("--quick", "-q", action="store_true", help="Skip slow tests (optimise_levels, optimise_windows, debug_cases)")
+    parser.add_argument("--isolate", action="store_true", help="Run every test against a freshly created PredBat instance, to find tests that only pass in suite order")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failing test instead of running the rest")
     parser.add_argument("--random-generate", action="store_true", help="Generate random benchmark scenarios and write to a YAML file")
     parser.add_argument("--random-count", type=int, default=100, metavar="N", help="Number of random scenarios to generate (default: 100)")
     parser.add_argument("--random-seed", type=int, default=0, metavar="N", help="Starting random seed (default: 0)")
@@ -739,10 +754,11 @@ def main():
         # Run all tests from the registry
         tests_to_run = TEST_REGISTRY
 
-    print(f"**** Running {len(tests_to_run)} test(s) ****")
+    print(f"**** Running {len(tests_to_run)} test(s){' isolated' if args.isolate else ''} ****")
     # Single loop to run all collected tests
     total_time = 0
     skipped_count = 0
+    failures = []
     for name, func, desc, slow in tests_to_run:
         if args.quick and slow:
             print(f"**** Skipping: {name} (slow) ****")
@@ -752,8 +768,20 @@ def main():
         # Show descriptive message for keyword/specific tests, simple for full suite
         print(f"**** Running: {name} - {desc} ****")
 
+        # Under --isolate each test gets its own instance, so a test that only passes because an
+        # earlier one left the right state behind fails here instead of years later when someone
+        # reorders the registry
+        instance = create_predbat() if args.isolate else my_predbat
+
         start_time = time.time()
-        test_failed = func(my_predbat)
+        try:
+            test_failed = func(instance)
+        except Exception:
+            # Report and carry on rather than abandoning the run: one test raising used to hide the
+            # state of every test after it
+            traceback.print_exc()
+            print(f"**** {name}: raised an exception ****")
+            test_failed = True
         elapsed = time.time() - start_time
         total_time += elapsed
 
@@ -763,7 +791,10 @@ def main():
             else:
                 print(f"**** {name}: FAILED in {elapsed:.2f}s ****")
             failed = True
-            break
+            failures.append(name)
+            if args.fail_fast:
+                print("**** Stopping at the first failure (--fail-fast) ****")
+                break
         else:
             if args.keyword or args.test:
                 print(f"**** Test {name} PASSED in {elapsed:.2f}s ****")
@@ -772,7 +803,11 @@ def main():
 
     # Report results
     if failed:
-        print(f"**** ERROR: Some tests failed (total time: {total_time:.2f}s) ****")
+        print(f"**** ERROR: {len(failures)} test(s) failed (total time: {total_time:.2f}s): {', '.join(failures)} ****")
+        if len(failures) > 1 and not args.isolate:
+            # Every test shares one PredBat instance, so a failure can leave state behind that
+            # fails the tests after it. --isolate tells the two apart.
+            print("**** Note: tests share one PredBat instance, so later failures may be knock-on effects. Re-run with --isolate to tell genuine failures from knock-on ones. ****")
         sys.exit(1)
 
     if skipped_count > 0:
