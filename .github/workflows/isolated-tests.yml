@@ -1,0 +1,37 @@
+name: isolated tests
+on:
+  schedule:
+    # Nightly, at a minute nobody else picked
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  isolate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v4
+      with:
+        python-version: 3.x
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Build prediction kernel
+      run: bash apps/predbat/build_kernel.sh
+
+    # Every test is normally handed the same PredBat instance, so a test can pass only because
+    # an earlier one left the right state behind - and three tests have already had to opt out
+    # into their own instances after exactly that. --isolate builds a fresh one per test, which
+    # is where the coupling shows up.
+    #
+    # Nightly rather than per-PR: it is a property of the suite rather than of any one change,
+    # and a failure here means a test to fix rather than a change to block. The slow tests are
+    # skipped because the three that matter already build their own instances; they run on
+    # every pull request in code-quality.yml.
+    - name: Run the suite with every test isolated
+      env:
+        PREDBAT_KERNEL_REQUIRED: "1"
+      run: |
+        cd coverage
+        python3 ../apps/predbat/unit_test.py --quick --isolate
