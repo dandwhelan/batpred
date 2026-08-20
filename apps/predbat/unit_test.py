@@ -251,6 +251,7 @@ from tests.test_predheat import test_predheat
 from tests.test_web_mcp import test_web_mcp
 from tests.test_fetch_sensor_data import test_fetch_sensor_data
 from tests.test_update_time import test_update_time
+from tests.test_update_pred import run_update_pred_tests
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
 
@@ -616,6 +617,7 @@ def main():
         ("web_apps_post", test_web_apps_post, "apps.yaml web write handler tests (paths, type coercion, rejections)", False),
         ("output_publish", test_output_publish, "output.py publishing tests (today_cost, rate windows, car plan, export limit)", False),
         ("update_time", test_update_time, "update_time clock frame tests (naive/aware agreement, manual slot round trip)", False),
+        ("update_pred", run_update_pred_tests, "update_pred main-loop and lifecycle tests (stage order, early returns, recompute decisions, watchdog)", False),
         ("fetch_sensor_data", test_fetch_sensor_data, "fetch_sensor_data tests (history ingest, rates, cost so far, keep floors)", False),
         ("annual_integration", run_annual_integration_isolated, "Annual prediction integration tests", True),
         ("annual_heat_integration", run_annual_heat_integration_isolated, "Annual prediction heat pump integration tests", True),
