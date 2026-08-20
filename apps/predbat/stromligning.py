@@ -56,8 +56,13 @@ class Stromligning:
                 scale = 100.0
 
         if data_all:
-            # Sort to be safe
-            data_all.sort(key=lambda e: self._parse_iso(e.get("start")) or datetime.min)
+            # Sort to be safe. Sorting on the parsed datetimes themselves cannot be done: an entry
+            # whose start is missing or unparseable falls back to a value of a different kind, and
+            # comparing a naive datetime with the timezone-aware ones a real feed produces raises
+            # TypeError - so one malformed interval took the whole tariff down with it. Sort on a
+            # (has_start, epoch) tuple instead, which orders the unparseable entries first and
+            # leaves them to be dropped by the per-entry check in _minute_data_stromligning_rates.
+            data_all.sort(key=self._sort_key)
 
             # Build per-minute map with 15-minute windows
             rate_data = self._minute_data_stromligning_rates(
@@ -121,6 +126,13 @@ class Stromligning:
         return rate_data
 
     # ---------- helpers ----------
+
+    def _sort_key(self, entry):
+        """Return a sort key for one price entry that never compares naive and aware datetimes."""
+        parsed = self._parse_iso(entry.get("start"))
+        if parsed is None:
+            return (0, 0.0)
+        return (1, parsed.timestamp())
 
     def _parse_iso(self, s):
         """Parse ISO format timestamp string."""

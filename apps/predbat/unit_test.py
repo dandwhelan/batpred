@@ -254,6 +254,9 @@ from tests.test_update_time import test_update_time
 from tests.test_update_pred import run_update_pred_tests
 from tests.test_inverter_matrix import run_inverter_matrix_tests
 from tests.test_web_get_chart import run_web_get_chart_tests
+from tests.test_stromligning import run_stromligning_tests
+from tests.test_plugin_system import run_plugin_system_tests
+from tests.test_annual_http import test_annual_http
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
 
@@ -425,6 +428,7 @@ def main():
         ("add_now_to_octopus_slot", test_add_now_to_octopus_slot, "Add now to Octopus slot tests", False),
         ("octopus_slots_change", test_octopus_slots_change, "Octopus slots change-detection signature tests (in-progress re-clock vs genuine change)", False),
         ("plugin_startup", test_plugin_startup_order, "Plugin startup order tests", False),
+        ("plugin_system", run_plugin_system_tests, "Plugin discovery and hook tests (class-name, marker and function strategies, failure containment)", False),
         ("active_flag", test_active_flag, "Active flag cleared on exception tests", False),
         ("component_health_status", test_component_health_status, "Component errors fail the recorded run status tests", False),
         ("dynamic_load_car", test_dynamic_load_car_slot_cancellation, "Dynamic load car slot cancellation tests", False),
@@ -473,6 +477,7 @@ def main():
         ("find_charge_curve", run_find_charge_curve_tests, "Find charge curve tests", False),
         ("find_battery_size", run_find_battery_size_tests, "Find battery size tests", False),
         ("energydataservice", run_energydataservice_tests, "Energy data service tests", False),
+        ("stromligning", run_stromligning_tests, "Strømligning rate provider tests (15-minute intervals, unit scaling, bad timestamps)", False),
         ("saving_session", test_saving_session, "Saving session tests", False),
         ("saving_session_null", test_saving_session_null_octopoints, "Saving session null octopoints test (issue #3079)", False),
         ("saving_session_notify", test_saving_session_notify_config, "Saving session notification config tests", False),
@@ -613,6 +618,7 @@ def main():
         ("annual_cli_machine_end_to_end", test_annual_cli_machine_end_to_end, "Annual CLI machine mode end-to-end tests", False),
         ("annual_job", test_annual_job, "Annual subprocess job control tests", False),
         ("annual_store", test_annual_store, "Annual run store tests", False),
+        ("annual_http", test_annual_http, "Annual shared JSON-over-HTTP helper tests (statuses, transport failures, session reuse)", False),
         ("annual_costs", test_annual_costs, "Annual install cost and payback model tests", False),
         ("annual_heat", test_annual_heat, "Annual prediction heat pump / gas boiler model tests", False),
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
