@@ -1181,6 +1181,69 @@ class Fetch:
                 self.log("Car {} charging is exclusive, will not plan other cars".format(car_n))
                 break
 
+    def car_charging_soc_age_minutes(self, car_n):
+        """
+        Age in minutes of car car_n's SoC sensor reading, or None if it cannot be determined.
+
+        Uses the raw state record so the sensor's own last_updated is read rather than the time
+        Predbat happened to look at it.
+        """
+        entity_id = self.get_arg("car_charging_soc", indirect=False, index=car_n)
+        if not entity_id or not isinstance(entity_id, str):
+            return None
+        # An attribute-qualified entity (entity$attribute) still ages as its parent entity
+        entity_id = entity_id.split("$")[0]
+        record = self.get_state_wrapper(entity_id, raw=True)
+        if not isinstance(record, dict):
+            return None
+        last_updated = record.get("last_updated", None)
+        if not last_updated:
+            return None
+        try:
+            stamp = str2time(last_updated)
+        except (ValueError, TypeError):
+            return None
+        return max(0, int((self.now_utc - stamp).total_seconds() / 60))
+
+    def car_charging_soc_read(self, car_n, max_age):
+        """
+        Read car car_n's SoC as a percentage, treating a frozen sensor as unknown.
+
+        A plugged-in car whose SoC sensor has stopped updating is the dangerous case, because the
+        frozen reading tends to sit just under the charge limit - the value it reached when the
+        sensor last worked. Predbat then plans ~0 kWh of car charging, so the real overnight load
+        vanishes from the plan and the car-charging battery hold in execute.py never fires (it
+        needs a slot with kwh > 0). Both were observed together: a battery that stopped short of
+        its charge target because the optimiser saw no overnight load to save it for.
+
+        There is no way to recover the true SoC, so when the reading is not trustworthy we assume
+        the car is empty. That errs towards planning the charge and holding the battery, which is
+        the recoverable direction - over-planning car charging costs some cheap-rate allocation,
+        under-planning it drains the house battery into the car at a loss.
+
+        Staleness alone is not a fault: an unplugged car that has gone to sleep legitimately stops
+        reporting for days, so only a car that car_charging_planned says is plugged in is checked.
+        max_age of 0 disables the check entirely, which is the default.
+        """
+        soc_percent = self.get_arg("car_charging_soc", 0.0, index=car_n)
+        if car_n < len(self.car_charging_soc_stale):
+            self.car_charging_soc_stale[car_n] = False
+
+        # car_charging_planned is sized to num_cars by get_car_charging_planned() earlier in the
+        # same cycle; the bounds check is only so an out-of-step caller cannot raise here
+        plugged_in = self.car_charging_planned[car_n] if car_n < len(self.car_charging_planned) else False
+        if max_age <= 0 or not plugged_in:
+            return soc_percent
+
+        age = self.car_charging_soc_age_minutes(car_n)
+        if age is None or age <= max_age:
+            return soc_percent
+
+        if car_n < len(self.car_charging_soc_stale):
+            self.car_charging_soc_stale[car_n] = True
+        self.log("Warn: Car {} SoC sensor last updated {} minutes ago (limit car_charging_soc_max_age {}) while plugged in - ignoring the reading of {}% and assuming a charge is needed".format(car_n, age, max_age, soc_percent))
+        return 0.0
+
     def fetch_sensor_data_cars(self):
         """
         Fetch car specific data such as Octopus intelligent slots and vehicle data if we can get it, and calculate current SoC and limits based on that
@@ -1193,12 +1256,14 @@ class Fetch:
         # Values will be recalculated per-car after car_charging_battery_size is updated from Octopus sensor data.
         self.car_charging_soc = [0.0 for car_n in range(self.num_cars)]
         self.car_charging_soc_next = [None for car_n in range(self.num_cars)]
+        self.car_charging_soc_stale = [False for car_n in range(self.num_cars)]
+        car_charging_soc_max_age = self.get_arg("car_charging_soc_max_age", 0)
         for car_n in range(self.num_cars):
             if car_n < len(self.car_charging_manual_soc) and self.car_charging_manual_soc[car_n]:
                 car_postfix = "" if car_n == 0 else "_" + str(car_n)
                 self.car_charging_soc[car_n] = self.get_arg("car_charging_manual_soc_kwh" + car_postfix, 0.0)
             else:
-                self.car_charging_soc[car_n] = (self.get_arg("car_charging_soc", 0.0, index=car_n) * self.car_charging_battery_size[car_n]) / 100.0
+                self.car_charging_soc[car_n] = (self.car_charging_soc_read(car_n, car_charging_soc_max_age) * self.car_charging_battery_size[car_n]) / 100.0
 
         # Get octopus intelligent slot configuration - could be single value or list for multiple cars
         entity_id_config = self.get_arg("octopus_intelligent_slot", indirect=False)
@@ -1257,9 +1322,12 @@ class Fetch:
                     rate = None
                 if size:
                     self.car_charging_battery_size[car_n] = size
-                    # Recalculate car SoC now that battery size has been updated from Octopus data
+                    # Recalculate car SoC now that battery size has been updated from Octopus data.
+                    # A SoC already judged stale above stays at 0 - re-reading the sensor here would
+                    # silently reinstate the frozen percentage against the new battery size.
                     if car_n < len(self.car_charging_manual_soc) and not self.car_charging_manual_soc[car_n]:
-                        self.car_charging_soc[car_n] = (self.get_arg("car_charging_soc", 0.0, index=car_n) * self.car_charging_battery_size[car_n]) / 100.0
+                        soc_percent = 0.0 if self.car_charging_soc_stale[car_n] else self.get_arg("car_charging_soc", 0.0, index=car_n)
+                        self.car_charging_soc[car_n] = (soc_percent * self.car_charging_battery_size[car_n]) / 100.0
                 if rate:
                     # Take the max as Octopus over reports
                     self.log("Car {} rate from Octopus is {}kW and configured rate {}".format(car_n, rate, self.car_charging_rate[car_n]))
