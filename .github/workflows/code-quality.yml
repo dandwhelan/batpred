@@ -44,9 +44,9 @@ jobs:
           --test annual_heat_integration
 
     # Coverage floor, not a target - it only ever ratchets upwards. Both runs above are
-    # combined first, so this measures the whole suite rather than quick mode alone. The
-    # floor sits just under what the suite currently measures, to leave room for ordinary
-    # churn; raise it as coverage improves.
+    # combined first, so this measures the whole suite rather than quick mode alone, which
+    # currently comes to 86.6%. The floor sits under that to leave room for ordinary churn;
+    # raise it as coverage improves.
     - name: Check coverage has not regressed
       env:
         MIN_COVERAGE: "85"
