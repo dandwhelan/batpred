@@ -31,17 +31,11 @@ from const import PREDICT_STEP, PREDBAT_MAX_CARS
 from utils import get_curve_value, find_battery_temperature_cap, in_car_slot, in_iboost_slot
 
 # Expected ABI/parity revisions of the shared library (see prediction_kernel.cpp)
-# Bumped past this fork's previous 103/104 on the merge of upstream v8.48.4. Upstream added the
-# batch entry point and its PkBatchJob/PkBatchResult structs, raised PK_MAX_CARS from 4 to 8 and
-# made the SoC output buffer optional; this fork carries the FIT tariff fields in the context and
-# folds FIT income into the metric inside the hot loop. Both sides therefore changed the struct
-# layouts and the hot loop, so every binary built before this merge - this fork's own 103 and
-# upstream's 4 alike - must be rejected at load time rather than trusted.
-#
-# The fork deliberately keeps these strictly above upstream's small integers (currently 4/6) so a
-# fork binary can never be mistaken for an upstream one, or vice versa.
-KERNEL_ABI_VERSION = 105
-KERNEL_PARITY_REVISION = 106
+# This fork previously carried FIT tariff fields in PkContext (ABI 103-105) - dropped on the
+# 2026-08-24 upstream merge along with the rest of the FIT feature, so the fork is back on
+# upstream's plain ABI numbering instead of staying artificially ahead of it. See prediction_kernel.cpp.
+KERNEL_ABI_VERSION = 5
+KERNEL_PARITY_REVISION = 9
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = PREDBAT_MAX_CARS
@@ -87,6 +81,7 @@ class PkContext(ctypes.Structure):
         ("battery_loss", ctypes.c_double),
         ("battery_loss_discharge", ctypes.c_double),
         ("inverter_loss", ctypes.c_double),
+        ("inverter_freeze_export_discharge_rate", ctypes.c_double),
         ("inverter_limit", ctypes.c_double),
         ("export_limit", ctypes.c_double),
         ("pv_ac_limit", ctypes.c_double),
@@ -114,9 +109,6 @@ class PkContext(ctypes.Structure):
         ("iboost_min_soc", ctypes.c_double),
         ("iboost_rate_threshold", ctypes.c_double),
         ("iboost_rate_threshold_export", ctypes.c_double),
-        ("fit_generation_rate", ctypes.c_double),
-        ("fit_deemed_export_rate", ctypes.c_double),
-        ("fit_deemed_export_percentage", ctypes.c_double),
         ("n_steps", ctypes.c_int32),
         ("minutes_now", ctypes.c_int32),
         ("forecast_minutes", ctypes.c_int32),
@@ -674,6 +666,7 @@ def create_kernel_context(pred, static_cache=None):
         ctx.battery_loss = pred.battery_loss
         ctx.battery_loss_discharge = pred.battery_loss_discharge
         ctx.inverter_loss = pred.inverter_loss
+        ctx.inverter_freeze_export_discharge_rate = pred.inverter_freeze_export_discharge_rate
         ctx.inverter_limit = pred.inverter_limit
         ctx.export_limit = pred.export_limit
         ctx.pv_ac_limit = pred.pv_ac_limit
@@ -702,9 +695,6 @@ def create_kernel_context(pred, static_cache=None):
         ctx.iboost_min_soc = pred.iboost_min_soc
         ctx.iboost_rate_threshold = pred.iboost_rate_threshold
         ctx.iboost_rate_threshold_export = pred.iboost_rate_threshold_export
-        ctx.fit_generation_rate = float(pred.metric_fit_generation_rate)
-        ctx.fit_deemed_export_rate = float(pred.metric_fit_deemed_export_rate)
-        ctx.fit_deemed_export_percentage = float(pred.metric_fit_deemed_export_percentage)
 
         ctx.n_steps = n_steps
         ctx.minutes_now = minutes_now

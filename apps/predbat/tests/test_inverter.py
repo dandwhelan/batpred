@@ -25,14 +25,15 @@ def test_foxess_support_discharge_freeze_matches_foxcloud():
     """
     FoxESS (modbus) and FoxCloud are the same hardware via two different connection methods - "feed-in
     first"/freeze export does not hold SoC flat on either, PV above the export limit still charges the
-    battery instead of being clipped (#4207). FoxCloud's entry was already correctly False; FoxESS's was
-    left True, so execute.py's fetch_inverter_data() never disabled set_export_freeze/set_export_freeze_only
-    for modbus users, letting the planner offer a freeze option that couldn't actually do anything on the
-    real inverter.
+    battery instead of being clipped (#4207). Both are now True: that spillover-charges-the-battery
+    behaviour is correctly modelled (prediction.py's freeze branch, gated on
+    inverter_can_charge_during_export) rather than being a reason to disable freeze outright for this
+    hardware - see test_freeze_export_recapture_beyond_limit in test_optimise_solar.py for the modelling
+    itself.
     """
     failed = False
-    if INVERTER_DEF["FoxESS"]["support_discharge_freeze"] is not False:
-        print("ERROR: FoxESS support_discharge_freeze should be False, got {}".format(INVERTER_DEF["FoxESS"]["support_discharge_freeze"]))
+    if INVERTER_DEF["FoxESS"]["support_discharge_freeze"] is not True:
+        print("ERROR: FoxESS support_discharge_freeze should be True, got {}".format(INVERTER_DEF["FoxESS"]["support_discharge_freeze"]))
         failed = True
     if INVERTER_DEF["FoxESS"]["support_discharge_freeze"] != INVERTER_DEF["FoxCloud"]["support_discharge_freeze"]:
         print("ERROR: FoxESS support_discharge_freeze ({}) should match FoxCloud ({}) - same hardware, different connection method".format(INVERTER_DEF["FoxESS"]["support_discharge_freeze"], INVERTER_DEF["FoxCloud"]["support_discharge_freeze"]))
@@ -1307,10 +1308,15 @@ def test_call_adjust_export_immediate(test_name, my_predbat, ha, inv, dummy_item
     else:
         my_predbat.args["discharge_freeze_service"] = None
     my_predbat.args["device_id"] = "DID0"
-    power = int(inv.battery_rate_max_discharge * MINUTE_WATT)
+    my_predbat.args["discharge_rate"] = "number.discharge_rate"
+    if "discharge_rate_percent" in my_predbat.args:
+        del my_predbat.args["discharge_rate_percent"]
 
     dummy_items["select.discharge_start_time"] = discharge_start_time
     dummy_items["select.discharge_end_time"] = discharge_end_time
+    dummy_items["number.discharge_rate"] = 1802
+
+    power = 1802
 
     inv.adjust_export_immediate(soc, freeze=freeze)
     result = ha.get_service_store()
@@ -1492,7 +1498,7 @@ def test_charge_window_no_source_configured(test_name, my_predbat, dummy_items):
         print(f"ERROR: {test_name} - update_status should raise ValueError when no charge window source is configured at all")
         failed = True
     except ValueError as e:
-        if "neither REST, charge_start_time or charge_start_hour are set" not in str(e):
+        if "no source is configured" not in str(e):
             print(f"ERROR: {test_name} - ValueError message should explain the cause, got: {e}")
             failed = True
         if "Error: Inverter" not in my_predbat.current_status:
@@ -1564,6 +1570,72 @@ def test_charge_window_rest_configured_but_no_data_yet(test_name, my_predbat, du
     if original_charge_end_time is not None:
         my_predbat.args["charge_end_time"] = original_charge_end_time
 
+    return failed
+
+
+def test_charge_window_ge_cloud_configured_but_no_data_yet(test_name, my_predbat, dummy_items):
+    """
+    Test charge window handling when ge_cloud_direct is configured but the cloud hasn't returned
+    usable data. This is the same transient case as the givtcp_rest test above, reached the other
+    way round: ge_cloud_direct sets neither rest_api nor charge_start_time, because it
+    auto-configures the charge window at runtime from whatever device the cloud reports. Gating the
+    transient branch solely on rest_api therefore sent every cloud-backed instance whose fetch
+    failed into the permanent-setup-gap branch and raised, killing the plan for something outside
+    the user's apps.yaml entirely - observed live as HTTP 402 on a lapsed account, "no devices
+    found" on a stale credential, and a 401 after the user revoked their API key.
+    """
+    failed = False
+    print(f"**** Running Test: {test_name} ****")
+
+    inv = Inverter(my_predbat, 0)
+    inv.sleep = dummy_sleep
+    inv.inv_has_charge_enable_time = True
+    inv.rest_api = None
+    inv.rest_data = None
+
+    original_charge_start_time = my_predbat.args.pop("charge_start_time", None)
+    original_charge_end_time = my_predbat.args.pop("charge_end_time", None)
+    original_ge_cloud_direct = my_predbat.args.get("ge_cloud_direct", None)
+    my_predbat.args["ge_cloud_direct"] = True
+    dummy_items["switch.scheduled_charge_enable"] = "on"
+
+    def restore():
+        """Restore the config this test mutated so later tests are unaffected."""
+        if original_charge_start_time is not None:
+            my_predbat.args["charge_start_time"] = original_charge_start_time
+        if original_charge_end_time is not None:
+            my_predbat.args["charge_end_time"] = original_charge_end_time
+        if original_ge_cloud_direct is None:
+            my_predbat.args.pop("ge_cloud_direct", None)
+        else:
+            my_predbat.args["ge_cloud_direct"] = original_ge_cloud_direct
+
+    try:
+        inv.update_status(my_predbat.minutes_now)
+    except ValueError as e:
+        print(f"ERROR: {test_name} - update_status should not raise while a configured GE Cloud source just hasn't returned data yet, got ValueError({e})")
+        restore()
+        return True
+
+    # Should set the same safe defaults as the REST case
+    if inv.charge_enable_time != False:
+        print(f"ERROR: {test_name} - charge_enable_time should be False, got {inv.charge_enable_time}")
+        failed = True
+    if inv.charge_start_time_minutes != my_predbat.forecast_minutes:
+        print(f"ERROR: {test_name} - charge_start_time_minutes should be {my_predbat.forecast_minutes}, got {inv.charge_start_time_minutes}")
+        failed = True
+    if inv.charge_end_time_minutes != my_predbat.forecast_minutes:
+        print(f"ERROR: {test_name} - charge_end_time_minutes should be {my_predbat.forecast_minutes}, got {inv.charge_end_time_minutes}")
+        failed = True
+
+    # The retry warning is the message a user now actually sees for this failure, so it must name
+    # GE Cloud rather than blaming apps.yaml - that misdirection is what made three separate live
+    # incidents look identical.
+    if "GE Cloud" not in my_predbat.current_status:
+        print(f"ERROR: {test_name} - status should name GE Cloud as the source that returned no data, got: {my_predbat.current_status}")
+        failed = True
+
+    restore()
     return failed
 
 
@@ -3473,6 +3545,10 @@ charge_start_service:
         return failed
 
     failed |= test_charge_window_rest_configured_but_no_data_yet("charge_window_rest_configured_but_no_data_yet", my_predbat, dummy_items)
+    if failed:
+        return failed
+
+    failed |= test_charge_window_ge_cloud_configured_but_no_data_yet("charge_window_ge_cloud_configured_but_no_data_yet", my_predbat, dummy_items)
     if failed:
         return failed
 

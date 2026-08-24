@@ -1133,7 +1133,10 @@ class MCPServerWrapper:
             if not entity_id or value is None:
                 return {"success": False, "error": "Both 'entity_id' and 'value' must be provided", "data": None}
 
-            # Update the configuration setting
+            # Update the configuration setting. Goes through self.base.ha_interface rather than the
+            # ComponentBase.set_state_external shorthand: this method also runs with self bound to
+            # MCPServerWrapper (see test_web_mcp.py), which isn't a ComponentBase subclass but does
+            # share the same .base attribute.
             await self.base.ha_interface.set_state_external(entity_id, value)
 
             return {"success": True, "error": None, "data": {"entity_id": entity_id, "new_value": value}, "timestamp": datetime.now().isoformat(), "description": f"Configuration setting '{entity_id}' updated successfully"}

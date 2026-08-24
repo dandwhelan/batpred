@@ -33,7 +33,7 @@ import threading
 import time
 
 import prediction_kernel
-from const import PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90, PREDBAT_MAX_CARS
+from const import PV_SCENARIO_NOMINAL, PV_SCENARIO_PV10, PV_SCENARIO_PV90, MINUTE_WATT
 from prediction import Prediction
 from prediction_kernel import create_kernel_context, run_prediction_kernel, load_kernel
 from utils import remove_intersecting_windows
@@ -80,6 +80,7 @@ SCENARIO_STATE_ATTRS = [
     "battery_loss_discharge",
     "inverter_hybrid",
     "inverter_loss",
+    "inverter_freeze_export_discharge_rate",
     "inverter_limit",
     "export_limit",
     "pv_ac_limit",
@@ -132,9 +133,6 @@ SCENARIO_STATE_ATTRS = [
     "iboost_today",
     "rate_gas",
     "iboost_plan",
-    "metric_fit_generation_rate",
-    "metric_fit_deemed_export_rate",
-    "metric_fit_deemed_export_percentage",
     "end_record",
 ]
 
@@ -222,6 +220,8 @@ def apply_random_scenario(my_predbat, rng):
     my_predbat.set_reserve_enable = rng.choice([True, False])
     my_predbat.set_export_freeze = rng.choice([True, False])
     my_predbat.set_export_freeze_only = rng.choice([True, False, False, False])
+    # Exercise a non-zero value without consuming another RNG draw, preserving seeded scenarios.
+    my_predbat.inverter_freeze_export_discharge_rate = (240.0 / MINUTE_WATT) if my_predbat.set_export_freeze else 0.0
     my_predbat.set_charge_window = rng.choice([True, True, False])
     my_predbat.set_export_window = rng.choice([True, True, False])
     my_predbat.set_discharge_during_charge = rng.choice([True, False])
@@ -263,11 +263,6 @@ def apply_random_scenario(my_predbat, rng):
         for minute in range(start, start + 120):
             my_predbat.all_active_keep[minute] = rng.choice([20, 50, 100])
 
-    # FIT generation / deemed export tariffs
-    my_predbat.metric_fit_generation_rate = rng.choice([0.0, 0.0, round(rng.uniform(1, 60), 2)])
-    my_predbat.metric_fit_deemed_export_rate = rng.choice([0.0, 0.0, round(rng.uniform(1, 30), 2)])
-    my_predbat.metric_fit_deemed_export_percentage = rng.choice([0.0, 50.0, round(rng.uniform(10, 100), 1)])
-
     # Carbon intensity
     my_predbat.carbon_enable = rng.random() < 0.3
     my_predbat.carbon_intensity = {minute: round(rng.uniform(0, 400), 1) for minute in range(0, my_predbat.forecast_minutes, 5)} if my_predbat.carbon_enable else {}
@@ -278,12 +273,6 @@ def apply_random_scenario(my_predbat, rng):
     my_predbat.car_charging_loss = round(rng.uniform(0.85, 1.0), 3)
     my_predbat.car_energy_reported_load = rng.choice([True, False])
     my_predbat.car_charging_from_battery = rng.choice([True, False])
-    # The per-car lists are whatever the previous test left on the shared my_predbat, so a scenario
-    # drawing more cars than the last one wrote would assign past the end. Size them here rather
-    # than relying on test ordering - the loop below indexes all three by car_n.
-    my_predbat.car_charging_slots = [list(slots) for slots in my_predbat.car_charging_slots[:PREDBAT_MAX_CARS]] + [[] for _ in range(PREDBAT_MAX_CARS - len(my_predbat.car_charging_slots))]
-    my_predbat.car_charging_soc = list(my_predbat.car_charging_soc[:PREDBAT_MAX_CARS]) + [0.0] * (PREDBAT_MAX_CARS - len(my_predbat.car_charging_soc))
-    my_predbat.car_charging_limit = list(my_predbat.car_charging_limit[:PREDBAT_MAX_CARS]) + [100.0] * (PREDBAT_MAX_CARS - len(my_predbat.car_charging_limit))
     for car_n in range(my_predbat.num_cars):
         my_predbat.car_charging_soc[car_n] = round(rng.uniform(0, 30), 2)
         my_predbat.car_charging_limit[car_n] = round(rng.uniform(20, 80), 2)
@@ -490,21 +479,6 @@ def run_edge_case_tests(my_predbat):
         ("misaligned_window", {"soc_kw": 50.0}, [100.0], [{"start": minutes_now + 3, "end": minutes_now + 63, "average": 10}], [], [], 0, 0.5, forecast_minutes),
         ("no_discharge_during_charge", {"soc_kw": 50.0, "set_discharge_during_charge": False}, [50.0], half_window, [], [], 0, 1.0, forecast_minutes),
         ("cold_battery", {"battery_temperature": 2, "soc_kw": 20.0}, [100.0], half_window, [], [], 1.0, 1.0, forecast_minutes),
-        ("fit_generation", {"metric_fit_generation_rate": 25.0, "soc_kw": 20.0}, [], [], [], [], 2.0, 0.5, forecast_minutes),
-        ("fit_deemed_export", {"metric_fit_generation_rate": 25.0, "metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0}, [], [], half_window, [0.0], 2.0, 0.5, forecast_minutes),
-        ("fit_clipped_inverter", {"metric_fit_generation_rate": 25.0, "metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0, "inverter_limit": 0.5 / 60.0}, [], [], [], [], 3.0, 0.2, forecast_minutes),
-        ("fit_clipped_ac_limit", {"metric_fit_generation_rate": 25.0, "pv_ac_limit": 1 / 60.0}, [], [], [], [], 3.0, 0.2, forecast_minutes),
-        (
-            "fit_clipped_export_limit",
-            {"metric_fit_deemed_export_rate": 15.0, "metric_fit_deemed_export_percentage": 50.0, "soc_kw": 100.0, "export_limit": 0.5 / 60.0, "battery_rate_max_export": 2 / 60.0},
-            [],
-            [],
-            half_window,
-            [0.0],
-            2.0,
-            0.2,
-            forecast_minutes,
-        ),
         ("carbon", {"carbon_enable": True, "carbon_intensity": {minute: 100 + (minute % 60) for minute in range(0, forecast_minutes, 5)}, "carbon_today_sofar": 500.0, "soc_kw": 20.0}, [], [], [], [], 1.0, 1.0, forecast_minutes),
         (
             "car_charging",
@@ -1018,7 +992,7 @@ def run_batch_parity_tests(my_predbat, count=60):
         print("SKIP: kernel does not expose pk_run_batch")
         return False
 
-    prediction, jobs = build_batch_jobs(my_predbat, random.Random(4325), count)
+    prediction, jobs = build_batch_jobs(my_predbat, random.Random(4321), count)
     if not prediction.kernel_handle:
         print("ERROR: batch parity kernel context creation failed")
         return True
@@ -1030,15 +1004,9 @@ def run_batch_parity_tests(my_predbat, count=60):
     failed = False
     # The per-job car_charging_soc_next comparison in check_batch_results is only worth anything if
     # the kernel actually fills that field - otherwise both sides are the Prediction's own baseline
-    # copied through, and the comparison is two copies of the same list. Seed 4325 gives this
-    # scenario two cars; assert it rather than assume it, so changing the seed cannot silently hollow
-    # the comparison out.
-    #
-    # Upstream used 4321. This fork's apply_random_scenario draws the three FIT tariff values before
-    # it reaches the car block, which shifts the whole stream, and on the merge of v8.48.4 that moved
-    # 4321 onto a no-car draw - exactly the hollowing-out this assertion exists to catch. Re-picked
-    # rather than deleted; any future change to the draw order will trip it again and needs the same
-    # treatment, not a weakened assertion.
+    # copied through, and the comparison is two copies of the same list. Seed 4321 gives this
+    # scenario cars; assert it rather than assume it, so changing the seed cannot silently hollow the
+    # comparison out.
     if not prediction.num_cars:
         print("ERROR: batch parity scenario has no cars - the car_charging_soc_next comparison is vacuous")
         failed = True

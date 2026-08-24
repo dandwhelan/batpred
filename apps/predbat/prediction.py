@@ -18,7 +18,7 @@ plans and select the one with the lowest cost metric.
 """
 
 from datetime import timedelta
-from const import PREDICT_STEP, PV_SCENARIO_PV10, PV_SCENARIO_PV90, RUN_EVERY, TIME_FORMAT
+from const import PREDICT_STEP, PV_SCENARIO_PV10, PV_SCENARIO_PV90, RUN_EVERY, TIME_FORMAT, EXPORT_LIMIT_FREEZE, EXPORT_LIMIT_IDLE
 
 from utils import remove_intersecting_windows, get_charge_rate_curve_cached, get_discharge_rate_curve_cached, find_charge_rate, calc_percent_limit, in_iboost_slot, in_car_slot, charge_curve_to_tuple
 from prediction_batch import PredictionBatch, prediction_cache_key
@@ -128,6 +128,7 @@ class Prediction(PredictionBatch):
             self.iboost_rate_threshold_export = base.iboost_rate_threshold_export
             self.rate_gas = base.rate_gas
             self.inverter_loss = base.inverter_loss
+            self.inverter_freeze_export_discharge_rate = base.inverter_freeze_export_discharge_rate
             self.inverter_hybrid = base.inverter_hybrid
             self.inverter_limit = base.inverter_limit
             self.export_limit = base.export_limit
@@ -449,7 +450,7 @@ class Prediction(PredictionBatch):
         charge_window_optimised = {}
         for window_n in range(len(charge_windows)):
             for minute in range(charge_windows[window_n]["start"], charge_windows[window_n]["end"], PREDICT_STEP):
-                if is_export and charge_limit[window_n] < 100.0:
+                if is_export and charge_limit[window_n] < EXPORT_LIMIT_IDLE:
                     charge_window_optimised[minute] = window_n
                 elif not is_export and charge_limit[window_n] > 0.0:
                     charge_window_optimised[minute] = window_n
@@ -641,6 +642,7 @@ class Prediction(PredictionBatch):
         battery_rate_max_discharge = self.battery_rate_max_discharge
         battery_rate_max_export = self.battery_rate_max_export
         battery_rate_min = self.battery_rate_min
+        inverter_freeze_export_discharge_rate = self.inverter_freeze_export_discharge_rate
         carbon_intensity = self.carbon_intensity
         set_discharge_during_charge = self.set_discharge_during_charge
         battery_charge_power_curve_tuple = charge_curve_to_tuple(self.battery_charge_power_curve)
@@ -724,7 +726,7 @@ class Prediction(PredictionBatch):
             export_window_n = export_window_optimised.get(minute_absolute, -1)
             charge_window_active = charge_window_n >= 0
             export_window_active = export_window_n >= 0
-            export_limit_now = export_limits[export_window_n] if export_window_active else 100.0
+            export_limit_now = export_limits[export_window_n] if export_window_active else EXPORT_LIMIT_IDLE
 
             # Find charge limit
             charge_limit_n = 0
@@ -886,12 +888,6 @@ class Prediction(PredictionBatch):
             # Count load
             load_kwh += load_yesterday
 
-            # discharge freeze, reset charge rate by default
-            if set_export_freeze:
-                # Freeze mode
-                if (export_window_active) and export_limit_now < 100.0 and (set_export_freeze and (export_limit_now == 99.0 or set_export_freeze_only)):
-                    charge_rate_now = battery_rate_min  # 0
-
             # Set discharge during charge?
             if charge_window_active:
                 if not set_discharge_during_charge:
@@ -917,7 +913,7 @@ class Prediction(PredictionBatch):
             if export_window_active:
                 discharge_min = max(soc_max * export_limit_now / 100.0, reserve, self.best_soc_min)
 
-            if not set_export_freeze_only and export_window_active and export_limit_now < 99.0 and (soc > discharge_min):
+            if not set_export_freeze_only and export_window_active and export_limit_now < EXPORT_LIMIT_FREEZE and (soc > discharge_min):
                 # Discharge enable, capped at export limit
                 if self.set_export_low_power:
                     export_rate_adjust = 1 - (export_limit_now - int(export_limit_now))
@@ -1081,6 +1077,53 @@ class Prediction(PredictionBatch):
                         pv_in_period = pv_compare / step * charge_time_remains
                         potential_import = min((charge_rate_now_curve * charge_time_remains) - pv_in_period, (charge_limit_n - soc))
                         metric_keep += max(potential_import * import_rate, 0)
+            elif set_export_freeze and export_window_active and export_limit_now < 100.0 and (export_limit_now == 99.0 or set_export_freeze_only):
+                # Freeze - the battery is not actively discharged to help export, but genuine PV
+                # surplus beyond what load+export_limit can absorb still charges it on some
+                # inverters rather than being clipped (#4207) - e.g. FoxESS "Feed-in First"
+                # prioritises load, then export, then the battery. Only the genuine overflow is
+                # charged (not the full charge rate), so freeze still holds SoC flat whenever the
+                # export limit alone can absorb all the surplus - matching the equivalent recapture
+                # logic in the force export branch above, just without any active discharge.
+                battery_draw = 0
+                pv_ac = pv_now * inverter_loss_ac
+                pv_dc = 0
+
+                diff = get_diff(battery_draw, pv_dc, pv_ac, load_yesterday, inverter_loss, inverter_loss_recp)
+                if diff < 0 and abs(diff) > export_limit and self.inverter_can_charge_during_export:
+                    over_limit = abs(diff) - export_limit
+                    if inverter_hybrid:
+                        charge_rate_now_curve_dc = (
+                            get_charge_rate_curve_cached(soc, battery_rate_max_charge_dc, soc_max, battery_rate_max_charge_dc, battery_charge_power_curve_tuple, battery_rate_min, battery_temperature, battery_temperature_charge_curve_tuple)
+                            * battery_rate_max_scaling
+                        )
+                        charge_rate_now_curve_dc_step = charge_rate_now_curve_dc * step
+                        battery_draw = max(-over_limit * inverter_loss_recp, -battery_to_max, -charge_rate_now_curve_dc_step)
+                    else:
+                        battery_draw = max(-over_limit * inverter_loss, -battery_to_max, -charge_rate_now_curve_step)
+
+                    if battery_draw < 0:
+                        pv_dc = min(abs(battery_draw), pv_now)
+                        pv_ac = (pv_now - pv_dc) * inverter_loss_ac
+
+                # Some inverters (observed on AlphaESS) continue a small residual battery
+                # discharge during Freeze Export. Treat the configured value as battery-side
+                # power and feed it into the normal AC balance: house load consumes it first and
+                # any surplus may reach the grid. Respect the battery reserve and physical export
+                # limit rather than capping the discharge at house demand.
+                if inverter_freeze_export_discharge_rate > 0 and battery_draw >= 0:
+                    freeze_draw = min(inverter_freeze_export_discharge_rate * step * battery_loss_discharge, battery_to_min)
+                    freeze_diff = get_diff(freeze_draw, pv_dc, pv_ac, load_yesterday, inverter_loss, inverter_loss_recp)
+                    if freeze_diff < 0 and abs(freeze_diff) > export_limit:
+                        freeze_draw = max(freeze_draw - (abs(freeze_diff) - export_limit) * inverter_loss_recp, 0)
+                    battery_draw = freeze_draw
+
+                if battery_draw < 0:
+                    battery_state = "fz+"
+                elif battery_draw > 0:
+                    battery_state = "fz-"
+                else:
+                    battery_state = "fz~"
             else:
                 # ECO Mode
                 pv_ac = pv_now * inverter_loss_ac
@@ -1103,10 +1146,9 @@ class Prediction(PredictionBatch):
                     # Battery draw is only subject to inverter limit for the AC part
                     if inverter_hybrid:
                         charge_rate_now_dc = battery_rate_max_charge_dc
-                        # Freeze mode
-                        if set_export_freeze and export_window_active and export_limit_now < 100.0 and (export_limit_now == 99.0 or set_export_freeze_only):
-                            charge_rate_now_dc = battery_rate_min  # 0
 
+                        # Freeze windows are handled by their own elif branch above and never reach
+                        # here - no need to zero the charge rate for them in this branch.
                         charge_rate_now_curve_dc = (
                             get_charge_rate_curve_cached(soc, charge_rate_now_dc, soc_max, battery_rate_max_charge_dc, battery_charge_power_curve_tuple, battery_rate_min, battery_temperature, battery_temperature_charge_curve_tuple)
                             * battery_rate_max_scaling

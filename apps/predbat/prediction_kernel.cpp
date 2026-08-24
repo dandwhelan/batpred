@@ -37,19 +37,17 @@
 #include <pthread.h>
 #endif
 
-// Bumped past this fork's previous 103/104 on the merge of upstream v8.48.4 - see the matching note
-// on KERNEL_ABI_VERSION in prediction_kernel.py.
+// ABI 4: PkScenario::soc_out may be null, and pk_run_batch was added. The null is the reason this had
+// to move - Python now passes no SoC buffer for every cached run, and an ABI 3 binary writes to it
+// unconditionally, so loading one against this Python segfaults on the first prediction rather than
+// falling back. Bumping makes the loader reject it and use the Python engine, which is the whole
+// point of the check.
 //
-// Upstream's ABI 4 made PkScenario::soc_out nullable and added pk_run_batch, and raised PK_MAX_CARS
-// from 4 to 8; this fork adds the FIT tariff fields to PkContext and folds FIT income into the
-// metric in the hot loop. Both sides changed the struct layouts and the hot loop, so no binary
-// built before this merge may be trusted - a stale one would write through a null soc_out or read
-// the context fields at the wrong offsets.
-//
-// Kept strictly above upstream's small integers on purpose, so a fork binary and an upstream one
-// can never be mistaken for each other.
-#define PK_ABI_VERSION 105
-#define PK_PARITY_REVISION 106
+// This fork previously carried FIT tariff fields in PkContext (ABI 103-105) - dropped on the
+// 2026-08-24 upstream merge along with the rest of the FIT feature, so the fork is back on
+// upstream's plain ABI numbering instead of staying artificially ahead of it.
+#define PK_ABI_VERSION 5
+#define PK_PARITY_REVISION 9
 #define PK_MAX_CARS 8
 #define PK_RUN_EVERY 5 // const.py RUN_EVERY
 
@@ -284,6 +282,7 @@ struct PkContext {
     double battery_loss;
     double battery_loss_discharge;
     double inverter_loss;
+    double inverter_freeze_export_discharge_rate; // per-minute rate (multiplied by step in the kernel), residual battery-side discharge entering the AC balance during Freeze Export
     double inverter_limit;    // per-minute rate (multiplied by step in the kernel)
     double export_limit;      // per-minute rate
     double pv_ac_limit;       // per-minute rate
@@ -311,9 +310,6 @@ struct PkContext {
     double iboost_min_soc;
     double iboost_rate_threshold;
     double iboost_rate_threshold_export;
-    double fit_generation_rate;          // FIT generation tariff p/kWh (0 = disabled)
-    double fit_deemed_export_rate;       // FIT deemed export tariff p/kWh
-    double fit_deemed_export_percentage; // FIT deemed export percentage of generation
 
     int32_t n_steps;
     int32_t minutes_now;
@@ -350,7 +346,7 @@ struct PkScenario {
     const double *charge_limit;   // kWh target per charge window
     const int32_t *charge_start;  // absolute minutes
     const int32_t *charge_end;
-    const double *export_limits;  // percent per export window (99=freeze, 100=off)
+    const double *export_limits;  // percent per export window (99=freeze, 100=off - see EXPORT_LIMIT_FREEZE/EXPORT_LIMIT_IDLE in const.py)
     const int32_t *export_start;
     const int32_t *export_end;
     double *soc_out;              // caller-allocated, n_steps entries, filled with round(soc, 3)
@@ -846,6 +842,7 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
     const double battery_rate_max_discharge = c->battery_rate_max_discharge;
     const double battery_rate_max_export = c->battery_rate_max_export;
     const double battery_rate_min = c->battery_rate_min;
+    const double inverter_freeze_export_discharge_rate = c->inverter_freeze_export_discharge_rate;
     // PV10 de-rating of the charge rate - prediction.py:587-592. PV90 is the upside case, no de-rate.
     const double battery_rate_max_scaling = is_pv10 ? c->battery_rate_max_scaling10 : c->battery_rate_max_scaling;
     const double battery_rate_max_scaling_discharge = c->battery_rate_max_scaling_discharge;
@@ -864,11 +861,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
             import_rate = c->rate_max; // Assume in worst case that slot goes away and max rate applies
         }
         double export_rate = c->rate_export[k];
-
-        // FIT deemed export: actual exports earn nothing extra since payment is on a fixed % of generation - prediction.py:610-613
-        if (c->fit_deemed_export_rate > 0 && c->fit_deemed_export_percentage > 0) {
-            export_rate = 0;
-        }
 
         // Alert - prediction.py:583
         const double alert_keep = c->alert_keep[k];
@@ -935,10 +927,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
         // Get load and pv forecast - prediction.py:657-659
         double pv_now = pv_step[k];
         double load_yesterday = load_step[k];
-
-        // Snapshot the running clipped total so the FIT calculation below can charge generation tariff
-        // only on PV the inverter actually delivers this step - prediction.py:694-695
-        const double clipped_before_step = clipped_today;
 
         // Clip PV for AC-coupled inverters with a PV AC limit - prediction.py:664-668
         if (!inverter_hybrid && pv_ac_limit > 0 && pv_now > pv_ac_limit) {
@@ -1045,13 +1033,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
                         iboost_running_solar = 1;
                     }
                 }
-            }
-        }
-
-        // Discharge freeze - prediction.py:764-768
-        if (c->set_export_freeze) {
-            if (export_window_active && export_limit_now < 100.0 && (c->set_export_freeze && (export_limit_now == 99.0 || c->set_export_freeze_only))) {
-                charge_rate_now = battery_rate_min; // 0
             }
         }
 
@@ -1202,6 +1183,44 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
                     metric_keep += std::max(potential_import * import_rate, 0.0);
                 }
             }
+        } else if (c->set_export_freeze && export_window_active && export_limit_now < 100.0 && (export_limit_now == 99.0 || c->set_export_freeze_only)) {
+            // Freeze - not an active discharge, but genuine PV surplus beyond what
+            // load+export_limit can absorb still charges the battery on some inverters rather
+            // than being clipped (#4207) - mirrors the recapture logic in the force export
+            // branch above, without any active discharge. prediction.py's matching elif.
+            battery_draw = 0;
+            pv_ac = pv_now * inverter_loss_ac;
+            pv_dc = 0;
+
+            const double diff_freeze = get_diff(battery_draw, pv_dc, pv_ac, load_yesterday, inverter_loss, inverter_loss_recp);
+            if (diff_freeze < 0 && std::fabs(diff_freeze) > export_limit && c->inverter_can_charge_during_export) {
+                const double over_limit = std::fabs(diff_freeze) - export_limit;
+                if (inverter_hybrid) {
+                    const double charge_rate_now_curve_dc = rate_curve(soc, battery_rate_max_charge_dc, battery_rate_max_charge_dc, c->temp_charge_cap[k], c->charge_curve, soc_max, battery_rate_min) * battery_rate_max_scaling;
+                    const double charge_rate_now_curve_dc_step = charge_rate_now_curve_dc * step;
+                    battery_draw = std::max({-over_limit * inverter_loss_recp, -battery_to_max, -charge_rate_now_curve_dc_step});
+                } else {
+                    battery_draw = std::max({-over_limit * inverter_loss, -battery_to_max, -charge_rate_now_curve_step});
+                }
+
+                if (battery_draw < 0) {
+                    pv_dc = std::min(std::fabs(battery_draw), pv_now);
+                    pv_ac = (pv_now - pv_dc) * inverter_loss_ac;
+                }
+            }
+
+            // Some inverters (observed on AlphaESS) continue a small residual battery
+            // discharge during Freeze Export. Feed the battery-side rate into the normal AC
+            // balance so load consumes it first and any surplus may export, while respecting
+            // the reserve and the physical grid export limit.
+            if (inverter_freeze_export_discharge_rate > 0 && battery_draw >= 0) {
+                double freeze_draw = std::min(inverter_freeze_export_discharge_rate * step * battery_loss_discharge, battery_to_min);
+                const double freeze_diff = get_diff(freeze_draw, pv_dc, pv_ac, load_yesterday, inverter_loss, inverter_loss_recp);
+                if (freeze_diff < 0 && std::abs(freeze_diff) > export_limit) {
+                    freeze_draw = std::max(freeze_draw - (std::abs(freeze_diff) - export_limit) * inverter_loss_recp, 0.0);
+                }
+                battery_draw = freeze_draw;
+            }
         } else {
             // ECO Mode - prediction.py:951-997
             pv_ac = pv_now * inverter_loss_ac;
@@ -1218,11 +1237,9 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
                 battery_draw = std::min({diff, discharge_rate_now_curve_step, inverter_limit, battery_to_min});
             } else {
                 if (inverter_hybrid) {
-                    double charge_rate_now_dc = battery_rate_max_charge_dc;
-                    // Freeze mode - prediction.py:973-975
-                    if (c->set_export_freeze && export_window_active && export_limit_now < 100.0 && (export_limit_now == 99.0 || c->set_export_freeze_only)) {
-                        charge_rate_now_dc = battery_rate_min; // 0
-                    }
+                    const double charge_rate_now_dc = battery_rate_max_charge_dc;
+                    // Freeze windows are handled by their own else-if branch above and never
+                    // reach here - no need to zero the charge rate for them in this branch.
                     // Note: Python passes the un-rounded soc for the DC-rate lookup here
                     const double charge_rate_now_curve_dc = rate_curve(soc, charge_rate_now_dc, battery_rate_max_charge_dc, c->temp_charge_cap[k], c->charge_curve, soc_max, battery_rate_min) * battery_rate_max_scaling;
                     const double charge_rate_now_curve_dc_step = charge_rate_now_curve_dc * step;
@@ -1312,16 +1329,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
             const double pv_ac_before = pv_ac;
             pv_ac = std::max(pv_ac - over_limit, 0.0);
             clipped_today += pv_ac_before - pv_ac;
-        }
-
-        // FIT income: pay generation tariff on PV the inverter actually delivered plus deemed-export tariff
-        // on the configured percentage; subtracting from metric makes the optimiser treat clipped PV as
-        // lost FIT income - prediction.py:1096-1105
-        if (c->fit_generation_rate > 0 || (c->fit_deemed_export_rate > 0 && c->fit_deemed_export_percentage > 0)) {
-            const double pv_delivered = std::max(pv_now - (clipped_today - clipped_before_step), 0.0);
-            const double fit_gen = pv_delivered * c->fit_generation_rate;
-            const double fit_deemed = pv_delivered * (c->fit_deemed_export_percentage / 100.0) * c->fit_deemed_export_rate;
-            metric -= fit_gen + fit_deemed;
         }
 
         // Adjust battery soc - prediction.py:1060-1064
