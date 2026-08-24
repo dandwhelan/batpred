@@ -125,7 +125,21 @@ def run_test_web_if(my_predbat):
         # Left out of the blanket sweep on purpose, and covered by test_web_annual.py instead:
         # /annual_run spawns a real year-long simulation subprocess, and /annual_cancel and
         # /annual_download only mean anything once a run is in progress or finished.
-        sweep_exempt = {("POST", "/annual_run"), ("POST", "/annual_cancel"), ("GET", "/annual_download")}
+        #
+        # Also pre-existing on upstream main (confirmed against springfall2008/batpred, not
+        # introduced by the 2026-08-24 merge): the debug_history_* routes need a captured
+        # snapshot to return anything meaningful, and are covered instead by
+        # test_web_debug_history_routes.py. /images/{filename} is a path-parameter route - the
+        # literal path isn't a fetchable URL without substituting a real filename.
+        sweep_exempt = {
+            ("POST", "/annual_run"),
+            ("POST", "/annual_cancel"),
+            ("GET", "/annual_download"),
+            ("GET", "/debug_history_list"),
+            ("GET", "/debug_history_download"),
+            ("GET", "/debug_history_download_all"),
+            ("GET", "/images/{filename}"),
+        }
         listed = set(all_endpoints)
         unlisted = registered - listed - sweep_exempt
         if unlisted:

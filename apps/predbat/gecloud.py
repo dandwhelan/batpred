@@ -228,6 +228,35 @@ def regname_to_ha(name):
     return name
 
 
+def merge_non_null(fresh, previous):
+    """
+    Overlay a fresh API reading onto the previous one, ignoring null leaves.
+
+    GE Cloud (notably on Gateway devices) intermittently answers with HTTP 200 and a well-formed
+    envelope whose leaf values are explicitly null. Those nulls mean "no fresh datalog sample this
+    poll", not "zero" - coercing them to 0 is indistinguishable from a real idle inverter or a flat
+    battery, and passing None through poisons every downstream consumer.
+
+    A null leaf keeps the last good value for that field. With no previous reading to fall back on
+    the null is kept as None rather than dropped, so the field carries on reporting "no value" as it
+    does today instead of a fabricated zero (dropping the key would let a .get(field, 0) default
+    invent one).
+    """
+    if fresh is None:
+        return previous
+    if not isinstance(fresh, dict):
+        return fresh
+    merged = dict(previous) if isinstance(previous, dict) else {}
+    for key, value in fresh.items():
+        if value is None:
+            if key not in merged:
+                # Never had a good reading for this field - report no value rather than a fake zero
+                merged[key] = None
+            continue
+        merged[key] = merge_non_null(value, merged.get(key))
+    return merged
+
+
 class GECloudDirect(ComponentBase):
     """
     GivEnergy Cloud Direct API interface
@@ -1165,7 +1194,7 @@ class GECloudDirect(ComponentBase):
                     break
         entity_id = "switch.{}_inverter_hybrid".format(self.prefix)
         self.log("GECloud: Detected inverter model {} indicates ac_coupled={}, setting {} to {}".format(model_name, ac_coupled, entity_id, "off" if ac_coupled else "on"))
-        await self.base.ha_interface.set_state_external(entity_id, not ac_coupled)
+        await self.set_state_external(entity_id, not ac_coupled)
 
         self.log("GECloud: Automatic configuration complete")
 
@@ -1799,7 +1828,7 @@ class GECloudDirect(ComponentBase):
         result = await self.async_get_inverter_data_retry(GE_API_INVERTER_STATUS, serial)
         if result is None:
             return previous
-        return result
+        return merge_non_null(result, previous)
 
     async def async_get_inverter_meter(self, serial, previous={}):
         """
@@ -1808,7 +1837,15 @@ class GECloudDirect(ComponentBase):
         meter = await self.async_get_inverter_data_retry(GE_API_INVERTER_METER, serial)
         if meter is None:
             return previous
-        return meter
+        merged = merge_non_null(meter, previous)
+        # today/total are objects rather than readings, so a null section with nothing cached to
+        # fall back on cannot be kept as None the way a null leaf is - publish_meter would iterate
+        # it. Drop it and pick the counters up on the next poll rather than failing the whole read,
+        # which would leave a device that nulls one section persistently with no meter data at all.
+        for section in ("today", "total"):
+            if section in merged and not isinstance(merged[section], dict):
+                merged.pop(section)
+        return merged
 
     async def async_get_inverter_data_retry(self, endpoint, serial="", setting_id="", post=False, datain=None, uuid="", meter_ids="", start_time="", end_time="", command="", measurands=""):
         """
@@ -2157,26 +2194,39 @@ class GECloudData(ComponentBase):
         return self.mdata, self.oldest_data_time
 
 
-class MockHAInterface:  # pragma: no cover
-    """Mock HA interface for testing"""
-
-    def __init__(self):
-        pass
-
-    async def set_state_external(self, entity_id, state):
-        print(f"Set state external {entity_id} = {state}")
-
-
 class MockBase(SharedMockBase):  # pragma: no cover
-    """Mock base for the GE Cloud command-line harness, with its own cache root and HA interface."""
+    """Mock base for the GE Cloud command-line harness, with its own cache root."""
 
     def __init__(self):
-        """Initialise the shared mock with the GE Cloud cache root and a mock HA interface."""
+        """Initialise the shared mock with the GE Cloud cache root."""
         super().__init__(config_root="./temp_gecloud")
-        self.ha_interface = MockHAInterface()
 
 
-async def test_gecloud_direct(api_key, write_entity=None, write_value=None):  # pragma: no cover
+def find_registers_by_name(gecloud_direct, register_name, device=None):  # pragma: no cover
+    """
+    Find all (entity_id, device, key, raw_name) matches for a register name, optionally restricted to one device serial.
+
+    Matches case-insensitively against both the raw GivEnergy Cloud register name (e.g.
+    "Battery_Charge_Power") and its HA-style equivalent (e.g. "battery_charge_power"), so the
+    harness can be driven without knowing the API's exact casing. When 'device' is given, only
+    that device serial (case-insensitive) is considered, so a name shared by multiple inverters
+    can be aimed at a single one.
+    """
+    register_name_lower = register_name.lower()
+    device_lower = device.lower() if device else None
+    matches = []
+    for entity_id, mapping in gecloud_direct.register_entity_map.items():
+        this_device = mapping["device"]
+        if device_lower and this_device.lower() != device_lower:
+            continue
+        key = mapping["key"]
+        raw_name = gecloud_direct.settings.get(this_device, {}).get(key, {}).get("name", "")
+        if register_name_lower in (raw_name.lower(), regname_to_ha(raw_name)):
+            matches.append((entity_id, this_device, key, raw_name))
+    return matches
+
+
+async def test_gecloud_direct(api_key, write_entity=None, write_value=None, write_register_name=None, write_register_value=None, write_register_device=None):  # pragma: no cover
     """
     Test the GECloud Direct API
     """
@@ -2221,6 +2271,33 @@ async def test_gecloud_direct(api_key, write_entity=None, write_value=None):  # 
             else:
                 print(f"Write failed for entity '{write_entity}'")
 
+    if write_register_name and write_register_value is not None:
+        matches = find_registers_by_name(gecloud_direct, write_register_name, device=write_register_device)
+        if not matches:
+            if write_register_device:
+                print(f"ERROR: Register '{write_register_name}' not found on device '{write_register_device}'")
+            else:
+                print(f"ERROR: Register '{write_register_name}' not found on any device")
+            print("Available registers:")
+            seen = set()
+            for mapping in gecloud_direct.register_entity_map.values():
+                raw_name = gecloud_direct.settings.get(mapping["device"], {}).get(mapping["key"], {}).get("name", "")
+                label = f"{raw_name}  (ha_name={regname_to_ha(raw_name)}, device={mapping['device']})"
+                if label not in seen:
+                    seen.add(label)
+                    print(f"  {label}")
+        else:
+            distinct_devices = {device for _, device, _, _ in matches}
+            if not write_register_device and len(distinct_devices) > 1:
+                print(f"Warn: Register '{write_register_name}' matched {len(distinct_devices)} devices ({', '.join(sorted(distinct_devices))}) - writing to all of them. Pass --device to target just one.")
+            for entity_id, device, key, raw_name in matches:
+                print(f"Writing register '{raw_name}' (device={device}, setting_id={key}) = {write_register_value}")
+                result = await gecloud_direct.async_write_inverter_setting(device, key, write_register_value)
+                if result:
+                    print(f"Write succeeded: {result}")
+                else:
+                    print(f"Write failed for device {device} register '{raw_name}'")
+
     await gecloud_direct.final()
 
     print("Test completed")
@@ -2236,11 +2313,30 @@ def main():  # pragma: no cover
     parser.add_argument("--api-key", required=True, help="GECloud Direct API key")
     parser.add_argument("--write-entity", default=None, help="Entity ID to write (e.g. number.predbat_gecloud_SA1234_battery_charge_power)")
     parser.add_argument("--write-value", default=None, help="Value to write to the entity")
+    parser.add_argument(
+        "--write-register",
+        nargs=2,
+        default=None,
+        metavar=("NAME", "VALUE"),
+        help="Register name (raw or HA-style, e.g. Battery_Charge_Power or battery_charge_power) and value to write",
+    )
+    parser.add_argument("--device", default=None, help="Device serial to restrict --write-register to, when the register name is shared by more than one device")
 
     args = parser.parse_args()
 
+    write_register_name, write_register_value = args.write_register if args.write_register else (None, None)
+
     # Run the test
-    asyncio.run(test_gecloud_direct(args.api_key, write_entity=args.write_entity, write_value=args.write_value))
+    asyncio.run(
+        test_gecloud_direct(
+            args.api_key,
+            write_entity=args.write_entity,
+            write_value=args.write_value,
+            write_register_name=write_register_name,
+            write_register_value=write_register_value,
+            write_register_device=args.device,
+        )
+    )
 
 
 if __name__ == "__main__":
