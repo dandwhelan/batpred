@@ -796,7 +796,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
     double metric_keep = 0;
     double metric = c->cost_today_sofar;
     double carbon_g = c->carbon_today_sofar;
-    double clipped_today = 0;
     double iboost_today_kwh = c->iboost_today;
     bool four_hour_rule = true;
     bool record = true;
@@ -930,7 +929,6 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
 
         // Clip PV for AC-coupled inverters with a PV AC limit - prediction.py:664-668
         if (!inverter_hybrid && pv_ac_limit > 0 && pv_now > pv_ac_limit) {
-            clipped_today += pv_now - pv_ac_limit;
             pv_now = pv_ac_limit;
         }
 
@@ -1304,10 +1302,7 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
             total_inverted = get_total_inverted(battery_draw, pv_dc, pv_ac, inverter_loss, inverter_hybrid);
             if (total_inverted > inverter_limit) {
                 const double over_limit = total_inverted - inverter_limit;
-                const double pv_ac_before = pv_ac;
                 pv_ac = std::max(pv_ac - over_limit * inverter_loss, 0.0);
-                const double pv_ac_no_loss = std::max(pv_ac_before - over_limit, 0.0);
-                clipped_today += pv_ac_before - pv_ac_no_loss;
             }
         } else {
             const double total_inverted = get_total_inverted(battery_draw, pv_dc, pv_ac, inverter_loss, inverter_hybrid);
@@ -1326,9 +1321,7 @@ static int32_t pk_run_one(const ContextStore *store, const PkScenario *s, PkResu
         if (diff < 0 && std::fabs(diff) > export_limit) {
             const double over_limit = std::fabs(diff) - export_limit;
             // Only solar PV is truly "clipped" (lost energy); excess battery discharge just gets limited
-            const double pv_ac_before = pv_ac;
             pv_ac = std::max(pv_ac - over_limit, 0.0);
-            clipped_today += pv_ac_before - pv_ac;
         }
 
         // Adjust battery soc - prediction.py:1060-1064
