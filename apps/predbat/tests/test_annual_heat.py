@@ -704,11 +704,9 @@ def test_existing_heat_pump(temperatures, year):
     day = date(year, 1, 15)
     model.set_month_scale(1, [(day, 31.0)])
     removed = HeatPumpRemovedLoadProfile(base, model)
-    restored = HeatPumpLoadProfile(removed, model)
 
     base_profile = base.minute_profile(day)
     removed_profile = removed.minute_profile(day)
-    restored_profile = restored.minute_profile(day)
     heat_profile = model.minute_electricity_kwh(day)
 
     # Energy conservation, which holds whether or not the floor at zero bit: what came out

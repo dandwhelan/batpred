@@ -65,6 +65,21 @@ docker run --rm --network none --entrypoint sh -v "$PWD:/work" -w /work/coverage
 
 **Known flaky test**: `tests/test_manual_select.py` picks a dropdown option by weekday label (`"%a %H:%M"`) and can fail near midnight UTC, when the label's weekday falls behind the harness's "today" — `get_override_time_from_string` then resolves it into the past and `manual_select` returns `off`. A failure here in that window is not necessarily a regression; rerunning after the boundary passes should confirm.
 
+### Replaying a debug dump
+
+`predbat_debug_*.yaml` is a full state dump, written to `debug/` when `switch.predbat_debug_enable` is on and normally what users attach to bug reports. Replay one against the current tree with:
+
+```bash
+cd coverage
+./run_all --debug_file <path-to-predbat_debug.yaml>
+```
+
+It lists every config item that differs from its default, recalculates the plan, and writes `plan_orig.html` / `plan_final.json` into `coverage/`. Add `--redo` to recompute rates, load model and Octopus slots instead of reusing the ones in the dump. Committed examples live in `coverage/cases/*.yaml` and run as golden regressions under `./run_all --test debug_cases`.
+
+### Debugging notes
+
+`.claude/skills/issue-triage/references/debug-journal.md` records what past investigations found: per-integration API quirks, symptom-to-module pointers, and traps such as stale kernel binaries and test-order pollution. Read it before debugging an integration or a "the plan is wrong" report, and add to it when you learn something a future session would want.
+
 ## Code Quality
 
 All checks are enforced via pre-commit and must pass before merging:
@@ -192,12 +207,16 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 | `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
 | `tests/test_infra.py` | FIT defaults (including `metric_fit_enable`) added to test config and `reset_inverter()` |
 | `tests/test_fit.py` | Covers the FIT calculator plus the `metric_fit_enable` master-switch toggle |
-| `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 105/106) |
+| `prediction_kernel.py` | `kernel_supported()` returns False when a FIT rate is set, so a FIT run uses the Python engine rather than the FIT-blind C++ kernel |
 | `tests/test_kernel_parity.py` | FIT deterministic edge cases and FIT rate randomisation in the parity sweep |
 
 ### C++ Kernel Note (fork)
 
-This fork's kernel binaries are built with ABI/parity revision **105/106** (upstream uses small integers - currently 4/6). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.
+**FIT is Python-only.** The kernel carried FIT fields in `PkContext` at fork ABI/parity 103-105 until the 2026-08-24 upstream merge dropped them; the fork is now back on upstream's plain numbering (currently **5/10**) and the C++ kernel knows nothing about FIT. `kernel_supported()` therefore returns False whenever `metric_fit_generation_rate` or `metric_fit_deemed_export_rate` is above zero, so a FIT user falls back to the Python engine and gets the plan they configured for, just more slowly. Covered by `tests/test_fit.py`. If FIT is ever re-added to the kernel, that gate is what to remove.
+
+**The fork's kernel source is not upstream's.** Both sit at ABI/parity 5/10, but this fork carries its own C++ work on top: an exact-integer `round_py` fast path (~7ns vs upstream's ~96ns snprintf/strtod), a `shared_ptr` context map so `pk_context_free` on another thread cannot free a running context, a `calc_percent_limit` clamp at zero, the `pk_round_py_test` hook, and a `kernel_n_steps` guard. Because the revision numbers match upstream's, **the loader cannot tell fork binaries from upstream ones** — so on any upstream merge that touches `prediction_kernel.cpp`, taking either side's `.so` files wholesale is wrong. Merge the source, then rebuild all six `prediction_kernel_lib_*.so` from the merged tree via `build_kernel_cross.sh` (needs zig; `ZIG=/path/to/zig bash apps/predbat/build_kernel_cross.sh`) and confirm with `./run_all --test kernel_parity`.
+
+Any behavioural change to `prediction.py`'s hot loop must still be mirrored in `prediction_kernel.cpp` with `KERNEL_PARITY_REVISION` and `PK_PARITY_REVISION` both bumped, followed by a rebuild of all six binaries.
 
 ## Fork-Specific Notes
 

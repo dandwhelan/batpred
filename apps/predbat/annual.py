@@ -1796,6 +1796,13 @@ class AnnualPredictor:
                 continue
 
             if self.heat_model:
+                # This branch read `samples` without ever choosing them, so any heat-pump annual
+                # run raised NameError here. Pick them the same way _plan_month() does.
+                samples = select_samples(self.weather, year, month, self.config["samples_per_month"], has_solar=bool(self.config["solar"]))
+                if not samples:
+                    months.append({"month": month, "status": "unavailable", "reason": "no usable weather days", "days": days_in_month, "standing_charge_p": standing_charge_p})
+                    continue
+
                 # Correct this month's sampled days onto the month's own heat demand before any
                 # of them are planned - the sample was chosen by irradiance, not temperature.
                 # See HeatModel.set_month_scale().

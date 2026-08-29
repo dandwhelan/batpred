@@ -9,6 +9,7 @@
 # pylint: disable=attribute-defined-outside-init
 
 
+from prediction_kernel import kernel_supported
 from tests.test_infra import reset_rates, reset_inverter, simple_scenario
 
 
@@ -182,6 +183,31 @@ def run_fit_tests(my_predbat):
     failed |= fail
     failed |= _check("fit_switch_off.gen_income", pred.final_fit_generation_income, 0)
     failed |= _check("fit_switch_off.deemed_income", pred.final_fit_deemed_export_income, 0)
+
+    # -------------------------------------------------------------------------
+    # The C++ kernel has carried no FIT support since the 2026-08-24 upstream merge dropped
+    # this fork's PkContext FIT fields. Every test above runs with the kernel switched off,
+    # so without this check a kernel-enabled FIT user would silently get a plan costed as
+    # though FIT were off, with nothing in the suite noticing.
+    print("Test: an active FIT configuration keeps the prediction off the FIT-blind C++ kernel")
+
+    class _FakePred:
+        """Minimal stand-in exposing only the attributes kernel_supported() reads."""
+
+        def __init__(self, generation_rate, deemed_rate):
+            """Record the FIT rates under test and present an otherwise kernel-eligible run."""
+            self.metric_fit_generation_rate = generation_rate
+            self.metric_fit_deemed_export_rate = deemed_rate
+            self.debug_enable = False
+            self.kernel_handle = 1
+
+    if kernel_supported(_FakePred(0.0, 0.0), False, 5) is not True:
+        print("  ERROR: with no FIT rates set the kernel should still be used")
+        failed = True
+    for gen_rate, deemed_rate in ((10.0, 0.0), (0.0, 5.0), (10.0, 5.0)):
+        if kernel_supported(_FakePred(gen_rate, deemed_rate), False, 5):
+            print("  ERROR: kernel used with FIT active (generation {} deemed {}) - FIT would be silently ignored".format(gen_rate, deemed_rate))
+            failed = True
 
     # Restore default FIT config and the prediction-kernel setting so subsequent tests are unaffected.
     _set_fit(my_predbat, generation_rate=0.0, deemed_rate=0.0, deemed_pct=50.0)

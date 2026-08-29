@@ -1794,6 +1794,186 @@ function saveNestedValue(rowId) {
     updateChangeCounter();
 }
 
+// Counter used to give each pending addition a unique key, as several can target the same list
+let addCounter = 0;
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function deleteNestedValue(rowId) {
+    const row = document.getElementById('nested_row_' + rowId);
+    const nestedPath = row.dataset.nestedPath;
+
+    // Keyed separately from an edit of the same value, so that undoing the deletion does not
+    // also silently undo a pending edit - the server applies edits before any deletion
+    pendingChanges[nestedPath + '#delete'] = {
+        rowId: rowId,
+        originalValue: row.dataset.nestedOriginal,
+        newValue: '',
+        type: 'delete',
+        isNested: true,
+        path: nestedPath
+    };
+
+    row.classList.add('row-deleted');
+    setDeleteButtonState(rowId, true);
+    updateChangeCounter();
+}
+
+function undoDeleteNestedValue(rowId) {
+    const row = document.getElementById('nested_row_' + rowId);
+    const nestedPath = row.dataset.nestedPath;
+
+    delete pendingChanges[nestedPath + '#delete'];
+    row.classList.remove('row-deleted');
+    setDeleteButtonState(rowId, false);
+    updateChangeCounter();
+}
+
+function setDeleteButtonState(rowId, deleted) {
+    // The button is looked up by id rather than by class, as a row holding a nested table
+    // also contains the delete buttons of all of its children
+    const button = document.getElementById('delete_button_' + rowId);
+    if (!button) return;
+    if (deleted) {
+        button.textContent = 'Undo';
+        button.setAttribute('onclick', 'undoDeleteNestedValue(' + rowId + ')');
+    } else {
+        button.textContent = 'Delete';
+        button.setAttribute('onclick', 'deleteNestedValue(' + rowId + ')');
+    }
+}
+
+function hideAddDialog() {
+    const overlay = document.querySelector('.add-overlay');
+    if (overlay) {
+        overlay.remove();
+    }
+}
+
+// Show a dialog collecting one or more fields, calling onConfirm with an id -> value object
+function showAddDialog(title, help, fields, onConfirm) {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirmation-overlay add-overlay';
+
+    let fieldsHtml = '';
+    fields.forEach(field => {
+        if (field.type === 'textarea') {
+            fieldsHtml += `<label class="add-dialog-label" for="add_field_${field.id}">${field.label}</label>
+                           <textarea class="add-dialog-input" id="add_field_${field.id}" rows="5"></textarea>`;
+        } else {
+            fieldsHtml += `<label class="add-dialog-label" for="add_field_${field.id}">${field.label}</label>
+                           <input type="text" class="add-dialog-input" id="add_field_${field.id}">`;
+        }
+    });
+
+    overlay.innerHTML = `
+        <div class="confirmation-dialog">
+            <h3>${title}</h3>
+            <p>${help}</p>
+            ${fieldsHtml}
+            <div class="confirmation-buttons">
+                <button class="cancel-button-dialog" onclick="hideAddDialog()">Cancel</button>
+                <button class="confirm-button" id="addDialogConfirm">Add</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Pre-fill any defaults, which cannot go in the markup above as they may contain newlines
+    fields.forEach(field => {
+        document.getElementById('add_field_' + field.id).value = field.value || '';
+    });
+
+    document.getElementById('addDialogConfirm').onclick = () => {
+        const values = {};
+        for (const field of fields) {
+            values[field.id] = document.getElementById('add_field_' + field.id).value;
+        }
+        if (onConfirm(values)) {
+            hideAddDialog();
+        }
+    };
+
+    document.getElementById('add_field_' + fields[0].id).focus();
+}
+
+// Insert a pending row above the add button and register the change, returning the change key
+function registerPendingAdd(anchorId, path, valueText, nameHtml, valueHtml) {
+    addCounter += 1;
+    const changeKey = path + '#' + addCounter;
+
+    pendingChanges[changeKey] = {
+        rowId: null,
+        originalValue: '',
+        newValue: valueText,
+        type: 'add',
+        isNested: true,
+        path: path,
+        pendingRowId: addCounter
+    };
+
+    const anchor = document.getElementById('add_anchor_' + anchorId);
+    const row = document.createElement('tr');
+    row.id = 'pending_row_' + addCounter;
+    row.className = 'row-added';
+    row.dataset.changeKey = changeKey;
+    row.innerHTML = `<td>${nameHtml}</td><td>${valueHtml}</td>` +
+                    `<td><button class="cancel-button" onclick="cancelPendingAdd(${addCounter})">Remove</button></td>`;
+    anchor.parentNode.insertBefore(row, anchor);
+
+    updateChangeCounter();
+    return changeKey;
+}
+
+function cancelPendingAdd(pendingRowId) {
+    const row = document.getElementById('pending_row_' + pendingRowId);
+    if (!row) return;
+    delete pendingChanges[row.dataset.changeKey];
+    row.remove();
+    updateChangeCounter();
+}
+
+function addListItem(listPath, argName, anchorId) {
+    // compare_list entries need at least a name and an id, so offer them as a starting point
+    const template = (argName === 'compare_list') ? 'name: My Tariff\\nid: my_tariff' : '';
+    const help = (argName === 'compare_list')
+        ? 'Enter the new tariff to compare, one <b>setting: value</b> per line. A <b>name</b> and a unique <b>id</b> are required.'
+        : 'Enter the new entry in YAML format - a single value, or one <b>setting: value</b> per line.';
+
+    showAddDialog('Add entry to ' + listPath, help, [{id: 'value', label: 'New entry', type: 'textarea', value: template}], (values) => {
+        const valueText = values.value;
+        if (!valueText.trim()) {
+            showMessage('Value cannot be empty', 'error');
+            return false;
+        }
+        registerPendingAdd(anchorId, listPath + '[]', valueText, '+ ', '<pre>' + escapeHtml(valueText) + '</pre>');
+        return true;
+    });
+}
+
+function addDictKey(dictPath, anchorId) {
+    showAddDialog('Add setting to ' + dictPath, 'Enter the name of the new setting and its value.',
+                  [{id: 'key', label: 'Setting name', type: 'text'}, {id: 'value', label: 'Value', type: 'text'}], (values) => {
+        const key = values.key.trim();
+        const valueText = values.value;
+        if (!key.match(/^[A-Za-z0-9_-]+$/)) {
+            showMessage('Setting name must contain only letters, numbers, dashes or underscores', 'error');
+            return false;
+        }
+        if (!valueText.trim()) {
+            showMessage('Value cannot be empty', 'error');
+            return false;
+        }
+        registerPendingAdd(anchorId, dictPath + '.' + key, valueText, '<b>' + escapeHtml(key) + ': </b>', escapeHtml(valueText));
+        return true;
+    });
+}
+
 function markNestedRowAsChanged(rowId) {
     const row = document.getElementById('nested_row_' + rowId);
     row.classList.add('row-changed');
@@ -1810,7 +1990,20 @@ function discardAllChanges() {
     for (const pathOrArgName in pendingChanges) {
         const change = pendingChanges[pathOrArgName];
 
-        if (change.isNested) {
+        if (change.type === 'delete') {
+            // Restore a row marked for deletion
+            const row = document.getElementById('nested_row_' + change.rowId);
+            if (row) {
+                row.classList.remove('row-deleted');
+            }
+            setDeleteButtonState(change.rowId, false);
+        } else if (change.type === 'add') {
+            // Drop the preview row of a pending addition
+            const row = document.getElementById('pending_row_' + change.pendingRowId);
+            if (row) {
+                row.remove();
+            }
+        } else if (change.isNested) {
             // Handle nested values
             const row = document.getElementById('nested_row_' + change.rowId);
             const valueCell = document.getElementById('nested_value_' + change.rowId);
@@ -1967,6 +2160,57 @@ def get_apps_css():
 
 .edit-button:hover {
     background-color: #45a049;
+}
+
+.delete-button, .add-button {
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    text-align: center;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 12px;
+    margin: 2px 2px;
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.delete-button {
+    background-color: #dc3545;
+}
+
+.delete-button:hover {
+    background-color: #c82333;
+}
+
+.add-button {
+    background-color: #17a2b8;
+}
+
+.add-button:hover {
+    background-color: #138496;
+}
+
+.add-dialog-label {
+    display: block;
+    font-weight: bold;
+    margin-top: 10px;
+}
+
+.add-dialog-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+body.dark-mode .add-dialog-input {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: 1px solid #555;
 }
 
 .edit-input {
@@ -2179,6 +2423,29 @@ body.dark-mode .toggle-button::before {
 .row-changed {
     background-color: #fff3cd !important;
     border-left: 4px solid #ffc107 !important;
+}
+
+/* Rows pending deletion or addition */
+.row-deleted {
+    background-color: #f8d7da !important;
+    border-left: 4px solid #dc3545 !important;
+    text-decoration: line-through;
+    opacity: 0.7;
+}
+
+.row-added {
+    background-color: #d4edda !important;
+    border-left: 4px solid #28a745 !important;
+}
+
+body.dark-mode .row-deleted {
+    background-color: #3f1e1e !important;
+    border-left: 4px solid #dc3545 !important;
+}
+
+body.dark-mode .row-added {
+    background-color: #1e3f20 !important;
+    border-left: 4px solid #28a745 !important;
 }
 
 /* Dark mode save controls styles */
@@ -2812,6 +3079,11 @@ body.dark-mode .pf-car-body { fill: #465158; stroke: #57636b; }
 body.dark-mode path.pf-batt { stroke: #90a4ae; }
 body.dark-mode rect.pf-batt { fill: #546e7a; }
 body.dark-mode circle.pf-batt { fill: #90a4ae; }
+/* Car charging arm - the base pink is dark enough for white pill text in light mode
+   but goes muddy against the dark scene, so lift it the same way pf-batt does */
+body.dark-mode path.pf-car { stroke: #f06292; }
+body.dark-mode rect.pf-car { fill: #c2185b; }
+body.dark-mode circle.pf-car { fill: #f06292; }
 
 .rate-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .chip { font-size: 13px; font-weight: 600; padding: 5px 10px; border-radius: 8px; }
@@ -6907,7 +7179,7 @@ def get_plan_renderer_js():
                 html += th('co2_total', 'CO2 kg');
             }
             if (showHistoryLinks) {
-                html += '<th><b>Debug</b></th>';
+                html += '<th class="plan-debug-col"><b>Debug</b></th>';
             }
             html += '</tr>';
 
@@ -6956,7 +7228,7 @@ def get_plan_renderer_js():
                     html += `<td id=import data-minute="${row.slot_minute}" data-rate="${row.import_rate}" style="padding:0;">`;
                     html += `<div style="display:flex;">`;
                     html += `<div style="flex:1;padding:4px;background-color:${row.rate_color_import || '#FFFFFF'};" title="${houseTitle}">${importText}</div>`;
-                    html += `<div style="flex:1;padding:4px;background-color:${row.car_rate_color || '#FFFFFF'};" title="${carTitle}">${row.car_rate.toFixed(2)}</div>`;
+                    html += `<div class="plan-car-rate" style="flex:1;padding:4px;background-color:${row.car_rate_color || '#FFFFFF'};" title="${carTitle}">${row.car_rate.toFixed(2)}</div>`;
                     html += `</div></td>`;
                 } else {
                     html += `<td id=import ${cellStyle} bgcolor=${row.rate_color_import || '#FFFFFF'}>${importText}</td>`;
@@ -7083,9 +7355,9 @@ def get_plan_renderer_js():
                     if (snap) {
                         const snapWhen = new Date(snap.timestamp);
                         const snapLabel = isNaN(snapWhen.getTime()) ? snap.id : snapWhen.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-                        html += `<td bgcolor=#FFFFFF><a href="./debug_history_download?id=${encodeURIComponent(snap.id)}">&#8681; ${snapLabel}</a></td>`;
+                        html += `<td class="plan-debug-col" bgcolor=#FFFFFF><a href="./debug_history_download?id=${encodeURIComponent(snap.id)}">&#8681; ${snapLabel}</a></td>`;
                     } else {
-                        html += '<td bgcolor=#FFFFFF></td>';
+                        html += '<td class="plan-debug-col" bgcolor=#FFFFFF></td>';
                     }
                 }
 
@@ -7147,7 +7419,7 @@ def get_plan_renderer_js():
 
                 // Empty cell for the Debug history column
                 if (showHistoryLinks) {
-                    html += '<td></td>';
+                    html += '<td class="plan-debug-col"></td>';
                 }
 
                 html += '</tr>';
@@ -8139,6 +8411,19 @@ if (localStorage.getItem('darkMode') === 'true') {
             max-width: 100%;
             box-sizing: border-box;
         }
+        /* Reclaim horizontal room in the plan table: it is the widest thing
+           Predbat renders and on a phone every pixel of padding costs a
+           column of sideways scrolling */
+        table th,
+        table td {
+            padding: 2px 4px;
+        }
+        /* The car-rate half of the import cell and the debug-history column
+           are desktop conveniences; drop them so the plan fits the screen */
+        .plan-car-rate,
+        .plan-debug-col {
+            display: none;
+        }
     }
 
     .battery-wrapper {
@@ -8170,31 +8455,6 @@ function toggleDarkMode() {
     localStorage.setItem('darkMode', isDarkMode);
     // Force reload to apply dark mode styles
     location.reload();
-}
-
-function flyBat() {
-    // Remove any existing flying bats
-    document.querySelectorAll('.flying-bat').forEach(bat => bat.remove());
-
-    // Create a new bat element
-    const bat = document.createElement('div');
-    bat.className = 'flying-bat';
-
-    // Get the appropriate bat image based on dark/light mode
-    const isDarkMode = document.body.classList.contains('dark-mode');
-    const batImage = isDarkMode
-        ? './images/bat_logo_dark.png'
-        : './images/bat_logo_light.png';
-
-    bat.style.backgroundImage = `url('${batImage}')`;
-
-    // Add to document
-    document.body.appendChild(bat);
-
-    // Remove after animation completes
-    setTimeout(() => {
-        bat.remove();
-    }, 4100);  // Slightly longer than the animation duration
 }
 
 function restartPredbat() {
@@ -8556,6 +8816,14 @@ justify-content: center;
 body.dark-mode .dark-mode-toggle button { background: transparent !important; }
 }
 
+/* Fork divergence: upstream renders a bat logo <img> inside .menu-bar and a
+   .flying-bat easter egg. Both are removed here because the image ships at
+   370x184 and, unconstrained, breaks this fork's compact single-row mobile
+   app bar. Keep this rule so a future upstream merge that reintroduces the
+   markup without its CSS cannot regress the phone layout again. */
+.menu-bar .logo,
+.flying-bat { display: none; }
+
 /* Very narrow phones: squeeze the bar further so it stays a single row */
 @media (max-width: 360px) {
 .nav-toggle { width: 40px; margin-left: 0; }
@@ -8804,16 +9072,6 @@ setTimeout(syncMenuOffset, 100);
 
 <div class="menu-bar">
 <button class="nav-toggle" onclick="toggleNavDrawer()" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav-drawer">&#9776;</button>
-<div class="logo">
-    <img id="logo-image"
-            src="./images/bat_logo_light.png"
-            data-light-src="./images/bat_logo_light.png"
-            data-dark-src="./images/bat_logo_dark.png"
-            alt="Predbat Logo"
-            onclick="flyBat()"
-            style="cursor: pointer;"
-    >
-</div>
 <div class="nav-status">
     <span id="status-icon">"""
         + status_icon

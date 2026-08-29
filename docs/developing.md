@@ -45,6 +45,8 @@ It is slower, since building the instance is most of the cost of a short test, b
 passes in the suite and fails under `--isolate` is coupled to whatever ran before it. If several
 tests fail in one run, re-run with `--isolate` to tell genuine failures from knock-on ones.
 
+When a model scenario fails, a plot of its SoC and metric is written to `<scenario_name>.png` in the working directory. Add `--plot` to also open that plot on screen. It's off by default because displaying it blocks until you close the window, which would stall an unattended or CI run - a failing test would look like a hang rather than reporting the failure.
+
 For coverage analysis install the 'coverage' library with Python, or use the version installed from `requirements.txt`.
 
 1. ./run_cov --quick

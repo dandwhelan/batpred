@@ -41,6 +41,7 @@ class MockPredHeatBase:
     def __init__(self, args=None):
         """Set up empty capture buffers and the apps.yaml style argument dictionary."""
         self.args = dict(args or {})
+        self.prefix = "predbat"
         self.log_messages = []
         self.status_messages = []
         self.states = {}

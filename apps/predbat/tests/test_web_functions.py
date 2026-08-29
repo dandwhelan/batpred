@@ -181,6 +181,22 @@ def run_web_functions_tests(my_predbat):
         failed += 1
 
     # -------------------------------------------------------------------------
+    # Companion app cannot save tgz/create-debug downloads (its webview ignores
+    # Content-Disposition: attachment) - the page carrying those download links must say so
+    # and point at the debug/ folder mirror instead of trying to detect/grey out the links
+    # (#4720). This fork's dash redesign moved that link table off the status page and into
+    # the entity dump page's collapsed debug section (get_debug_section_html), so the caveat
+    # is checked on the section that carries the links it qualifies.
+    print("Test: the debug download section explains the Companion app limitation and the debug/ folder workaround")
+    debug_html = web.get_debug_section_html()
+    if "Companion app" not in debug_html:
+        print(f"  ERROR: expected a Companion app caveat beside the debug downloads, got: {debug_html}")
+        failed += 1
+    if "{}/debug/".format(my_predbat.config_root_p) not in debug_html:
+        print(f"  ERROR: expected the caveat to point at config_root_p/debug/, got: {debug_html}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
     # is_running() must handle both the legacy naive last_updated format (pre-existing
     # installs, before record_status() started writing a timezone-aware value) and the
     # current timezone-aware format, without raising on the naive/aware datetime subtraction
