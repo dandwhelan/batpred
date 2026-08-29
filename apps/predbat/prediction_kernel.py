@@ -35,7 +35,7 @@ from utils import get_curve_value, find_battery_temperature_cap, in_car_slot, in
 # 2026-08-24 upstream merge along with the rest of the FIT feature, so the fork is back on
 # upstream's plain ABI numbering instead of staying artificially ahead of it. See prediction_kernel.cpp.
 KERNEL_ABI_VERSION = 5
-KERNEL_PARITY_REVISION = 9
+KERNEL_PARITY_REVISION = 10
 
 # Maximum number of cars supported by the kernel (PK_MAX_CARS in prediction_kernel.cpp)
 KERNEL_MAX_CARS = PREDBAT_MAX_CARS
@@ -123,6 +123,7 @@ class PkContext(ctypes.Structure):
         ("set_export_low_power", ctypes.c_int32),
         ("calculate_export_on_pv", ctypes.c_int32),
         ("inverter_can_charge_during_export", ctypes.c_int32),
+        ("inverter_support_feedin_first", ctypes.c_int32),
         ("num_cars", ctypes.c_int32),
         ("car_energy_reported_load", ctypes.c_int32),
         ("car_charging_from_battery", ctypes.c_int32),
@@ -710,6 +711,7 @@ def create_kernel_context(pred, static_cache=None):
         ctx.set_export_low_power = 1 if pred.set_export_low_power else 0
         ctx.calculate_export_on_pv = 1 if pred.calculate_export_on_pv else 0
         ctx.inverter_can_charge_during_export = 1 if pred.inverter_can_charge_during_export else 0
+        ctx.inverter_support_feedin_first = 1 if pred.inverter_support_feedin_first else 0
         ctx.num_cars = num_cars
         ctx.car_energy_reported_load = 1 if pred.car_energy_reported_load else 0
         ctx.car_charging_from_battery = 1 if pred.car_charging_from_battery else 0
@@ -745,7 +747,15 @@ def kernel_supported(pred, save, step):
     granularity internally, which is strictly finer than the coarse "fast mode" step (e.g. 30)
     the Python engine falls back to for speed - so kernel runs are both faster and more accurate
     than a coarse-step Python run, never an approximation of what was asked for.
+
+    FIT is the exception: the 2026-08-24 upstream merge dropped this fork's FIT fields from
+    PkContext, so the kernel has no notion of the generation tariff, the deemed-export payment
+    or the export-rate zeroing that prediction.py applies when FIT is active. Running it anyway
+    would silently return a plan costed as though FIT were off, so an active FIT configuration
+    falls back to the Python engine - slower, but the answer the user configured for.
     """
+    if getattr(pred, "metric_fit_generation_rate", 0) > 0 or getattr(pred, "metric_fit_deemed_export_rate", 0) > 0:
+        return False
     return not save and not pred.debug_enable and getattr(pred, "kernel_handle", 0) != 0
 
 

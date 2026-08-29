@@ -54,7 +54,9 @@ batteryb
 batusecap
 beforeunload
 bierner
+BLAS
 boostable
+Bottlecap
 brickatius
 byok
 cadata
@@ -80,6 +82,8 @@ Chrg
 citem
 cloudfront
 cobat
+codepoint
+codepoints
 Codespaces
 COEFF
 collaps
@@ -181,6 +185,7 @@ entrez
 entrypoint
 epod
 epvtoday
+errno
 errorcode
 ESSAPI
 etoday
@@ -224,6 +229,7 @@ generationmix
 generationpower
 geserial
 geseriale
+getaffinity
 getall
 getrusage
 Ginlong
@@ -389,6 +395,7 @@ njpwerner
 nobat
 nocharge
 nodischarge
+nohup
 noopener
 nord
 nordpool
@@ -403,6 +410,7 @@ OCPP
 octo
 octoplus
 octopoints
+OFFPEAK
 Ofgem
 Ohme
 ohmepy
@@ -577,6 +585,8 @@ subtractable
 sunspec
 sunsynk
 supabase
+suspendedev
+suspendedevse
 synkctl
 syscmd
 sysdn
@@ -591,6 +601,7 @@ Teslemetry
 testname
 thirdparty
 threadpool
+threadpoolctl
 timea
 timeb
 timec
@@ -634,9 +645,12 @@ unparseable
 unpickled
 unpickles
 unpushed
+unredacted
+unreproduced
 unsmoothed
 unstaged
 unsubtracted
+untriaged
 urandom
 urlsafe
 uscapacity
@@ -675,6 +689,7 @@ YOURSERIAL
 yuanzhi
 zappi
 zappis
+zcat
 zigbee
 zoomin
 zoomout
