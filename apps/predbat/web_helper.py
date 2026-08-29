@@ -6907,7 +6907,7 @@ def get_plan_renderer_js():
                 html += th('co2_total', 'CO2 kg');
             }
             if (showHistoryLinks) {
-                html += '<th><b>Debug</b></th>';
+                html += '<th class="plan-debug-col"><b>Debug</b></th>';
             }
             html += '</tr>';
 
@@ -6956,7 +6956,7 @@ def get_plan_renderer_js():
                     html += `<td id=import data-minute="${row.slot_minute}" data-rate="${row.import_rate}" style="padding:0;">`;
                     html += `<div style="display:flex;">`;
                     html += `<div style="flex:1;padding:4px;background-color:${row.rate_color_import || '#FFFFFF'};" title="${houseTitle}">${importText}</div>`;
-                    html += `<div style="flex:1;padding:4px;background-color:${row.car_rate_color || '#FFFFFF'};" title="${carTitle}">${row.car_rate.toFixed(2)}</div>`;
+                    html += `<div class="plan-car-rate" style="flex:1;padding:4px;background-color:${row.car_rate_color || '#FFFFFF'};" title="${carTitle}">${row.car_rate.toFixed(2)}</div>`;
                     html += `</div></td>`;
                 } else {
                     html += `<td id=import ${cellStyle} bgcolor=${row.rate_color_import || '#FFFFFF'}>${importText}</td>`;
@@ -7083,9 +7083,9 @@ def get_plan_renderer_js():
                     if (snap) {
                         const snapWhen = new Date(snap.timestamp);
                         const snapLabel = isNaN(snapWhen.getTime()) ? snap.id : snapWhen.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-                        html += `<td bgcolor=#FFFFFF><a href="./debug_history_download?id=${encodeURIComponent(snap.id)}">&#8681; ${snapLabel}</a></td>`;
+                        html += `<td class="plan-debug-col" bgcolor=#FFFFFF><a href="./debug_history_download?id=${encodeURIComponent(snap.id)}">&#8681; ${snapLabel}</a></td>`;
                     } else {
-                        html += '<td bgcolor=#FFFFFF></td>';
+                        html += '<td class="plan-debug-col" bgcolor=#FFFFFF></td>';
                     }
                 }
 
@@ -7147,7 +7147,7 @@ def get_plan_renderer_js():
 
                 // Empty cell for the Debug history column
                 if (showHistoryLinks) {
-                    html += '<td></td>';
+                    html += '<td class="plan-debug-col"></td>';
                 }
 
                 html += '</tr>';
@@ -8139,6 +8139,19 @@ if (localStorage.getItem('darkMode') === 'true') {
             max-width: 100%;
             box-sizing: border-box;
         }
+        /* Reclaim horizontal room in the plan table: it is the widest thing
+           Predbat renders and on a phone every pixel of padding costs a
+           column of sideways scrolling */
+        table th,
+        table td {
+            padding: 2px 4px;
+        }
+        /* The car-rate half of the import cell and the debug-history column
+           are desktop conveniences; drop them so the plan fits the screen */
+        .plan-car-rate,
+        .plan-debug-col {
+            display: none;
+        }
     }
 
     .battery-wrapper {
@@ -8170,31 +8183,6 @@ function toggleDarkMode() {
     localStorage.setItem('darkMode', isDarkMode);
     // Force reload to apply dark mode styles
     location.reload();
-}
-
-function flyBat() {
-    // Remove any existing flying bats
-    document.querySelectorAll('.flying-bat').forEach(bat => bat.remove());
-
-    // Create a new bat element
-    const bat = document.createElement('div');
-    bat.className = 'flying-bat';
-
-    // Get the appropriate bat image based on dark/light mode
-    const isDarkMode = document.body.classList.contains('dark-mode');
-    const batImage = isDarkMode
-        ? './images/bat_logo_dark.png'
-        : './images/bat_logo_light.png';
-
-    bat.style.backgroundImage = `url('${batImage}')`;
-
-    // Add to document
-    document.body.appendChild(bat);
-
-    // Remove after animation completes
-    setTimeout(() => {
-        bat.remove();
-    }, 4100);  // Slightly longer than the animation duration
 }
 
 function restartPredbat() {
@@ -8556,6 +8544,14 @@ justify-content: center;
 body.dark-mode .dark-mode-toggle button { background: transparent !important; }
 }
 
+/* Fork divergence: upstream renders a bat logo <img> inside .menu-bar and a
+   .flying-bat easter egg. Both are removed here because the image ships at
+   370x184 and, unconstrained, breaks this fork's compact single-row mobile
+   app bar. Keep this rule so a future upstream merge that reintroduces the
+   markup without its CSS cannot regress the phone layout again. */
+.menu-bar .logo,
+.flying-bat { display: none; }
+
 /* Very narrow phones: squeeze the bar further so it stays a single row */
 @media (max-width: 360px) {
 .nav-toggle { width: 40px; margin-left: 0; }
@@ -8804,16 +8800,6 @@ setTimeout(syncMenuOffset, 100);
 
 <div class="menu-bar">
 <button class="nav-toggle" onclick="toggleNavDrawer()" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav-drawer">&#9776;</button>
-<div class="logo">
-    <img id="logo-image"
-            src="./images/bat_logo_light.png"
-            data-light-src="./images/bat_logo_light.png"
-            data-dark-src="./images/bat_logo_dark.png"
-            alt="Predbat Logo"
-            onclick="flyBat()"
-            style="cursor: pointer;"
-    >
-</div>
 <div class="nav-status">
     <span id="status-icon">"""
         + status_icon
