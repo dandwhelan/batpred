@@ -68,16 +68,27 @@ class MockRequest:
 class MockHAInterface:
     """Records configuration writes made through the Home Assistant interface."""
 
-    def __init__(self):
+    def __init__(self, base=None):
         """Start with no recorded writes and no injected failure."""
         self.writes = []
         self.fail = False
+        self.base = base
 
     async def set_state_external(self, entity_id, value):
-        """Record a configuration write, or fail if the test asked for a failure."""
+        """Record a configuration write, or fail if the test asked for a failure.
+
+        Also lands the value on the matching CONFIG_ITEMS entry, because that is what a real
+        service call does and set_config now reads the setting back to confirm the write took
+        effect (v8.54.0). A mock that only recorded the call would report every write as
+        "did not take effect".
+        """
         if self.fail:
             raise RuntimeError("home assistant unavailable")
         self.writes.append((entity_id, value))
+        for item in getattr(self.base, "CONFIG_ITEMS", []) or []:
+            if item.get("entity") == entity_id or item.get("name") == entity_id:
+                item["value"] = value
+                break
 
 
 class MockMCPBase:
@@ -93,7 +104,7 @@ class MockMCPBase:
         self.args = {}
         self.CONFIG_ITEMS = []
         self.ha_config = {}
-        self.ha_interface = MockHAInterface()
+        self.ha_interface = MockHAInterface(self)
         self.manual_selects = []
         self.update_pending = False
         self.plan_valid = True
@@ -1507,6 +1518,9 @@ def _test_wrapper_set_config(_my_predbat):
     """set_config writes through to Home Assistant and validates its arguments."""
     print("Test: the set_config tool")
     wrapper, base = make_wrapper()
+    # set_config refuses a name it cannot find in CONFIG_ITEMS (v8.54.0), so the setting under
+    # test has to exist - writing into the void used to be reported as success.
+    base.CONFIG_ITEMS = [{"name": "mode", "entity": "select.predbat_mode", "value": "Control charge"}]
 
     result = run_async(wrapper._execute_set_config({"entity_id": "select.predbat_mode", "value": "Monitor"}))
     if not result["success"]:
