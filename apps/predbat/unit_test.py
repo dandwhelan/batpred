@@ -117,8 +117,13 @@ from tests.test_web_debug_history_routes import test_web_debug_history_routes
 from tests.test_web_mcp_tools import run_web_mcp_tests
 from tests.test_debug_history_client_js import test_debug_history_client_js
 from tests.test_metrics_dashboard_soc_refresh import test_soc_chart_center_text_reads_live_data
-from tests.test_web_functions import run_web_functions_tests, run_web_logo_image_tests
 from tests.test_web_mobile import run_web_mobile_tests
+from tests.test_agent_tools import run_agent_tools_tests
+from tests.test_chat_store import run_chat_store_tests
+from tests.test_chat_tools import run_chat_tools_tests
+from tests.test_chat import run_chat_tests
+from tests.test_web_chat import run_web_chat_tests
+from tests.test_web_functions import run_web_functions_tests, run_web_logo_image_tests, run_web_dark_mode_preference_tests
 from tests.test_web_power_flow import run_web_power_flow_tests
 from tests.test_web_history_table import run_web_history_table_tests
 from tests.test_web_charts import run_web_charts_tests
@@ -222,7 +227,7 @@ from tests.test_open_meteo import run_open_meteo_tests
 from tests.test_solar_model import test_solar_model
 from tests.test_annual_profiles import test_annual_profiles
 from tests.test_annual_load import test_annual_load, test_annual_load_octopus
-from tests.test_annual_weather import test_annual_weather
+from tests.test_annual_weather import test_annual_weather, test_annual_weather_orientation_cache, test_annual_weather_window
 from tests.test_annual_tariff import test_annual_tariff
 from tests.test_rate_add_io_slots import run_rate_add_io_slots_tests
 from tests.test_iog_charge_skew import run_iog_charge_skew_tests
@@ -283,13 +288,16 @@ from tests.test_load_today_comparison import test_load_today_comparison
 from tests.test_annual_config import test_annual_config
 from tests.test_annual_bootstrap import test_annual_bootstrap
 from tests.test_annual_sampling import test_annual_sampling
+from tests.test_annual_weekday_sampling import test_annual_weekday_sampling
 from tests.test_annual_interpolate import test_annual_fast_mode_assembly, test_annual_interpolate
 from tests.test_annual_curve_reference import test_annual_curve_reference
 from tests.test_annual_scenarios import test_annual_scenarios
 from tests.test_annual_results import test_annual_results
 from tests.test_annual_integration import test_annual_integration, test_annual_heat_integration
 from tests.test_annual_heat import test_annual_heat
-from tests.test_annual_cli import test_annual_cli, test_annual_cli_fast_flag, test_annual_cli_machine, test_annual_cli_machine_end_to_end
+from tests.test_annual_cli import test_annual_cli, test_annual_cli_fast_flag, test_annual_cli_machine, test_annual_cli_machine_end_to_end, test_annual_cli_export_compare_flags, test_annual_cli_apply_cli_overrides_config_shapes
+from tests.test_annual_cli import test_annual_cli_export_compare_table
+from tests.test_annual_cli import test_annual_cli_export_compare_table_partial_failure, test_annual_cli_export_compare_table_baseline_fallback, test_annual_cli_export_compare_table_months_requested_wording
 from tests.test_annual_job import test_annual_job
 from tests.test_tariff_catalogue import test_tariff_catalogue
 from tests.test_annual_store import test_annual_store
@@ -306,6 +314,14 @@ from tests.test_plugin_system import run_plugin_system_tests
 from tests.test_annual_http import test_annual_http
 from tests.test_output_publish import test_output_publish
 from tests.test_web_apps_post import test_web_apps_post
+from tests.test_annual_export_sweep import (
+    test_annual_export_sweep,
+    test_annual_export_sweep_card_shape,
+    test_annual_export_sweep_dno_region,
+    test_annual_export_sweep_rates_synthesised,
+    test_annual_export_sweep_run,
+    test_annual_export_sweep_tariff_threading,
+)
 from tests.test_debug_history import test_debug_history
 from tests.test_debug_history_capture import test_debug_history_capture, test_debug_history_capture_slot_alignment
 
@@ -394,6 +410,7 @@ def create_predbat():
     my_predbat.reset()
     my_predbat.update_time()
     my_predbat.ha_interface = TestHAInterface()
+    my_predbat.ha_interface.base = my_predbat
     my_predbat.ha_interface.history_enable = False
     my_predbat.auto_config()
     my_predbat.load_user_config()
@@ -502,12 +519,18 @@ def main():
         ("web_chart_currency", test_rates_chart_series_names_use_currency_symbol, "Rates chart series names follow currency_symbols tests", False),
         ("web_debug_history_routes", test_web_debug_history_routes, "Debug-history web routes tests (#4438 review items 4, 6, 21)", False),
         ("web_mcp_tools", run_web_mcp_tests, "MCP get_log and apps.yaml redaction tests (issue #4768)", False),
+        ("agent_tools", run_agent_tools_tests, "Shared agent tool layer and schema projection tests", False),
+        ("chat_store", run_chat_store_tests, "Chat conversation store tests (expiry, deletion, LRU, trimming)", False),
+        ("chat_tools", run_chat_tools_tests, "Chat agent docs search, source access and URL fetch guard tests", False),
+        ("chat", run_chat_tests, "Chat agent component, snapshot and event buffer tests", False),
+        ("web_chat", run_web_chat_tests, "Chat tab route, SSE framing and markdown escaping tests", False),
         ("debug_history_client_js", test_debug_history_client_js, "Debug-history client-side JS structure tests (#4438 review item 22)", False),
         ("metrics_dashboard_soc_refresh", test_soc_chart_center_text_reads_live_data, "Metrics dashboard SoC chart live-refresh tests", False),
         ("web_functions", run_web_functions_tests, "Web function unit tests", False),
         ("web_power_flow", run_web_power_flow_tests, "Power flow diagram car charging tests", False),
         ("web_logo_image", run_web_logo_image_tests, "Local logo image route tests (issue #4562)", False),
         ("web_mobile", run_web_mobile_tests, "Mobile header and plan table layout tests", False),
+        ("web_dark_mode_preference", run_web_dark_mode_preference_tests, "Dark mode follows OS prefers-color-scheme when unset (issue #4800)", False),
         ("web_annual", test_web_annual, "Annual web tab prefill tests", False),
         ("web_annual_form", test_web_annual_form, "Annual web tab form tests", False),
         ("web_annual_fast_mode", test_web_annual_fast_mode, "Annual web tab fast mode tests", False),
@@ -593,6 +616,8 @@ def main():
         ("annual_load", test_annual_load, "Annual prediction load profile tests", False),
         ("annual_load_octopus", test_annual_load_octopus, "Annual prediction Octopus consumption tests", False),
         ("annual_weather", test_annual_weather, "Annual prediction Open-Meteo weather tests", False),
+        ("annual_weather_orientation_cache", test_annual_weather_orientation_cache, "Annual weather cache keys separate roof orientations", False),
+        ("annual_weather_window", test_annual_weather_window, "Annual weather month-window fetch tests", False),
         ("annual_tariff", test_annual_tariff, "Annual prediction tariff tests", False),
         ("solax", run_solax_tests, "SolaX API tests", False),
         ("sigenergy", run_sigenergy_tests, "Sigenergy Cloud API tests", False),
@@ -703,6 +728,7 @@ def main():
         ("annual_config", test_annual_config, "Annual prediction config validation tests", False),
         ("annual_bootstrap", test_annual_bootstrap, "Annual prediction bootstrap and state reset tests", False),
         ("annual_sampling", test_annual_sampling, "Annual prediction sample selection tests", False),
+        ("annual_weekday_sampling", test_annual_weekday_sampling, "Annual weekday-spread sample selection tests", False),
         ("annual_scenarios", test_annual_scenarios, "Annual prediction scenario helper tests", False),
         ("annual_results", test_annual_results, "Annual prediction results assembly tests", False),
         ("annual_cli", test_annual_cli, "Annual prediction CLI output tests", False),
@@ -712,11 +738,23 @@ def main():
         ("annual_curve_reference", test_annual_curve_reference, "Annual fast-mode curve reference scoring", False),
         ("annual_cli_machine", test_annual_cli_machine, "Annual CLI machine mode tests", False),
         ("annual_cli_machine_end_to_end", test_annual_cli_machine_end_to_end, "Annual CLI machine mode end-to-end tests", False),
+        ("annual_cli_export_compare", test_annual_cli_export_compare_flags, "Annual CLI export-compare flag tests", False),
+        ("annual_cli_overrides_shapes", test_annual_cli_apply_cli_overrides_config_shapes, "Annual CLI apply_cli_overrides config-shape and error-handling tests", False),
+        ("annual_cli_export_compare_table", test_annual_cli_export_compare_table, "Annual CLI export-compare table tests", False),
+        ("annual_cli_export_compare_table_partial_failure", test_annual_cli_export_compare_table_partial_failure, "Annual CLI export-compare table partial-failure (scenarios=None) tests", False),
+        ("annual_cli_export_compare_table_baseline_fallback", test_annual_cli_export_compare_table_baseline_fallback, "Annual CLI export-compare table baseline-fallback and delta-sign tests", False),
+        ("annual_cli_export_compare_table_months_requested_wording", test_annual_cli_export_compare_table_months_requested_wording, "Annual CLI export-compare table months_requested wording tests", False),
         ("annual_job", test_annual_job, "Annual subprocess job control tests", False),
         ("annual_store", test_annual_store, "Annual run store tests", False),
         ("annual_http", test_annual_http, "Annual shared JSON-over-HTTP helper tests (statuses, transport failures, session reuse)", False),
         ("annual_costs", test_annual_costs, "Annual install cost and payback model tests", False),
         ("annual_heat", test_annual_heat, "Annual prediction heat pump / gas boiler model tests", False),
+        ("annual_export_sweep", test_annual_export_sweep, "Annual multi-export-tariff sweep tests", False),
+        ("annual_export_sweep_dno_region", test_annual_export_sweep_dno_region, "Annual export sweep dno_region templating validation tests", False),
+        ("annual_export_sweep_tariff_threading", test_annual_export_sweep_tariff_threading, "Annual export sweep per-tariff threading regression tests", False),
+        ("annual_export_sweep_card_shape", test_annual_export_sweep_card_shape, "Annual export sweep by_export card shape tests", False),
+        ("annual_export_sweep_rates_synthesised", test_annual_export_sweep_rates_synthesised, "Annual export sweep rates_synthesised semantics tests", False),
+        ("annual_export_sweep_run", test_annual_export_sweep_run, "Annual export sweep run() caveat-scoping and terminal-progress tests", False),
         ("tariff_catalogue", test_tariff_catalogue, "Tariff catalogue tests", False),
         ("predheat", test_predheat, "PredHeat heat pump/gas prediction tests (tables, physics loop, scheduling)", False),
         ("web_mcp", test_web_mcp, "MCP server tests (OAuth flow, JWT tokens, PKCE, endpoint auth, tool dispatch)", False),

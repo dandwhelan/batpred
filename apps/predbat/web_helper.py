@@ -8094,7 +8094,7 @@ def get_plan_renderer_js():
     return text
 
 
-def get_header_html(title, calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon, refresh=0, codemirror=False):
+def get_header_html(title, calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon, refresh=0, codemirror=False, chat_enabled=False):
     """
     Return the HTML header for a page
     """
@@ -8106,7 +8106,15 @@ def get_header_html(title, calculating, default_page, arg_errors, THIS_VERSION, 
     text += """
 <script>
 // Apply dark mode immediately before CSS is parsed to prevent flash of white
-if (localStorage.getItem('darkMode') === 'true') {
+// Falls back to the OS/browser prefers-color-scheme setting when the user hasn't made an explicit choice (batpred#4800)
+function getDarkModePreference() {
+    const storedDarkMode = localStorage.getItem('darkMode');
+    if (storedDarkMode !== null) {
+        return storedDarkMode === 'true';
+    }
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+if (getDarkModePreference()) {
     document.documentElement.classList.add('dark-mode');
     document.addEventListener('DOMContentLoaded', function() {
         if (document.body) {
@@ -8439,7 +8447,7 @@ window.onload = function() {
     applyDarkMode();
 };
 function applyDarkMode() {
-    const darkModeEnabled = localStorage.getItem('darkMode') === 'true';
+    const darkModeEnabled = getDarkModePreference();
     if (darkModeEnabled) {
         document.body.classList.add('dark-mode');
         document.documentElement.classList.add('dark-mode');
@@ -8449,6 +8457,22 @@ function applyDarkMode() {
         document.documentElement.classList.remove('dark-mode');
     }
 };
+
+// Re-apply if the OS/browser theme changes while no explicit preference is stored (batpred#4800)
+if (window.matchMedia) {
+    const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleDarkModePreferenceChange = function() {
+        if (localStorage.getItem('darkMode') === null) {
+            applyDarkMode();
+        }
+    };
+    // Safari < 14 and Chrome < 39 only implement the older, deprecated addListener() method
+    if (darkModeMediaQuery.addEventListener) {
+        darkModeMediaQuery.addEventListener('change', handleDarkModePreferenceChange);
+    } else if (darkModeMediaQuery.addListener) {
+        darkModeMediaQuery.addListener(handleDarkModePreferenceChange);
+    }
+}
 
 function toggleDarkMode() {
     const isDarkMode = document.body.classList.toggle('dark-mode');
@@ -8549,11 +8573,11 @@ function toggleSwitch(element, fieldName) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.9/addon/lint/lint.min.css">
     </head>"""
     text += "</head><body>"
-    text += get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon)
+    text += get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon, chat_enabled)
     return text
 
 
-def get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon):
+def get_menu_html(calculating, default_page, arg_errors, THIS_VERSION, battery_status_icon, chat_enabled=False):
     """
     Return the Predbat Menu page as HTML
     """
@@ -9090,7 +9114,9 @@ setTimeout(syncMenuOffset, 100);
 <a href='./charts'>Charts</a>
 <a href='./compare'>Compare</a>
 <a href='./annual'>WhatIf</a>
-<a href='./config'>Config</a>
+"""
+        + ("<a href='./chat'>Chat</a>\n" if chat_enabled else "")
+        + """<a href='./config'>Config</a>
 <details class="nav-more">
 <summary>Advanced &#9662;"""
         + config_warning
@@ -9112,7 +9138,9 @@ setTimeout(syncMenuOffset, 100);
 <a href='./charts'>Charts</a>
 <a href='./compare'>Compare</a>
 <a href='./annual'>WhatIf</a>
-<a href='./config'>Config</a>
+"""
+        + ("<a href='./chat'>Chat</a>\n" if chat_enabled else "")
+        + """<a href='./config'>Config</a>
 <div class="nav-drawer-heading">Advanced"""
         + config_warning
         + """</div>

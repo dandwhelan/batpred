@@ -108,6 +108,7 @@ def run_test_web_if(my_predbat):
             ("GET", "/annual"),
             ("GET", "/annual_view"),
             ("GET", "/annual_compare"),
+            ("GET", "/chat"),
             ("GET", "/annual_status"),
             ("GET", "/annual_plan"),
             ("GET", "/annual_cost_preview"),
@@ -139,6 +140,29 @@ def run_test_web_if(my_predbat):
             ("GET", "/debug_history_download"),
             ("GET", "/debug_history_download_all"),
             ("GET", "/images/{filename}"),
+            # Upstream's chat routes (v8.54.0), covered instead by test_web_chat.py, which
+            # drives them with a real conversation. The page itself is swept above; these
+            # cannot be: /chat/stream is a long-lived SSE response that never completes,
+            # and the rest act on a conversation id or a model choice that a bare request has
+            # no way to supply - a blanket GET/POST would only ever exercise their argument
+            # validation, which is not what this sweep is for.
+            ("GET", "/chat/conversations"),
+            ("GET", "/chat/history"),
+            ("GET", "/chat/models"),
+            ("GET", "/chat/providers"),
+            ("GET", "/chat/status"),
+            ("GET", "/chat/stream"),
+            ("POST", "/chat/cancel"),
+            ("POST", "/chat/confirm"),
+            ("POST", "/chat/conversations"),
+            ("POST", "/chat/delete"),
+            ("POST", "/chat/model"),
+            ("POST", "/chat/provider"),
+            ("POST", "/chat/providers"),
+            ("POST", "/chat/providers/models"),
+            ("POST", "/chat/rename"),
+            ("POST", "/chat/send"),
+            ("POST", "/chat/status"),
         }
         listed = set(all_endpoints)
         unlisted = registered - listed - sweep_exempt
