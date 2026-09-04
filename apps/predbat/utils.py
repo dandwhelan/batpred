@@ -20,9 +20,11 @@ import re
 import array
 import os
 from datetime import datetime, timedelta, timezone, time
+from io import StringIO
 from functools import lru_cache
 from const import LOW_POWER_PV_THRESHOLD, MINUTE_WATT, PREDICT_STEP, TIME_FORMAT, TIME_FORMAT_SECONDS, TIME_FORMAT_OCTOPUS, MAX_INCREMENT, TIME_FORMAT_DAILY
 import copy
+import json
 
 DAY_OF_WEEK_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
@@ -143,11 +145,51 @@ def is_debug_excluded_key(key):
     return is_secret_key(key)
 
 
-def is_secret_key(key):
+_REGISTRY_SECRET_NAMES = None
+
+
+def registry_secret_key_names():
     """
-    Return True when an apps.yaml key name looks like it holds a credential.
+    Return the apps.yaml config names components.py explicitly flags with "secret": True.
+
+    utils is imported by every component module, so components cannot be imported at module
+    scope here - it is imported on first use instead. An empty or failed result is not cached,
+    so a redaction that runs while components is still importing (a partially initialised
+    module) resolves properly on the next call rather than silently losing these names for the
+    life of the process. Standalone tools that never import components keep working on the
+    substring heuristic alone.
+    """
+    global _REGISTRY_SECRET_NAMES
+    if _REGISTRY_SECRET_NAMES is None:
+        try:
+            import components
+
+            names = components.secret_config_names()
+        except Exception:
+            names = None
+        if not names:
+            return frozenset()
+        _REGISTRY_SECRET_NAMES = frozenset(names)
+    return _REGISTRY_SECRET_NAMES
+
+
+def is_secret_key(key, registry=True):
+    """
+    Return True when an apps.yaml key name holds a credential and must not be served in the clear.
+
+    An explicit "secret": True flag in the component registry wins over both the substring
+    heuristic and the exempt-suffix list - the registry names a credential the key name alone
+    cannot reveal, such as an account number or a login identifier.
+
+    registry=False drops back to the key-name substrings alone, for callers asking the narrower
+    question "does this grant access?" rather than "must this be redacted?". Only
+    find_unmasked_secret_paths() does: an account number identifies rather than authenticates, so
+    telling every user with an inline octopus_api_account to move it into secrets.yaml would be
+    noise. Redaction is the strict default so a new caller fails safe rather than leaking.
     """
     key_lower = str(key).lower()
+    if registry and key_lower in registry_secret_key_names():
+        return True
     if key_lower.endswith(SECRET_KEY_EXEMPT_SUFFIXES):
         return False
     return any(substring in key_lower for substring in SECRET_KEY_SUBSTRINGS)
@@ -189,6 +231,12 @@ def find_unmasked_secret_paths(node, path=""):
     of every credential-like key (per is_secret_key()) whose value is a plain scalar rather
     than a '!secret' reference into secrets.yaml (loaded as a ruamel TaggedScalar).
 
+    Deliberately asks is_secret_key(registry=False): this drives the "stored in plain text,
+    consider !secret" advice, which is about values that grant access. The registry additionally
+    flags account numbers, meter point numbers and login identifiers so they are redacted out of
+    anything shared, but an inline octopus_api_account is the documented normal setup and
+    warning every user about it would be noise rather than advice.
+
     Only usable against a document loaded with ruamel's round-trip loader - a plain
     yaml.safe_load() has already resolved '!secret' tags to their real value and lost the
     distinction this depends on.
@@ -198,7 +246,7 @@ def find_unmasked_secret_paths(node, path=""):
     if isinstance(node, dict):
         for key, value in node.items():
             key_path = "{}.{}".format(path, key) if path else str(key)
-            if is_secret_key(key):
+            if is_secret_key(key, registry=False):
                 if value not in (None, "") and not isinstance(value, TaggedScalar):
                     yield key_path
             else:
@@ -206,6 +254,53 @@ def find_unmasked_secret_paths(node, path=""):
     elif isinstance(node, list):
         for index, item in enumerate(node):
             yield from find_unmasked_secret_paths(item, "{}[{}]".format(path, index))
+
+
+def _mask_secrets_in_yaml_node(node):
+    """
+    Redact credential values in a ruamel round-trip node, in place, leaving layout alone.
+
+    A '!secret name' reference (a TaggedScalar) is left exactly as written: it holds no
+    credential, only the name of one in secrets.yaml, and which secret a key resolves to is
+    what makes a misconfigured integration diagnosable.
+    """
+    from ruamel.yaml.comments import TaggedScalar
+
+    if isinstance(node, dict):
+        for key in node:
+            value = node[key]
+            if is_secret_key(key):
+                if value not in (None, "") and not isinstance(value, TaggedScalar):
+                    node[key] = SECRET_MASK
+            else:
+                _mask_secrets_in_yaml_node(value)
+    elif isinstance(node, list):
+        for item in node:
+            _mask_secrets_in_yaml_node(item)
+
+
+def mask_secret_yaml_text(text):
+    """
+    Return apps.yaml text with credential values redacted, preserving comments and layout.
+
+    mask_secret_args() redacts the parsed args Predbat is running on; this redacts the file as
+    the user wrote it, so a download still reads like their own apps.yaml - comments, ordering,
+    quoting and '!secret' references intact - with only the credential values replaced.
+
+    Raises rather than returning anything on a file that will not parse: the caller asked for
+    a redacted document, and serving unredacted text because the parse failed is exactly the
+    leak this exists to prevent.
+    """
+    from ruamel.yaml import YAML
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = YAML_DUMP_WIDTH
+    data = yaml.load(text)
+    _mask_secrets_in_yaml_node(data)
+    buf = StringIO()
+    yaml.dump(data, buf)
+    return buf.getvalue()
 
 
 def read_predbat_log(logfile=PREDBAT_LOG_FILE, logfile_prev=PREDBAT_LOG_FILE_PREV):
@@ -1718,3 +1813,75 @@ def find_charge_rate(
         return best_rate, best_rate_real
     else:
         return max_rate, max_rate_real
+
+
+CDN_BLOCK_MARKERS = ("cloudfront", "request blocked", "the request could not be satisfied")
+HTML_DOCUMENT_PREFIXES = ("<!doctype", "<html")
+# Every Kraken-based provider mints its JWT through the same CDN-fronted endpoint, so an
+# edge block can catch the mint as well as the queries. Unlike a query the mint has no cached
+# result to fall back on: once the JWT expires every authenticated call needs a new one, so
+# without a backoff a component re-mints on every poll and keeps hammering an endpoint that
+# is already refusing it. Back off exponentially instead, capped so a block that lifts is
+# still picked up within the hour.
+TOKEN_MINT_BACKOFF_BASE_SECONDS = 300
+TOKEN_MINT_BACKOFF_MAX_SECONDS = 3600
+# Bound the exponent so a long block cannot grow 2 ** block_count without limit; the delay
+# is capped well before this, so the clamp only stops the arithmetic running away.
+TOKEN_MINT_BACKOFF_MAX_DOUBLINGS = 16
+# While suppressed the mint makes no request and so logs nothing, which leaves a reader of a
+# short log window unable to tell a deliberate cooldown from a bad API key. Repeat the reason
+# at most this often.
+TOKEN_MINT_BACKOFF_LOG_INTERVAL_SECONDS = 600
+
+
+def token_mint_backoff_seconds(block_count):
+    """Backoff delay in seconds after this many consecutive CDN blocks on a token mint.
+
+    Doubles per consecutive block from TOKEN_MINT_BACKOFF_BASE_SECONDS, capped at
+    TOKEN_MINT_BACKOFF_MAX_SECONDS so a block that lifts is still picked up within the hour.
+
+    Args:
+        block_count: Number of consecutive blocks so far, 1 for the first.
+
+    Returns:
+        int: Delay in seconds.
+    """
+    exponent = min(max(block_count - 1, 0), TOKEN_MINT_BACKOFF_MAX_DOUBLINGS)
+    return min(TOKEN_MINT_BACKOFF_BASE_SECONDS * (2**exponent), TOKEN_MINT_BACKOFF_MAX_SECONDS)
+
+
+def is_edge_block_body(text):
+    """Return True if a 403 body is positively identifiable as a CDN/WAF error page.
+
+    Kraken reports authentication problems as a JSON GraphQL error body (normally with
+    HTTP 200) or as a 401. A 403 carrying an HTML error page - e.g. CloudFront's
+    "Request blocked" - is edge rate limiting, not a credential problem, so the cached
+    token must be kept rather than discarded and immediately re-minted.
+
+    Two conditions must both hold: the body must not parse as JSON (anything the API
+    itself produces is JSON), and it must look like an HTML document or name a known CDN.
+    Matching on wording alone would misclassify a genuine JSON error that happens to say
+    something like "access denied", which would keep an invalid token forever - the same
+    permanent lockout this check exists to prevent, arrived at from the other direction.
+
+    Detection is deliberately conservative: a 403 we cannot identify as a CDN page keeps
+    the existing "refresh the token and retry" behaviour, which recovers genuinely revoked
+    tokens without needing a restart.
+
+    Args:
+        text: The raw response body.
+
+    Returns:
+        bool: True if the body carries a known CDN/WAF block signature.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    try:
+        json.loads(text)
+    except (ValueError, TypeError):
+        pass
+    else:
+        # A parseable JSON body came from the API, not from an edge appliance
+        return False
+    stripped = text.lstrip().lower()
+    return stripped.startswith(HTML_DOCUMENT_PREFIXES) or any(marker in stripped for marker in CDN_BLOCK_MARKERS)
