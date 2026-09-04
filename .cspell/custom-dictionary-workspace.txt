@@ -16,6 +16,7 @@ allclose
 alphaess
 annualform
 Anson
+antiphase
 apexcharts
 apikey
 appdaemon
@@ -217,6 +218,7 @@ fline
 FLOMASTA
 fontsize
 fontweight
+footgun
 Forestfire
 formaction
 formmethod
@@ -403,6 +405,7 @@ mypy
 nanmean
 nanstd
 nattribute
+nbytes
 ncalls
 ndash
 ndigits
