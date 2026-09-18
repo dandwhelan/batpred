@@ -20,17 +20,17 @@ timed pause mode, the Solis energy-control switch, and the GivTCP v3 REST writer
 """
 
 import copy
-import json
 
 from config import INVERTER_DEF, SOLAX_SOLIS_MODES, SOLAX_SOLIS_MODES_NEW
 from inverter import Inverter
-from tests.test_inverter import DummyRestAPI, dummy_sleep
 
 # Attribute on Inverter -> (key in INVERTER_DEF, default when the key is optional)
+# has_rest_api and has_fox_inverter_mode are deliberately absent: REST moved into the GivTCP
+# component and the Fox inverter-mode flag was dropped upstream, so neither is mirrored onto an
+# inv_ attribute any more - they stay declarative in INVERTER_DEF only.
 # has_timed_pause is deliberately absent: it is downgraded at construction when the inverter has no
 # pause_mode entity, and is covered by its own test below.
 PROFILE_FLAGS = {
-    "inv_has_rest_api": ("has_rest_api", None),
     "inv_has_mqtt_api": ("has_mqtt_api", None),
     "inv_output_charge_control": ("output_charge_control", None),
     "inv_charge_control_immediate": ("charge_control_immediate", None),
@@ -54,7 +54,6 @@ PROFILE_FLAGS = {
     "inv_can_span_midnight": ("can_span_midnight", None),
     "inv_charge_discharge_with_rate": ("charge_discharge_with_rate", False),
     "inv_target_soc_used_for_discharge": ("target_soc_used_for_discharge", True),
-    "inv_has_fox_inverter_mode": ("has_fox_inverter_mode", False),
 }
 
 # Keys Inverter.__init__ reads with a bare subscript, so a profile missing one raises KeyError on
@@ -440,162 +439,10 @@ def test_adjust_pause_mode_over_entities(my_predbat):
     return failed
 
 
-def _rest_inverter(my_predbat, rest_data):
-    """Build a GE inverter wired to a dummy GivTCP v3 REST endpoint carrying rest_data."""
-    dummy_rest = DummyRestAPI()
-    dummy_rest.rest_data = copy.deepcopy(rest_data)
-    saved_rest_arg = my_predbat.args.get("givtcp_rest", None)
-    my_predbat.args["givtcp_rest"] = "dummy"
-    inverter = _build(my_predbat, "GE", rest_postCommand=dummy_rest.dummy_rest_postCommand, rest_getData=dummy_rest.dummy_rest_getData)
-    inverter.sleep = dummy_sleep
-    inverter.rest_v3 = True
-    return inverter, dummy_rest, saved_rest_arg
-
-
-def _restore_rest_arg(my_predbat, saved_rest_arg):
-    """Put the givtcp_rest argument back the way the fixture had it."""
-    if saved_rest_arg is None:
-        my_predbat.args.pop("givtcp_rest", None)
-    else:
-        my_predbat.args["givtcp_rest"] = saved_rest_arg
-
-
-def test_rest_pause_and_discharge_schedule_writers(my_predbat):
-    """
-    The GivTCP v3 REST writers post their command, re-read, and report whether the write stuck.
-
-    A write that never lands has to come back False and be recorded as an error - reporting success
-    would leave Predbat believing the inverter is paused when it is still cycling the battery.
-    """
-    print("*** Running test: REST pause and discharge-schedule writers")
-    failed = 0
-
-    with open("cases/rest_v3.json", "r") as handle:
-        rest_v3 = json.load(handle)
-
-    # --- setBatteryPauseMode ---
-    inverter, dummy_rest, saved_rest_arg = _rest_inverter(my_predbat, rest_v3)
-    accepted = copy.deepcopy(rest_v3)
-    accepted["Control"]["Battery_pause_mode"] = "PauseBoth"
-    dummy_rest.queue_rest_data(accepted)
-    dummy_rest.get_commands()
-
-    result = inverter.rest_setBatteryPauseMode("PauseBoth")
-    commands = dummy_rest.get_commands()
-    failed |= _check("rest pause mode: reported success", result, True)
-    failed |= _check("rest pause mode: one command posted", len(commands), 1)
-    if commands:
-        failed |= _check_true("rest pause mode: correct endpoint", commands[0][0].endswith("/setBatteryPauseMode"))
-        failed |= _check("rest pause mode: payload", commands[0][1], {"state": "PauseBoth"})
-
-    # The inverter never takes the setting: the writer must give up and report failure
-    dummy_rest.clear_queue()
-    dummy_rest.rest_data = copy.deepcopy(rest_v3)
-    dummy_rest.get_commands()
-    result = inverter.rest_setBatteryPauseMode("PauseBoth")
-    failed |= _check("rest pause mode: reported failure when it never sticks", result, False)
-    failed |= _check_true("rest pause mode: retried more than once", len(dummy_rest.get_commands()) > 1)
-
-    # --- setPauseSlot ---
-    accepted = copy.deepcopy(rest_v3)
-    accepted["Timeslots"]["Battery_pause_start_time_slot"] = "00:00:00"
-    accepted["Timeslots"]["Battery_pause_end_time_slot"] = "23:59:00"
-    dummy_rest.clear_queue()
-    dummy_rest.queue_rest_data(accepted)
-    dummy_rest.get_commands()
-
-    result = inverter.rest_setPauseSlot("00:00:00", "23:59:00")
-    commands = dummy_rest.get_commands()
-    failed |= _check("rest pause slot: reported success", result, True)
-    if commands:
-        failed |= _check_true("rest pause slot: correct endpoint", commands[0][0].endswith("/setPauseSlot"))
-        # GivTCP wants HH:MM, so the seconds are trimmed off before posting
-        failed |= _check("rest pause slot: payload trimmed to HH:MM", commands[0][1], {"start": "00:00", "finish": "23:59"})
-
-    # --- enableDischargeSchedule ---
-    for state, published in ((True, "enable"), (False, "disable")):
-        accepted = copy.deepcopy(rest_v3)
-        accepted["Control"]["Enable_Discharge_Schedule"] = published
-        dummy_rest.clear_queue()
-        dummy_rest.queue_rest_data(accepted)
-        dummy_rest.get_commands()
-
-        result = inverter.rest_enableDischargeSchedule(state)
-        commands = dummy_rest.get_commands()
-        failed |= _check("rest discharge schedule {}: reported success".format(state), result, True)
-        if commands:
-            failed |= _check_true("rest discharge schedule {}: correct endpoint".format(state), commands[0][0].endswith("/enableDischargeSchedule"))
-            failed |= _check("rest discharge schedule {}: payload".format(state), commands[0][1], {"state": published})
-
-    # A boolean reply is accepted just as a worded one is
-    accepted = copy.deepcopy(rest_v3)
-    accepted["Control"]["Enable_Discharge_Schedule"] = True
-    dummy_rest.clear_queue()
-    dummy_rest.queue_rest_data(accepted)
-    failed |= _check("rest discharge schedule: boolean reply accepted", inverter.rest_enableDischargeSchedule(True), True)
-
-    # Neither of the remaining writers may claim success when the setting never lands
-    refused = copy.deepcopy(rest_v3)
-    refused["Control"]["Enable_Discharge_Schedule"] = "disable"
-    dummy_rest.clear_queue()
-    dummy_rest.rest_data = refused
-    dummy_rest.get_commands()
-    failed |= _check("rest discharge schedule: failure reported", inverter.rest_enableDischargeSchedule(True), False)
-    failed |= _check_true("rest discharge schedule: retried more than once", len(dummy_rest.get_commands()) > 1)
-
-    refused = copy.deepcopy(rest_v3)
-    refused["Timeslots"]["Battery_pause_start_time_slot"] = "05:00:00"
-    refused["Timeslots"]["Battery_pause_end_time_slot"] = "06:00:00"
-    dummy_rest.clear_queue()
-    dummy_rest.rest_data = refused
-    dummy_rest.get_commands()
-    failed |= _check("rest pause slot: failure reported", inverter.rest_setPauseSlot("00:00:00", "23:59:00"), False)
-    failed |= _check_true("rest pause slot: retried more than once", len(dummy_rest.get_commands()) > 1)
-
-    _restore_rest_arg(my_predbat, saved_rest_arg)
-    return failed
-
-
-def test_adjust_pause_mode_over_rest(my_predbat):
-    """On GivTCP v3 the pause slot and mode go over REST rather than through entities."""
-    print("*** Running test: pause mode over REST")
-    failed = 0
-
-    with open("cases/rest_v3.json", "r") as handle:
-        rest_v3 = json.load(handle)
-
-    saved = {name: my_predbat.args.get(name, None) for name in ("pause_mode", "pause_start_time", "pause_end_time")}
-    my_predbat.args["pause_mode"] = "select.pause_mode_live"
-    my_predbat.args["pause_start_time"] = "select.pause_start"
-    my_predbat.args["pause_end_time"] = "select.pause_end"
-    my_predbat.ha_interface.dummy_items["select.pause_mode_live"] = "Disabled"
-
-    inverter, dummy_rest, saved_rest_arg = _rest_inverter(my_predbat, rest_v3)
-    inverter.rest_data = copy.deepcopy(rest_v3)
-    inverter.rest_data["Control"]["Battery_pause_mode"] = "Disabled"
-    inverter.rest_data["Timeslots"]["Battery_pause_start_time_slot"] = "01:00:00"
-    inverter.rest_data["Timeslots"]["Battery_pause_end_time_slot"] = "02:00:00"
-
-    slot_writes = Recorder()
-    mode_writes = Recorder()
-    entity_writes = Recorder()
-    inverter.rest_setPauseSlot = slot_writes
-    inverter.rest_setBatteryPauseMode = mode_writes
-    inverter.write_and_poll_option = entity_writes
-
-    inverter.adjust_pause_mode(pause_charge=True, pause_discharge=False)
-
-    failed |= _check("rest pause: slot written over REST", slot_writes.args_only(), [("00:00:00", "23:59:00")])
-    failed |= _check("rest pause: mode written over REST", mode_writes.args_only(), [("PauseCharge",)])
-    failed |= _check("rest pause: no entity writes", entity_writes.calls, [])
-
-    _restore_rest_arg(my_predbat, saved_rest_arg)
-    for name, value in saved.items():
-        if value is None:
-            my_predbat.args.pop(name, None)
-        else:
-            my_predbat.args[name] = value
-    return failed
+# The REST writers and the REST pause path used to be exercised here through Inverter itself.
+# Upstream moved REST into the GivTCP component (GivTCPRest), so those writers are now covered by
+# tests/test_givtcp_rest.py and pause mode is entity-only on Inverter - the duplicate coverage that
+# reached through the inverter has been dropped rather than rewritten against the client.
 
 
 def run_inverter_matrix_tests(my_predbat):
@@ -616,8 +463,6 @@ def run_inverter_matrix_tests(my_predbat):
             test_mqtt_charge_discharge_enable,
             test_adjust_pause_mode_without_support_is_a_no_op,
             test_adjust_pause_mode_over_entities,
-            test_rest_pause_and_discharge_schedule_writers,
-            test_adjust_pause_mode_over_rest,
         ):
             failed |= test(my_predbat)
     finally:

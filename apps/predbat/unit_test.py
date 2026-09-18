@@ -14,6 +14,8 @@ import sys
 import glob
 import argparse
 import traceback
+import random
+from datetime import timedelta
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -21,7 +23,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from predbat import PredBat
-from tests.test_infra import TestHAInterface, set_plot_enabled
+from tests.test_infra import FIXTURE_MINUTES_NOW, TestHAInterface, set_plot_enabled
 from tests.test_compute_metric import run_compute_metric_tests
 from tests.test_pv90 import run_pv90_tests
 from tests.test_performance_tweaks import run_performance_tweaks_tests
@@ -51,6 +53,7 @@ from tests.test_new_install_detection import test_new_install_detection
 from tests.test_history_attribute import test_history_attribute
 from tests.test_inverter import run_inverter_tests
 from tests.test_basic_rates import test_basic_rates
+from tests.test_clock import run_clock_tests
 from tests.test_rate_export_max_forward_calc import test_rate_export_max_forward_calc
 from tests.test_rate_min_forward_calc import test_rate_min_forward_calc
 from tests.test_find_charge_curve import run_find_charge_curve_tests
@@ -63,9 +66,10 @@ from tests.test_nordpool import run_nordpool_test
 from tests.test_futurerate_auto import test_futurerate_auto
 from tests.test_car_charging_smart import run_car_charging_smart_tests
 from tests.test_car_soc_stale import test_car_soc_stale, test_car_soc_age
+from tests.test_battery_accuracy import run_battery_accuracy_tests
 from tests.test_plugin_startup import test_plugin_startup_order
 from tests.test_active_flag import test_active_flag
-from tests.test_component_health_status import test_component_health_status
+from tests.test_component_health_status import test_component_health_status, test_record_status_state_clamped
 from tests.test_optimise_levels import run_optimise_levels_tests
 from tests.test_trim_export import run_trim_export_tests
 from tests.test_plan_tiebreak import run_plan_tiebreak_tests
@@ -151,9 +155,11 @@ from tests.test_web_annual import (
 from tests.test_window import run_window_sort_tests, run_intersect_window_tests, run_clone_windows_tests, run_window_cache_tests
 from tests.test_hit_charge_cache import run_hit_charge_cache_tests
 from tests.test_window_selection import run_window_selection_tests
+from tests.test_export_encoding import run_export_encoding_tests
 from tests.test_find_charge_rate import test_find_charge_rate, test_find_charge_rate_pv_overlap, test_find_charge_rate_string_temperature, test_find_charge_rate_string_charge_curve
 from tests.test_manual_api import run_test_manual_api
 from tests.test_manual_soc import run_test_manual_soc
+from tests.test_manual_soc_max import run_test_manual_soc_max
 from tests.test_manual_times import run_test_manual_times
 from tests.test_manual_select import run_test_manual_select
 from tests.test_minute_array import test_minute_array
@@ -233,6 +239,8 @@ from tests.test_annual_weather import test_annual_weather, test_annual_weather_o
 from tests.test_annual_tariff import test_annual_tariff
 from tests.test_rate_add_io_slots import run_rate_add_io_slots_tests
 from tests.test_iog_charge_skew import run_iog_charge_skew_tests
+from tests.test_dispatch_timeline import run_dispatch_timeline_tests
+from tests.test_log_rotation import run_log_rotation_tests
 from tests.test_battery_curve_keys import run_battery_curve_keys_tests
 from tests.test_balance_inverters import run_balance_inverters_tests
 from tests.test_octopus_download_rates import test_octopus_download_rates_wrapper
@@ -251,6 +259,7 @@ from tests.test_validate_config import test_validate_config, test_validate_confi
 from tests.test_get_arg_missing_index import test_get_arg_missing_index_uses_default_quietly
 from tests.test_plan_json_rate_adjust import run_test_plan_json_rate_adjust
 from tests.test_plan_why_reason import run_test_plan_why_reason
+from tests.test_plan_scenario_summary import run_test_plan_scenario_summary
 from tests.test_rate_replicate_missing_slots import test_rate_replicate
 from tests.test_find_charge_window import test_find_charge_window
 from tests.test_random_scenarios import generate_scenarios, save_scenarios, run_scenarios_from_file, compare_results, profile_scenario, run_random_scenario_tests
@@ -261,6 +270,11 @@ from tests.test_plan_persistence import test_plan_persistence
 from tests.test_github import test_github
 from tests.test_download import test_download
 from tests.test_ohme import test_ohme
+from tests.test_givtcp_component import test_givtcp_component
+from tests.test_debug_yaml_scope import run_debug_yaml_scope_tests
+from tests.test_memory_release import run_memory_release_tests
+from tests.test_inverter_write_poll import run_inverter_write_poll_tests
+from tests.test_givtcp_rest import run_givtcp_rest_tests
 from tests.test_myenergi import test_myenergi
 from tests.test_component_base import test_component_base_all
 from tests.test_components import test_components_all
@@ -413,6 +427,17 @@ def create_predbat():
     my_predbat.states = {}
     my_predbat.reset()
     my_predbat.update_time()
+    # update_time() takes the clock from the host, so the same module used to behave differently
+    # standalone and in the suite - a suite run sat at reset_inverter's noon residue while a
+    # standalone run inherited the wall clock, and a time-of-day-dependent test could pass one way
+    # and fail the other (#5026). Pin the fixture clock here instead, now_utc from midnight_utc so
+    # the two stay consistent, the same way the scenario loader pins a scenario's own clock
+    # (test_random_scenarios.py apply_random_scenario). Only minutes_now and now_utc are pinned
+    # here - update_time() has already taken midnight_utc and now_utc_real from the host clock
+    # and they are left alone. Modules that want more still pin and hand their clock back
+    # themselves, but no module inherits the wall clock into those two fields any more.
+    my_predbat.minutes_now = FIXTURE_MINUTES_NOW
+    my_predbat.now_utc = my_predbat.midnight_utc + timedelta(minutes=FIXTURE_MINUTES_NOW)
     my_predbat.ha_interface = TestHAInterface()
     my_predbat.ha_interface.base = my_predbat
     my_predbat.ha_interface.history_enable = False
@@ -430,6 +455,7 @@ def main():
     # Format: (name, function, description, slow)
     TEST_REGISTRY = [
         ("secrets", run_secrets_tests, "Secrets loading tests", False),
+        ("export_encoding", run_export_encoding_tests, "Packed export limit encoding accessor tests", False),
         ("perf", run_perf_test, "Performance tests", False),
         ("model", run_model_tests, "Model tests", False),
         ("plot", run_plot_tests, "Failure plot display is opt-in (--plot) tests", False),
@@ -449,6 +475,7 @@ def main():
         ("debug_enable_auto_scope", test_debug_enable_auto_scope, "debug_enable auto-disable-after-N-hours tests (#4438 review)", False),
         ("charge_hold", run_charge_hold_tests, "Charge freeze hold modelling tests", False),
         ("basic_rates", test_basic_rates, "Basic rates tests", False),
+        ("clock", run_clock_tests, "update_time clock tests", False),
         ("rate_min_forward_calc", test_rate_min_forward_calc, "Rate min forward calc tests", False),
         ("rate_export_max_forward_calc", test_rate_export_max_forward_calc, "Rate export max forward calc tests", False),
         ("window_sort", run_window_sort_tests, "Window sort tests", False),
@@ -512,11 +539,13 @@ def main():
         ("plugin_system", run_plugin_system_tests, "Plugin discovery and hook tests (class-name, marker and function strategies, failure containment)", False),
         ("active_flag", test_active_flag, "Active flag cleared on exception tests", False),
         ("component_health_status", test_component_health_status, "Component errors fail the recorded run status tests", False),
+        ("record_status_state_clamped", test_record_status_state_clamped, "Status sensor state is clamped at the 255 characters Home Assistant accepts", False),
         ("dynamic_load_car", test_dynamic_load_car_slot_cancellation, "Dynamic load car slot cancellation tests", False),
         ("dynamic_load_high", test_dynamic_load_high_load_baseline, "Dynamic load high-load baseline tests", False),
         ("units", run_test_units, "Unit tests", False),
         ("manual_api", run_test_manual_api, "Manual API tests", False),
         ("manual_soc", run_test_manual_soc, "Manual SOC target tests", False),
+        ("manual_soc_max", run_test_manual_soc_max, "Manual SOC maximum (ceiling) target tests (issue #1578)", False),
         ("manual_times", run_test_manual_times, "Manual times tests", False),
         ("manual_select", run_test_manual_select, "Manual select tests", False),
         ("web_if", run_test_web_if, "Web interface tests", False),
@@ -564,6 +593,8 @@ def main():
         ("multi_car_iog", run_multi_car_iog_tests, "Multi-car IOG tests", False),
         ("rate_add_io_slots", run_rate_add_io_slots_tests, "Rate add IO slots tests", False),
         ("iog_charge_skew", run_iog_charge_skew_tests, "IOG earlier-charge skew characterisation tests", False),
+        ("dispatch_timeline", run_dispatch_timeline_tests, "Dispatch timeline diagnostic tests (#4516 Stage 1)", False),
+        ("log_rotation", run_log_rotation_tests, "Configurable log rotation and two-digit naming (#5076)", False),
         ("rate_replicate", test_rate_replicate, "Rate replicate comprehensive tests (missing slots, IO, offsets, gas)", False),
         ("find_charge_window", test_find_charge_window, "Find charge window gap handling tests", False),
         ("find_charge_rate", test_find_charge_rate, "Find charge rate tests", False),
@@ -631,6 +662,7 @@ def main():
         ("car_charging_smart", run_car_charging_smart_tests, "Car charging smart tests", False),
         ("car_soc_stale", test_car_soc_stale, "Car SoC sensor staleness guard tests", False),
         ("car_soc_age", test_car_soc_age, "Car SoC sensor age helper tests", False),
+        ("battery_accuracy", run_battery_accuracy_tests, "Battery prediction accuracy recording tests", False),
         ("intersect_window", run_intersect_window_tests, "Intersect window tests", False),
         ("clone_windows", run_clone_windows_tests, "Clone windows tests", False),
         ("window_cache", run_window_cache_tests_isolated, "Window bounds cache tests", False),
@@ -661,6 +693,7 @@ def main():
         ("control_conflicts_dashboard", test_control_conflicts_dashboard_renders_section, "Metrics dashboard control_conflicts section render tests", False),
         ("plan_json_rate_adjust", run_test_plan_json_rate_adjust, "Plan JSON rate adjust type field tests", False),
         ("plan_why_reason", run_test_plan_why_reason, "Plan JSON per-slot 'why' reason text tests", False),
+        ("plan_scenario_summary", run_test_plan_scenario_summary, "Plan scenario_summary_state export-limit tuple regression test", False),
         # Download tests
         ("download", test_download, "Predbat download/update comprehensive tests (GitHub API, SHA1, install check, file ops)", False),
         # Axle Energy VPP unit tests
@@ -690,6 +723,11 @@ def main():
         ("github", test_github, "GitHub mixin tests (cache hit/miss/stale, HTTP errors, release parsing, auto-update)", False),
         # Ohme EV charger API unit tests
         ("ohme", test_ohme, "Ohme EV charger comprehensive tests (helper functions, client methods, API operations, event handlers)", False),
+        ("givtcp_component", test_givtcp_component, "GivTCP component tests (entity publishing, automatic_config, event handlers)", False),
+        ("debug_yaml_scope", run_debug_yaml_scope_tests, "create_debug_yaml() reachability/scope tests", False),
+        ("memory_release", run_memory_release_tests, "glibc malloc_trim()/arena cap helper tests", False),
+        ("inverter_write_poll", run_inverter_write_poll_tests, "Inverter write-and-poll timing tests", False),
+        ("givtcp_rest", run_givtcp_rest_tests, "GivTCP REST client write/retry/transport tests", False),
         # myenergi Zappi and Eddi unit tests
         ("myenergi", test_myenergi, "myenergi Zappi and Eddi comprehensive tests (normalisation, transports, publishing, auto-config, controls)", False),
         # ComponentBase lifecycle tests
@@ -795,9 +833,14 @@ def main():
     parser.add_argument("--test", "-t", action="append", help="Run specific test(s) by name (can be used multiple times, use --list to see available tests)")
     parser.add_argument("--keyword", "-k", action="store", help="Run tests matching keyword pattern (e.g., -k carbon_ runs all carbon tests)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available tests")
-    parser.add_argument("--quick", "-q", action="store_true", help="Skip slow tests (optimise_levels, optimise_windows, debug_cases)")
     parser.add_argument("--isolate", action="store_true", help="Run every test against a freshly created PredBat instance, to find tests that only pass in suite order")
     parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failing test instead of running the rest")
+    # Named from the registry rather than hard-coded: the previous literal list had drifted to
+    # name three tests that are not marked slow at all, while the four that are went unmentioned.
+    slow_test_names = ", ".join(name for name, _func, _desc, slow in TEST_REGISTRY if slow) or "none currently marked slow"
+    parser.add_argument("--quick", "-q", action="store_true", help=f"Skip slow tests ({slow_test_names})")
+    parser.add_argument("--shuffle", action="store_true", help="Run the selected tests in a random order, to look for shared-fixture state leaks between tests (see #5079)")
+    parser.add_argument("--shuffle-seed", type=int, default=None, metavar="N", help="Seed for --shuffle (default: a random seed, printed at the start of the run)")
     parser.add_argument("--plot", action="store_true", help="Display failure plots on screen (blocks until closed); the PNG is written either way")
     parser.add_argument("--random-generate", action="store_true", help="Generate random benchmark scenarios and write to a YAML file")
     parser.add_argument("--random-count", type=int, default=100, metavar="N", help="Number of random scenarios to generate (default: 100)")
@@ -843,6 +886,8 @@ def main():
         sys.exit(0)
 
     print("**** Starting Predbat tests ****")
+    # Used by the debug-file, random-scenario and profiling paths below. The registry test
+    # loop does not share this one - it builds a fresh instance per test (see GH#5079).
     my_predbat = create_predbat()
     print("**** Testing Predbat ****")
     failed = False
@@ -906,6 +951,12 @@ def main():
         tests_to_run = TEST_REGISTRY
 
     print(f"**** Running {len(tests_to_run)} test(s){' isolated' if args.isolate else ''} ****")
+    if args.shuffle:
+        shuffle_seed = args.shuffle_seed if args.shuffle_seed is not None else random.randrange(2**32)
+        random.Random(shuffle_seed).shuffle(tests_to_run)
+        print(f"**** Shuffled test order with seed {shuffle_seed} ****")
+
+    print(f"**** Running {len(tests_to_run)} test(s) ****")
     # Single loop to run all collected tests
     total_time = 0
     skipped_count = 0
@@ -916,8 +967,18 @@ def main():
             skipped_count += 1
             continue
 
-        # Show descriptive message for keyword/specific tests, simple for full suite
-        print(f"**** Running: {name} - {desc} ****")
+        # Show descriptive message for keyword/specific tests, simple for full suite.
+        # The wall-clock stamps bracket each test so a run that stalls can be read straight
+        # from the log: the elapsed figure below only appears once a test returns, so a test
+        # still running (or one that hung) is identified by its unmatched start stamp.
+        print(f"**** Running: {name} - {desc} (start {time.strftime('%H:%M:%S')}) ****")
+
+        # Each test gets a PredBat of its own, so state an earlier test left behind cannot
+        # reach it. Sharing one instance across the whole run made a test that mutated it
+        # without restoring break whichever unrelated test happened to follow, depending on
+        # the order they ran in (GH#5079). create_predbat() costs about 22ms, which is lost
+        # in the noise of the suite as a whole.
+        my_predbat = create_predbat()
 
         # Under --isolate each test gets its own instance, so a test that only passes because an
         # earlier one left the right state behind fails here instead of years later when someone
@@ -935,12 +996,13 @@ def main():
             test_failed = True
         elapsed = time.time() - start_time
         total_time += elapsed
+        end_stamp = time.strftime("%H:%M:%S")
 
         if test_failed:
             if args.keyword or args.test:
-                print(f"**** ERROR: Test {name} FAILED in {elapsed:.2f}s ****")
+                print(f"**** ERROR: Test {name} FAILED in {elapsed:.2f}s (end {end_stamp}) ****")
             else:
-                print(f"**** {name}: FAILED in {elapsed:.2f}s ****")
+                print(f"**** {name}: FAILED in {elapsed:.2f}s (end {end_stamp}) ****")
             failed = True
             failures.append(name)
             if args.fail_fast:
@@ -948,9 +1010,9 @@ def main():
                 break
         else:
             if args.keyword or args.test:
-                print(f"**** Test {name} PASSED in {elapsed:.2f}s ****")
+                print(f"**** Test {name} PASSED in {elapsed:.2f}s (end {end_stamp}) ****")
             else:
-                print(f"**** {name}: PASSED in {elapsed:.2f}s ****")
+                print(f"**** {name}: PASSED in {elapsed:.2f}s (end {end_stamp}) ****")
 
     # Report results
     if failed:

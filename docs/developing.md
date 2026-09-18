@@ -24,7 +24,7 @@ Predbat now has some unit-level tests, to run them on your local machine:
 2. Copy `apps.yaml` to your test area
 3. Copy the files from github <https://github.com/springfall2008/batpred/tree/main/coverage> to this area
 4. Extract cases.tgz
-5. Have /Volumes/add_configs/6adb4f0d_predbat point to your Predbat app directory or edit run_all to change the path
+5. Have /Volumes/app_configs/6adb4f0d_predbat point to your Predbat app directory or edit run_all to change the path
 6. Run run_all
 
 You can add --quick to run just the faster tests. If the tests fail then debug them.
@@ -51,6 +51,21 @@ For coverage analysis install the 'coverage' library with Python, or use the ver
 
 1. ./run_cov --quick
 2. Open `htmlcov/index.html` in your web browser
+
+### Finding test order dependencies
+
+All tests run against one shared `PredBat`/Home Assistant fixture (see `create_predbat()` in `unit_test.py`), so a test that mutates shared state and doesn't fully restore it can make a *later* test fail - a bug in the test suite itself, not in Predbat (see issue [#5079](https://github.com/springfall2008/batpred/issues/5079)). These only show up when the two tests happen to run in that order, so a clean `./run_all` doesn't prove there isn't one lurking.
+
+`./run_shuffle` fuzzes the test order looking for these:
+
+- `./run_shuffle --hunt --quick` - one-liner: keep trying shuffled orderings until a failure is found, narrow it down to the minimal pair of tests that reproduces it, print that repro command, and record the pair in `tools/shuffle_fuzz_known_pairs.txt` so the next run looks for a *different* one instead of rediscovering the same pair. This is the normal way to run it.
+- `./run_all --shuffle [--shuffle-seed N]` - run the full suite (or whatever `--test`/`-k` selects) in a random order directly, without the fuzzing wrapper. Useful for a one-off check or replaying a specific `--shuffle-seed` a `--hunt` run reported.
+- `./run_shuffle --bisect <SHUFFLE_SEED>` - given a shuffle-seed that's known to fail, narrow down which earlier test caused it, without hunting for a new one.
+- `./run_shuffle --campaign N` - repeat hunt-and-bisect for `N` independent rounds and print a frequency table of which (culprit, victim) pairs recur, to tell a common leak apart from a one-off ordering artefact.
+
+A found pair only proves shared state leaked between two tests - it doesn't say by itself whether the fix belongs in the culprit test's cleanup, or whether it exposed a real gap in the production code the victim test exercises (e.g. a missing bounds check that would also matter outside of tests). Check both before assuming it's "just" a test hygiene issue.
+
+This is too slow for a per-commit CI gate (each hunt attempt is a full shuffled suite run, and a failure needs a further round of bisection on top), but cheap to run periodically or before a release.
 
 ## The C++ prediction kernel
 
