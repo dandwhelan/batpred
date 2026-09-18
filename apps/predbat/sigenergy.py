@@ -146,6 +146,11 @@ SIGENERGY_MQTT_TOPIC_ALARM = "openapi/alarm/{app_key}/{system_id}"      # alarm 
 SIGENERGY_MQTT_TOPIC_COMMAND = "openapi/instruction/command"            # battery command publish
 SIGENERGY_MQTT_TOPIC_MODE = "openapi/instruction/mode"                  # V1 operating mode switch (MQTT)
 
+# Payload keys masked before a payload is written to the log. The MQTT command payloads
+# carry the live accessToken (it doubles as the MQTT broker password), and Predbat logs are
+# routinely pasted into GitHub issues, so anything credential-bearing has to be masked first.
+SIGENERGY_LOG_REDACT_KEYS = ("accessToken", "refreshToken", "appKey", "appSecret", "password", "token", "key")
+
 # Operating mode enums (REST mode switch endpoint — MSC and FFG only; NBI is not used)
 SIGENERGY_MODE_MSC = 0   # Maximum Self-Consumption (eco)
 SIGENERGY_MODE_FFG = 5   # Fully Feed-in to Grid
@@ -466,7 +471,7 @@ class SigenergyAPI(ComponentBase):
             "Content-Type": "application/json",
         }
 
-        self.log("Requesting {} {} with params={} json={}".format(method, path, params, json_data))
+        self.log("Requesting {} {} with params={} json={}".format(method, path, self.redact(params), self.redact(json_data)))
 
         for attempt in range(retries):
             await self._enforce_rate_limit()
@@ -508,7 +513,7 @@ class SigenergyAPI(ComponentBase):
                             self.log("Warn: SigenergyAPI: Failed to decode response from {}: {}".format(path, e))
                             return None
 
-                        self.log("SigenergyAPI: Response from {} {}: {}".format(method, path, body))
+                        self.log("SigenergyAPI: Response from {} {}: {}".format(method, path, self.redact(body)))
 
                         code = body.get("code", -1)
                         if code != 0:
@@ -1020,6 +1025,23 @@ class SigenergyAPI(ComponentBase):
         self._tls_context = tls_context
         return tls_context
 
+    @staticmethod
+    def redact(payload):
+        """Return payload with credential-bearing keys masked, for safe logging.
+
+        Recursive over dicts and common sequences. DeyeAPI/SunsynkAPI recurse over dicts + lists;
+        Sigenergy MQTT command payloads nest per-system commands one level down inside a list,
+        so a top-level-only rewrite would still leak anything a future payload carries there.
+        Tuples are included because json.dumps() serialises tuples as JSON arrays.
+        Sets/frozen sets are handled for log safety, even though json.dumps() does not
+        serialise them by default.
+        """
+        if isinstance(payload, dict):
+            return {key: ("<redacted>" if key in SIGENERGY_LOG_REDACT_KEYS else SigenergyAPI.redact(value)) for key, value in payload.items()}
+        if isinstance(payload, (list, tuple, set, frozenset)):
+            return [SigenergyAPI.redact(value) for value in payload]
+        return payload
+
     async def _publish_mqtt(self, topic, payload_dict):
         """Publish a JSON payload to the Sigenergy MQTT broker.
 
@@ -1047,7 +1069,7 @@ class SigenergyAPI(ComponentBase):
                 keepalive=30,
             ) as client:
                 await client.publish(topic, payload=json.dumps(payload_dict), qos=1)
-            self.log("SigenergyAPI: MQTT published to {} - {}".format(topic, payload_dict))
+            self.log("SigenergyAPI: MQTT published to {} - {}".format(topic, self.redact(payload_dict)))
             return True
         except Exception as e:
             self.log("Warn: SigenergyAPI: MQTT publish to {} failed: {}".format(topic, e))
@@ -1474,6 +1496,9 @@ class SigenergyAPI(ComponentBase):
                         # Parse topic: openapi/{type}/{app_key}/{system_id}
                         topic_str = str(message.topic)
                         parts = topic_str.split("/")
+                        # The topic embeds app_key (the MQTT broker username), so mask it before
+                        # any log line prints the topic — same leak class as the publish payload.
+                        safe_topic = topic_str.replace(self.app_key, "<redacted>") if self.app_key else topic_str
                         # Expected: ['openapi', type, app_key, system_id]
                         if len(parts) < 4:
                             continue
@@ -1485,7 +1510,7 @@ class SigenergyAPI(ComponentBase):
                         try:
                             payload = json.loads(raw.decode("utf-8", errors="replace"))
                         except (json.JSONDecodeError, ValueError):
-                            self.log("Warn: SigenergyAPI: MQTT non-JSON payload on {}: {}".format(topic_str, raw[:120]))
+                            self.log("Warn: SigenergyAPI: MQTT non-JSON payload on {}: {}".format(safe_topic, raw[:120]))
                             continue
 
                         # Each message is a list of device-level entries; process each
@@ -1499,7 +1524,7 @@ class SigenergyAPI(ComponentBase):
                                 continue
                             self.last_mqtt_update[entry_sid] = time.time()
                             value_dict = entry.get("value", {})
-                            self.log("SigenergyAPI: MQTT message on {} for system {}: type={} value={}".format(topic_str, entry_sid, msg_type, value_dict))
+                            self.log("SigenergyAPI: MQTT message on {} for system {}: type={} value={}".format(safe_topic, entry_sid, msg_type, value_dict))
                             if msg_type == "period":
                                 self._handle_mqtt_period(entry_sid, value_dict)
                                 if self.api_started:
@@ -2196,6 +2221,50 @@ class SigenergyAPI(ComponentBase):
                 active_mode = SIGENERGY_ACTIVE_MODE_CHARGE
                 charge_power_kw = charge_rate_w / 1000.0
                 charge_priority_type = "PV"
+        elif charge_rate_w == 0:
+            # No window is active, so the only thing left that can distinguish demand from a
+            # freeze export is the rates Predbat has written. Predbat expresses Freeze Export as
+            # "demand mode, but with charging disabled": execute.py turns the forced-export window
+            # off (adjust_force_export(False)) and calls adjust_charge_rate(0), because SIGCLOUD
+            # declares has_timed_pause False and charge_discharge_with_rate False, so that zero is
+            # the only lever it has left. The freeze_export branch above is therefore never
+            # reached from a planned freeze - export_enable is already False by the time we run -
+            # and the command came out identical to plain demand, which routes the surplus PV a
+            # freeze exists to export into the battery instead (GH#4761).
+            #
+            # This is the same inference fox.py, deye.py and sunsynk.py make from the same
+            # entities, for the same reason - see fox.py's freeze_export_requested(). Unlike those,
+            # a zero charge rate is read as a freeze here without also requiring a non-zero export
+            # rate. Their guard exists because their rate entities are published at 0, so all-zero
+            # is an absence of a plan rather than a plan; the Sigenergy rate controls default to
+            # the battery maximum instead (_control_info), so a zero only ever arrives by Predbat
+            # deliberately writing one.
+            duration_min = 720
+            if export_rate_w > 0:
+                # Charging disabled, discharging still allowed - a plain freeze export.
+                # Self-Consumption Grid is the right mode for it: surplus PV serves the load, then
+                # sells to the grid rather than charging the battery, while the battery still
+                # discharges to serve the house when solar is short. charge_power_kw is
+                # deliberately left None: the API documents it as bidirectional ("max energy
+                # storage charging/discharging power"), so zeroing it here would also stop the
+                # battery serving the house, which is a freeze CHARGE, not a freeze export.
+                new_mode = "freeze_export"
+                active_mode = SIGENERGY_ACTIVE_MODE_SELF_GRID
+            else:
+                # Both rates zero: a freeze export with a discharge hold on top. execute.py writes
+                # the export rate to 0 for a car-charging or iBoost hold (no timed pause on
+                # SIGCLOUD, so the rate is again the only lever), and the freeze export leaves the
+                # charge rate at 0 alongside it. Rare in practice - a car held off the battery is
+                # being charged from solar or grid - but reachable, and Self-Consumption Grid
+                # would be wrong for it because that mode lets the battery discharge to serve the
+                # house, which is exactly what the hold forbids.
+                #
+                # Plain self-consumption with the bidirectional power pinned to 0 expresses both
+                # halves at once: no charging from the PV surplus and no discharging to the hold,
+                # the same lever the freeze_charge branch above already uses to hold SoC flat.
+                new_mode = "freeze_export_hold"
+                active_mode = SIGENERGY_ACTIVE_MODE_SELF
+                charge_power_kw = 0
         else:
             duration_min = 720
             new_mode = "eco"

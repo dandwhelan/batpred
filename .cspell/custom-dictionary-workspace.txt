@@ -1,4 +1,5 @@
 # Custom Dictionary Words
+3hy
 aaaabbbbccccdddd
 activepower
 adata
@@ -14,6 +15,7 @@ aios
 Alertfeed
 allclose
 alphaess
+am2
 annualform
 Anson
 antiphase
@@ -56,6 +58,7 @@ batteryb
 batusecap
 beforeunload
 bierner
+bisectable
 Bitwarden
 BLAS
 boostable
@@ -64,6 +67,7 @@ brickatius
 bwignore
 byok
 cadata
+calcsize
 calib
 Cantarell
 cbat
@@ -72,6 +76,7 @@ cdn
 Cerbo
 cexxxx
 ceyyyy
+CGNAT
 Chae
 Chaf
 chargedischarge
@@ -122,6 +127,7 @@ dashoffset
 datain
 datalist
 datalog
+datalogger
 datap
 datapoints
 datas
@@ -131,12 +137,14 @@ dateutil
 dayname
 daynumber
 daysymbol
+deadband
 deadbeefdeadbeef
 dedup
 dedupe
 dend
 denorm
 derate
+derated
 derating
 desync
 desynced
@@ -154,6 +162,7 @@ Dise
 Disf
 diverter
 dlimit
+dlopen
 dnoregion
 docstrings
 dstamp
@@ -198,6 +207,7 @@ ESSAPI
 etoday
 etok
 euids
+EVAC
 EVDC
 evergen
 evilspringfall
@@ -241,13 +251,16 @@ geserial
 geseriale
 getaffinity
 getall
+getattr
 getrusage
 Ginlong
 gitnexus
+giv
 GivEnergy
 givtcp
 gnueabihf
 GOELEC
+goldens
 gridcharge
 gridcode
 gridconsumption
@@ -317,6 +330,7 @@ keepalive
 keydb
 khtml
 killall
+Kiritimati
 kopt
 Kostal
 kostalplenticore
@@ -334,6 +348,7 @@ ladybugdb
 larr
 libbi
 libc
+libyaml
 LIFEPO
 linebreak
 linecap
@@ -351,6 +366,8 @@ lookback
 lpignore
 lstrip
 luxpower
+malloc
+mallopt
 mantissa
 markdownlint
 matplotlib
@@ -443,6 +460,7 @@ ollama
 onblur
 onchange
 oncharge
+oneline
 onfocus
 oninput
 onmouseout
@@ -450,8 +468,10 @@ onmouseover
 openapi
 openrouter
 openweathermap
+Opticaster
 overclaim
 overfitting
+oversizing
 overvoltage
 ownerapi
 parseable
@@ -558,7 +578,9 @@ Sergoe
 sess
 setattr
 setdefault
+setpoints
 SFMB
+sg05lp1
 SIGABRT
 SIGALRM
 sigcloud
@@ -577,6 +599,7 @@ snakeviz
 snprintf
 socb
 socketloop
+socmax
 socs
 sofar
 SolarEdge

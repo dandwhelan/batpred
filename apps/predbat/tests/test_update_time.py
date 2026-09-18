@@ -68,22 +68,24 @@ class TimezoneOverride:
 
 
 def _check_clock_invariants(base, timezone):
-    """Assert the naive and aware clocks describe the same wall clock, returning an error string."""
-    if base.now.replace(tzinfo=None) != base.now_utc.replace(tzinfo=None):
-        return "now {} and now_utc {} describe different wall clocks under {}".format(base.now, base.now_utc, timezone)
+    """Assert the single clock frame is self-consistent, returning an error string.
 
-    if base.midnight.date() != base.midnight_utc.date():
-        return "midnight {} and midnight_utc {} fall on different dates under {}".format(base.midnight.date(), base.midnight_utc.date(), timezone)
+    Predbat now keeps one clock (now_utc, in the configured timezone) - the second, naive clock
+    this test originally compared against was removed upstream, which is the strongest form of the
+    invariant it guarded: there is no longer a second frame to drift. What remains to check is that
+    everything measured from that one clock agrees.
+    """
+    if base.now_utc.tzinfo is None:
+        return "now_utc {} lost its timezone under {}".format(base.now_utc, timezone)
 
-    # minutes_now must mean the same thing measured from either midnight
-    minutes_from_naive = int((base.now - base.midnight).total_seconds() / 60)
-    minutes_from_aware = int((base.now_utc - base.midnight_utc).total_seconds() / 60)
-    if minutes_from_naive != minutes_from_aware:
-        return "minutes since midnight disagree under {}: {} naive vs {} aware".format(timezone, minutes_from_naive, minutes_from_aware)
+    if base.now_utc.date() != base.midnight_utc.date():
+        return "now_utc {} and midnight_utc {} fall on different dates under {}".format(base.now_utc.date(), base.midnight_utc.date(), timezone)
 
-    # And it must match the published value, allowing for the PREDICT_STEP rounding
-    if abs(minutes_from_naive - base.minutes_now) > 5:
-        return "minutes_now {} does not match {} minutes since midnight under {}".format(base.minutes_now, minutes_from_naive, timezone)
+    minutes_from_midnight = int((base.now_utc - base.midnight_utc).total_seconds() / 60)
+
+    # It must match the published value, allowing for the PREDICT_STEP rounding
+    if abs(minutes_from_midnight - base.minutes_now) > 5:
+        return "minutes_now {} does not match {} minutes since midnight under {}".format(base.minutes_now, minutes_from_midnight, timezone)
 
     if base.minutes_to_midnight != 24 * 60 - base.minutes_now:
         return "minutes_to_midnight {} is inconsistent with minutes_now {} under {}".format(base.minutes_to_midnight, base.minutes_now, timezone)
@@ -91,12 +93,13 @@ def _check_clock_invariants(base, timezone):
 
 
 def _test_clock_frames_agree(my_predbat):
-    """The naive and aware clocks agree whatever timezone is configured.
+    """The clock and everything derived from it stay consistent whatever timezone is configured.
 
     Regression test: ``now`` came from the host clock and ``now_utc`` from the configured
-    timezone, so on a host whose timezone differed the two could sit on different dates.
+    timezone, so on a host whose timezone differed the two could sit on different dates. The naive
+    clock is gone now, so what is checked is that the surviving frame stays self-consistent.
     """
-    print("Test: update_time keeps the naive and aware clocks in step")
+    print("Test: update_time keeps the clock and minutes_now consistent")
     for timezone in EXTREME_TIMEZONES:
         with TimezoneOverride(my_predbat, timezone) as base:
             error = _check_clock_invariants(base, timezone)
@@ -166,8 +169,8 @@ def _test_manual_rate_round_trip(my_predbat):
 
 
 def _test_clock_skew_applies_to_both(my_predbat):
-    """A configured clock skew shifts both clocks together rather than pulling them apart."""
-    print("Test: clock_skew moves the naive and aware clocks together")
+    """A configured clock skew shifts the clock, leaving everything derived from it consistent."""
+    print("Test: clock_skew moves the clock without breaking its invariants")
     saved_skew = my_predbat.args.get("clock_skew", None)
     try:
         my_predbat.args["clock_skew"] = 90
@@ -178,12 +181,12 @@ def _test_clock_skew_applies_to_both(my_predbat):
             print("ERROR: {}".format(error))
             return 1
 
-        skewed_now = my_predbat.now
+        skewed_now = my_predbat.now_utc
         my_predbat.args["clock_skew"] = 0
         my_predbat.update_time()
 
         # The skewed clock must be ahead of the un-skewed one by roughly the configured amount
-        drift = (skewed_now - my_predbat.now).total_seconds() / 60
+        drift = (skewed_now - my_predbat.now_utc).total_seconds() / 60
         if abs(drift - 90) > 10:
             print("ERROR: expected the skew to move the clock 90 minutes, moved {}".format(round(drift)))
             return 1
@@ -202,7 +205,7 @@ def test_update_time(my_predbat=None):
         ("clock_frames", _test_clock_frames_agree, "Naive and aware clocks agree"),
         ("manual_slot", _test_manual_slot_round_trip, "Manual slot round trip"),
         ("manual_rate", _test_manual_rate_round_trip, "Manual rate round trip"),
-        ("clock_skew", _test_clock_skew_applies_to_both, "Clock skew applies to both clocks"),
+        ("clock_skew", _test_clock_skew_applies_to_both, "Clock skew applies to the clock"),
     ]
 
     print("\n" + "=" * 70)

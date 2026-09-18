@@ -11,8 +11,8 @@
 import predbat  # noqa: F401  (import first - avoids circular import: config.py does `from predbat import THIS_VERSION`)
 import hashlib
 import pytz
-from datetime import datetime
-from unittest.mock import MagicMock, patch
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 from alphaess import AlphaESSAPI
 from tests.test_infra import run_async as run_async_local, create_aiohttp_mock_response, create_aiohttp_mock_session
 
@@ -27,18 +27,38 @@ class MockAlphaESS(AlphaESSAPI):
         self.local_tz = pytz.timezone("Europe/London")
         self.base = MagicMock()
         self.base.args = {"user_id": "test-alphaess-1"}
-        self.base.midnight_utc = datetime.now(pytz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        # A real clock, not a MagicMock attribute: ComponentBase.minutes_now derives from
+        # base.now_utc (GH#4804), so the mock base has to carry a coherent now_utc/midnight_utc
+        # pair. set_mock_clock() below moves it; writing base.minutes_now alone does nothing.
+        self.base.now_utc = datetime.now(pytz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        self.base.midnight_utc = self.base.now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         self.base.minutes_now = 0
         self.state = {}
         self.published = {}
         self.external_state = {}
+        # 0 rather than initialize()'s real 2s default: api_delay is a courtesy pause between
+        # consecutive calls to AlphaESS's rate-limited cloud, and nothing here talks to the real
+        # cloud - every request is a scripted mock. Left at 2 it was several real seconds of
+        # dead wall-clock per test that reads more than one endpoint. A test that wants to
+        # exercise the pacing can still set client.api_delay itself.
         self.initialize(
             app_id=app_id,
             app_secret=app_secret,
             inverter_sn=inverter_sn,
             automatic=automatic,
             control_enable=control_enable,
+            api_delay=0,
         )
+
+    def set_mock_clock(self, minutes_now):
+        """Move the mock base's clock to minutes_now past midnight.
+
+        ComponentBase.minutes_now is derived from base.now_utc, so a test that wants a particular
+        time of day has to move the clock rather than write base.minutes_now (GH#4804). Both are
+        set here so a direct base.minutes_now read stays honest too.
+        """
+        self.base.now_utc = self.base.midnight_utc + timedelta(minutes=minutes_now)
+        self.base.minutes_now = minutes_now
 
     def log(self, message):
         """Capture logs."""
@@ -57,8 +77,10 @@ class MockAlphaESS(AlphaESSAPI):
         """Read back whatever the test (or dashboard_item) put in self.state."""
         return self.state.get(entity_id, default)
 
-    async def set_state_external(self, entity_id, state, attributes={}):
+    async def set_state_external(self, entity_id, state, attributes=None):
         """Record a Predbat CONFIG_ITEMS switch change instead of reaching Home Assistant."""
+        if attributes is None:
+            attributes = {}
         self.external_state[entity_id] = state
 
     def set_arg_auto(self, arg, value):
@@ -213,7 +235,10 @@ def test_alphaess_transport_failure_returns_minus_one():
     failed = False
     client = MockAlphaESS()
     session = create_aiohttp_mock_session(exception=Exception("connection reset"))
-    with patch("alphaess.aiohttp.ClientSession", return_value=session):
+    # _request backs off between its retries with asyncio.sleep(1 + attempt) - 3 real seconds
+    # before it gives up. What is asserted here is the verdict it lands on, not the pacing it
+    # keeps on the way there, so the wait is skipped.
+    with patch("alphaess.aiohttp.ClientSession", return_value=session), patch("alphaess.asyncio.sleep", new_callable=AsyncMock):
         code, data = run_async_local(client._get("ess_list"))
     if code != -1:
         print(f"ERROR: transport failure code {code} should be -1")

@@ -1549,7 +1549,7 @@ class OctopusAPI(ComponentBase):
             section = product_info.get(section_key, {})
             if not section:
                 continue
-            for region_key, region_data in section.items():
+            for _region_key, region_data in section.items():
                 if not isinstance(region_data, dict):
                     continue
                 for payment_type in payment_types:
@@ -2772,7 +2772,7 @@ class Octopus:
                 self.log("Octopus: Cached octopus data for {} is stale (midnight crossed), re-downloading".format(url))
 
         # Retry up to 3 minutes
-        for retry in range(3):
+        for _retry in range(3):
             pdata = self.download_octopus_rates_func(url)
             if pdata:
                 break
@@ -2918,6 +2918,9 @@ class Octopus:
     def load_free_slot(self, octopus_free_slots, rate_dict, export=False, rate_replicate=None):
         """
         Load octopus free session slot into rate_dict (in place)
+
+        A slot whose start/end cannot be decoded is skipped entirely - it must not
+        re-apply the previous slot's rate over the previous slot's minute range.
         """
         if rate_replicate is None:
             rate_replicate = {}
@@ -2997,9 +3000,14 @@ class Octopus:
                         if not export:
                             self.load_scaling_dynamic[minute] = self.load_scaling_saving
 
-    def decode_octopus_slot(self, car_n, slot, raw=False):
+    def decode_octopus_slot(self, car_n, slot, raw=False, boundaries_only=False):
         """
         Decode IOG slot
+
+        boundaries_only skips the kWh/source/location handling below - including the "remove
+        empty slots" check, which real HA-integration started_dispatches entries (start/end only,
+        no kWh, source or location) would otherwise trip, decoding them as empty (#4516 Stage 1's
+        build_dispatch_timeline() review). Only start/end are meaningful there.
         """
         if "start" in slot:
             start = datetime.strptime(slot["start"], TIME_FORMAT)
@@ -3022,6 +3030,9 @@ class Octopus:
 
         if start_minutes == end_minutes:
             return 0, 0, 0, source, location
+
+        if boundaries_only:
+            return start_minutes, end_minutes, 0, source, location
 
         cap_minutes = end_minutes - start_minutes
 
@@ -3053,6 +3064,43 @@ class Octopus:
 
         return start_minutes, end_minutes, kwh, source, location
 
+    def dispatch_billed_off_peak(self, source, location, end_minutes):
+        """
+        Decide whether an Octopus Intelligent dispatch should be priced at the off-peak rate.
+
+        The location test only applies to dispatches that haven't finished yet. Octopus bills a
+        completed smart-charge dispatch at the off-peak rate regardless of the location it ends up
+        reported at, and that label is not stable - a completed dispatch can be retroactively
+        relabelled AT_HOME to AWAY hours after it ran. Since rate_import is rebuilt from the tariff
+        every cycle, such a relabel would silently un-stamp the cheap rate on minutes that have
+        already been metered, and today_cost() re-prices the whole day, so the day's cost steps up
+        on an hour with no import at all (issue #4946). A slot still to come is a different matter
+        and keeps the location test: a genuinely-away car would otherwise have the planner import
+        against a cheap window that never materialises (the GH#4516 family).
+
+        A dispatch straddling minutes_now is deliberately treated as not-yet-completed, so its
+        already-elapsed minutes keep the location test until it finishes. Keying the exemption on
+        the start instead would stamp the whole remaining tail of a multi-hour window cheap, which
+        is the #4516 risk above; the residual is bounded by one in-progress dispatch and is
+        strictly narrower than the pre-#4946 behaviour, where every AWAY minute stayed mispriced.
+
+        This is only the off-peak *eligibility* test - callers still apply the midday-to-midday
+        slot cap on top, so a completed dispatch beyond the day's budget is still priced at
+        rate_max_base. That is deliberate: Octopus's 6-hour guarantee is a daily allowance and a
+        completed dispatch consumes it like any other.
+
+        :param source: Dispatch source, e.g. smart-charge, bump-charge or BOOST
+        :param location: Dispatch location label - AT_HOME, AWAY, UNABLE_TO_IDENTIFY or blank
+        :param end_minutes: Dispatch end time in minutes from midnight
+        :return: True if the dispatch is eligible for the off-peak rate
+        """
+        # Ignore bump-charge slots as their cost won't change
+        if source == "bump-charge" or source == "BOOST":
+            return False
+        if end_minutes <= self.minutes_now:
+            return True
+        return not location or location == "AT_HOME"
+
     def get_octopus_slot_max(self):
         """
         Resolve the Octopus Intelligent daily low-rate slot cap.
@@ -3070,6 +3118,229 @@ class Octopus:
         if OctopusAPI.has_six_hour_cap(tariff_code):
             return OCTOPUS_SLOT_MAX_CAPPED
         return OCTOPUS_SLOT_MAX_DEFAULT
+
+    def build_dispatch_timeline(self, car_n, completed, started, planned, window_before_hours=4, window_after_hours=24, step=30):
+        """
+        Build a fixed-width, one-character-per-block dispatch status string for the diagnostic
+        timeline log (#4516 Stage 1 - not yet used for any rate/plan decision, purely observational).
+
+        Each character covers `step` minutes, spanning [-window_before_hours, +window_after_hours)
+        around now. The grid is anchored to the `step` boundary at or before now rather than to
+        now itself: dispatch slots are 30-minute aligned, so an off-boundary anchor would split
+        one slot across two columns ("pp") and register as a spurious change.
+
+        'p' = planned (provisional), 's' = started, 'c' = completed, over a background of '-'
+        where importing is cheap (at or below the planner's low-rate threshold), '.' where it is
+        not, and '?' where that block's rate is not known - so the overnight cheap session shows
+        as the backdrop a dispatch sits on, and a rate-data gap is visible as a gap. Where
+        lists disagree on the same block, the most-confirmed status wins (completed > started >
+        planned) - reflects Octopus's own view having moved on, not a genuine simultaneous claim.
+
+        Where Predbat's own plan imports but there is no dispatch, the background is replaced
+        instead: 'I' on a cheap block, 'X' on an expensive one. Every planned import therefore
+        shows as exactly one of 'P'/'S'/'C' (in a dispatch), 'I' (cheap, no dispatch) or 'X'
+        (expensive, no dispatch) - the three are mutually exclusive, since a block either carries
+        a dispatch or does not, and if it does not its rate is either cheap or it is not. A block
+        whose rate is unknown stays '?' even when Predbat imports there, because it cannot be
+        classified as cheap or expensive.
+
+        'X' is the one to look for. A withdrawn dispatch leaves the block with no letter, so
+        before this the evidence that Predbat had committed an import there vanished with the
+        slot - exactly the case this diagnostic exists to catch. Now a rescinded slot reads as a
+        stripe that turns from 'P' into 'I' or 'X' rather than disappearing.
+
+        A single '|' marks where now falls, inserted between columns rather than overwriting one,
+        so past and future are distinguishable without losing a dispatch character.
+
+        The letter is UPPERCASED where Predbat's own plan charges in that block, so 'P' is a
+        provisional slot Predbat is relying on and 'p' one it is not. That distinction is the
+        point: a slot that disappears having never been planned against costs nothing, while one
+        Predbat committed an import to is a plan that will not happen - so the case that matters
+        is the one that shouts.
+
+        Stacking consecutive lines (a heartbeat one per 30-minute boundary, plus one on any
+        earlier change - see the caller in fetch.py) in a monospace log viewer reveals dispatch
+        lifecycle as diagonal stripes: a specific dispatch drifts one column per line as `now`
+        advances, so a rescinded slot shows as a stripe that stops before reaching the `now`
+        column, while a genuinely-delivered one runs through into 'C'.
+        """
+        total_before = window_before_hours * 60
+        total_after = window_after_hours * 60
+        num_blocks = (total_before + total_after) // step
+
+        # Anchor the grid to the `step` boundary at or before now, not to now itself. Dispatch
+        # slots are always 30-minute aligned, so anchoring on an off-boundary `minutes_now` (any
+        # cycle not landing exactly on :00/:30) makes a single slot straddle two columns and
+        # render as "pp" - which then also reads as a change against the previous line and gets
+        # marked '*', reporting churn that is purely an artefact of when the cycle ran.
+        origin = (self.minutes_now // step) * step - total_before
+
+        # Background: '-' where importing is cheap (at or below the planner's own low-rate
+        # threshold), '.' where it is not, and '?' where the rate for that block is not known.
+        # Uses the same threshold the planner uses to pick charge windows, so the render agrees
+        # with the decision rather than approximating it.
+        #
+        # The '?' matters: rate_import is rebuilt each cycle and is briefly empty while apps.yaml
+        # is re-read, so a missing rate is a real state the render can hit. Drawing those blocks
+        # as '.' made a transient data gap indistinguishable from a genuinely expensive slot -
+        # the whole overnight band would vanish for one cycle and come back on the next, looking
+        # like the rates had changed when only the render had lost them.
+        status = []
+        rates = self.rate_import or {}
+        threshold = getattr(self, "rate_import_cost_threshold", None)
+        for block in range(num_blocks):
+            rate = rates.get(origin + block * step, None)
+            if threshold is None or rate is None:
+                status.append("?")
+            else:
+                status.append("-" if rate <= threshold else ".")
+
+        def mark(slots, char):
+            for slot in slots or []:
+                start_minutes, end_minutes, _, _, _ = self.decode_octopus_slot(car_n, slot, raw=True, boundaries_only=True)
+                if start_minutes == end_minutes:
+                    continue
+                block_start = max(0, (start_minutes - origin) // step)
+                block_end = min(num_blocks, -(-(end_minutes - origin) // step))  # ceil division
+                for block in range(int(block_start), int(block_end)):
+                    status[block] = char
+
+        mark(planned, "p")
+        mark(started, "s")
+        mark(completed, "c")
+
+        # Uppercase where Predbat's own plan plans to import - so a stripe shows not just the
+        # dispatch's lifecycle but whether Predbat had committed a charge window to it. A slot
+        # that reads 'P' and then vanishes before reaching the now column is one Predbat planned
+        # around and lost, which is the case a plain p/s/c timeline cannot distinguish from a
+        # slot nothing depended on. Uppercase carries the slots that matter so they stand out
+        # against both the background and the dispatches Predbat is ignoring.
+        #
+        # This runs in fetch, before the planner, so the windows are the *previous* cycle's plan -
+        # one 5-minute cycle stale against 30-minute blocks. That is deliberate: what Predbat
+        # believed while the slot was still live is the more useful thing to record.
+        for window_n, window in enumerate(self.charge_window_best or []):
+            if window_n < len(self.charge_limit_best or []) and self.charge_limit_best[window_n] <= 0:
+                continue
+            block_start = max(0, (window.get("start", 0) - origin) // step)
+            block_end = min(num_blocks, -(-(window.get("end", 0) - origin) // step))
+            for block in range(int(block_start), int(block_end)):
+                if status[block] in ("p", "s", "c"):
+                    # A dispatch Predbat is importing in: uppercase it.
+                    status[block] = status[block].upper()
+                elif status[block] == "-":
+                    # Importing on a cheap rate with no dispatch under it.
+                    status[block] = "I"
+                elif status[block] == ".":
+                    # Importing at a normal rate with no dispatch - either a deliberate expensive
+                    # charge, or a dispatch that was withdrawn after Predbat planned around it.
+                    status[block] = "X"
+
+        # Mark where `now` falls, so past and future symbols can be told apart at a glance. The
+        # marker sits *between* columns (inserted before the block containing now) rather than
+        # overwriting one, so no dispatch character is lost to it. Every line carries exactly one,
+        # so the fixed-width stacking the render depends on still holds.
+        now_block = total_before // step
+        return "".join(status[:now_block]) + "|" + "".join(status[now_block:])
+
+    def dispatch_timeline_should_log(self, car_n, timeline):
+        """
+        Decide whether fetch.py should log a dispatch-timeline diagnostic line this cycle, and
+        what marker to append if so.
+
+        A 30-minute heartbeat always logs - dispatch decisions are 30-min-granular anyway, so log
+        volume stays sane at that cadence - but a change from the last logged timeline for this
+        car also logs immediately outside that boundary, marked with a trailing ' *' (#4948
+        review). Without this, a provisional slot that appears and disappears entirely within one
+        half-hour window would never appear in this log at all, however briefly Predbat's own
+        plan relied on it - exactly the pattern this diagnostic exists to catch.
+
+        The marker is a suffix, appended by the caller after build_dispatch_timeline()'s
+        fixed-width string, rather than a prefix - so heartbeat and change-triggered lines still
+        stack column-for-column in a monospace viewer. That alignment is the whole point of the
+        render: consecutive lines are meant to line up into diagonal stripes.
+
+        Records the new timeline as "last logged" as a side effect whenever this returns True, so
+        a caller must log with the returned marker exactly when told to, and no other times.
+        """
+        is_heartbeat = self.minutes_now % 30 == 0
+        changed = timeline != self.dispatch_timeline_last.get(car_n)
+        if not (is_heartbeat or changed):
+            return False, ""
+        self.dispatch_timeline_last[car_n] = timeline
+        return True, "" if is_heartbeat else " *"
+
+    def log_dispatch_timelines(self):
+        """
+        Render and log the dispatch timelines captured earlier in this fetch cycle (#4516 Stage 1).
+
+        Split from the capture site because the two halves need different moments. The dispatch
+        lists and the plugged-in reading are only correct during the car fetch - the Octopus branch
+        later overwrites car_charging_planned with "has dispatch slots" - while the cheap-rate
+        background needs rate_import and rate_import_cost_threshold, which are not set until after
+        the car fetch has run. Rendering here gives both halves their correct values; rendering at
+        the capture site drew the background from the previous cycle's rates, and drew none at all
+        on the first cycle after a restart.
+        """
+        hours_before = 4
+        hours_after = 24
+        for pending in self.dispatch_timeline_pending:
+            car_n = pending["car_n"]
+            timeline = self.build_dispatch_timeline(car_n, pending["completed"], pending["started"], pending["planned"], window_before_hours=hours_before, window_after_hours=hours_after)
+            should_log, marker = self.dispatch_timeline_should_log(car_n, timeline)
+            if should_log:
+                plugged = "plugged" if pending["plugged"] else "unplugged"
+                soc = "{} soc {}/{}kWh {}".format(timeline, dp2(self.car_charging_soc[car_n]), dp2(self.car_charging_limit[car_n]), plugged)
+                self.log("Octopus: Dispatch timeline car {} @ {} [-{}h..+{}h]: {}{}".format(car_n, self.time_abs_str(self.minutes_now), hours_before, hours_after, soc, marker))
+            self.log_dispatch_unconfirmed(car_n, pending.get("started"), pending.get("charging_now"))
+        self.dispatch_timeline_pending = []
+
+    def log_dispatch_unconfirmed(self, car_n, started, charging_now):
+        """
+        Log a slot where a dispatch is running but the car is not drawing power (GH#5080).
+
+        Predbat prices a live dispatch at the off-peak rate and imports against it. If the car
+        never charges in that slot, Octopus may bill the import at the full rate instead - a
+        direct loss that only becomes provable days later, when the per-slot costs settle and
+        MEASUREMENTS_QUERY can be re-read for that half-hour.
+
+        This is the flag, not the proof: it records which slots are worth reconciling so the
+        check has somewhere to start, rather than trawling every half-hour of history. Logged
+        once per half-hour slot per car so a dispatch that runs for hours does not repeat the
+        line every cycle.
+
+        Deliberately not an error or a warning. A car that finishes charging part-way through a
+        dispatch, or a dispatch Octopus honours anyway, both produce this line legitimately - so
+        it reads as something to check, not something that has gone wrong.
+
+        charging_now is a tri-state: True/False from a configured car_charging_now sensor, or
+        None when the (optional) sensor isn't set up. None can't confirm or deny the car is
+        drawing power, so it's treated the same as True here - no signal, no flag.
+
+        started_dispatches is retained by the HA Octopus integration as recent history, not
+        trimmed to the current interval, so a dispatch that started earlier and already ended
+        still appears here. Each entry is decoded to its own start/end and checked against
+        minutes_now - a non-empty list is not enough, a dispatch must actually cover now.
+        """
+        if charging_now or charging_now is None:
+            return
+        dispatch_active = False
+        for slot_entry in started or []:
+            start_minutes, end_minutes, _, _, _ = self.decode_octopus_slot(car_n, slot_entry, raw=True, boundaries_only=True)
+            if start_minutes <= self.minutes_now < end_minutes:
+                dispatch_active = True
+                break
+        if not dispatch_active:
+            return
+        slot = (self.minutes_now // 30) * 30
+        # minutes_now resets to 0 at each local midnight (Copilot review on #5077), so the dedup
+        # key needs the day too - otherwise an unconfirmed dispatch flagged at, say, 00:00 would
+        # suppress the same car's genuinely new 00:00 slot the following day.
+        dedup_key = (self.midnight_utc, slot)
+        if self.dispatch_unconfirmed_last.get(car_n) == dedup_key:
+            return
+        self.dispatch_unconfirmed_last[car_n] = dedup_key
+        self.log("Octopus: Note: car {} dispatch active at {} but the car is not charging - import in this slot may be billed at the full rate, needs reconciling against the bill (GH#5080)".format(car_n, self.time_abs_str(slot)))
 
     def load_octopus_slots(self, car_n, octopus_slots, octopus_intelligent_consider_full):
         """
@@ -3148,7 +3419,7 @@ class Octopus:
             # approximation (real draw isn't perfectly uniform across the slot) but matches how
             # rate_add_io_slots() below treats rate as uniform per 30-min block too.
             chunks = [(start_minutes, end_minutes, kwh, self.rate_import.get(start_minutes, self.rate_min_base))]
-            if octopus_slot_low_rate and source != "bump-charge" and source != "BOOST" and (not location or location == "AT_HOME"):
+            if octopus_slot_low_rate and self.dispatch_billed_off_peak(source, location, end_minutes):
                 slot_block_start = (start_minutes // 30) * 30
                 num_blocks = max(1, (end_minutes - slot_block_start + 29) // 30)
                 day_offset = (start_minutes - 720) // (24 * 60)
@@ -3178,6 +3449,8 @@ class Octopus:
                 end_minutes_original = chunk_end
                 start_minutes, end_minutes, kwh = chunk_start, chunk_end, chunk_kwh
 
+                # Emission is future-only, so dispatch_billed_off_peak()'s completed-dispatch exemption
+                # (#4946) can never apply here - a plain location test is equivalent and is kept as-is.
                 if (end_minutes > start_minutes) and (end_minutes > self.minutes_now) and (not location or location == "AT_HOME"):
                     kwh_expected = kwh * self.car_charging_loss
                     if octopus_intelligent_consider_full:
@@ -3253,11 +3526,14 @@ class Octopus:
                 # delivered nothing, so it shouldn't consume one of the day's capped low-rate slots.
                 # A future/still-active slot is left alone even at zero kWh - its kWh is usually
                 # synthesised rather than genuinely zero, and an in-progress dispatch is still real.
+                # This runs ahead of the completed-dispatch exemption below on purpose: a zero-kWh past
+                # dispatch is treated as never having happened, so it is dropped whatever its location.
                 if end_minutes <= self.minutes_now and kwh <= 0:
                     continue
 
-                # Ignore bump-charge slots as their cost won't change
-                if source != "bump-charge" and source != "BOOST" and (not location or location == "AT_HOME"):
+                # Off-peak eligibility (source, location and the completed-dispatch exemption for
+                # issue #4946) is shared with load_octopus_slots() so the two cap counters agree.
+                if self.dispatch_billed_off_peak(source, location, end_minutes):
                     # Round slots to 30 minute boundary
                     # Floor the start (round down) and ceiling the end (round up)
                     # This ensures any partial overlap with a 30-min slot marks the entire slot as off-peak
@@ -3281,10 +3557,16 @@ class Octopus:
                         else:
                             saved_slots.add(minute)
 
-                        # Calculate which day this minute belongs to (day boundary at midday)
+                        # Calculate which day this slot belongs to (day boundary at midday)
                         # Period 0 = noon today (720) to 11:59 tomorrow (2159), etc.
                         # Python's floor division handles negative numbers correctly
-                        day_offset = (minute - 720) // (24 * 60)
+                        #
+                        # Key this on the slot's START, not the current minute: a window that opens in
+                        # the evening and runs past noon the next day would otherwise cross into the
+                        # next period part-way through and be handed a second budget, re-stamping its
+                        # tail at rate_min_base in the middle of the day-rate block. load_octopus_slots
+                        # already charges a window to its start period the same way.
+                        day_offset = (start_minutes - 720) // (24 * 60)
 
                         # Initialise counter for this day if needed
                         if day_offset not in slots_per_day:
@@ -3474,7 +3756,7 @@ class Octopus:
         octopus_saving_slots = []
         if "octopus_saving_session" in self.args:
             saving_rate = 200  # Default rate if not reported
-            octopoints_per_penny = self.get_arg("octopus_saving_session_octopoints_per_penny", 8)  # Default 8 octopoints per found
+            octopoints_per_penny = self.get_arg("octopus_saving_session_octopoints_per_penny", 8)  # Default 8 octopoints per penny
             octopoints_min_threshold = self.get_arg("octopus_saving_session_min_octopoints_per_kwh", 0)
 
             joined_events = []

@@ -89,7 +89,7 @@ It's recommended that you first watch the [Installing GivTCP and Mosquitto Apps 
 '[https://github.com/britkat1980/ha-addons](https://github.com/britkat1980/ha-addons')' into the text box and click 'Add' then 'Close'<BR>
 NB: this URL is for GivTCP v3, not v2 as covered in the video.
 - Click the back button and then re-navigate to Settings / Apps / Install app so Home Assistant picks up the GivTCP app from the custom repository
-- Scroll down the app list, to find 'GivTCP-V3', you should see the three addons; the production version, the latest beta and the latest dev versions.
+- Scroll down the app list, to find 'GivTCP-V3', you should see the three apps; the production version, the latest beta and the latest dev versions.
 Click on the 'GivTCP' app, then click 'INSTALL'
 - Once GivTCP has been installed, ensure that the 'Start on boot' and 'Watchdog' options are turned on
 
@@ -107,7 +107,7 @@ Click on the 'GivTCP' app, then click 'INSTALL'
   For example, if you have a gateway and two AIOs you could use the prefixes 'GW', 'AIO-1' and 'AIO-2'.
   The prefixes should be set before you start using GivTCP in anger
   as changing the prefixes later on will result in both the old and new sensor names appearing in Home Assistant with the 'old' sensors being "unavailable".<BR>
-  Note that if you do change the givtcp prefixes then you will also have to edit the apps.yaml configuration file to match,
+  Note that if you do change the givtcp prefixes then you will also have to edit the `apps.yaml` configuration file to match,
   and change the sensor names that Predbat is looking for (by default prefixed 'givtcp_xxx') to your new sensor naming structure
 
 - Click Next and Next to get to the Selfrun page, and turn on Self Run so that GivTCP automatically retrieves data from your inverter. The Self Run Loop Timer is how often GivTCP will retrieve data - it's
@@ -200,7 +200,9 @@ Launch Predbat with hass.py (from the Predbat-addon repository) either via a Doc
 
 **Experimental**
 
-Predbat has a built-in AlphaESS Cloud integration for AlphaESS hybrid inverters via the AlphaESS Open API, providing monitoring and, once confirmed against your own hardware, battery control - no local Modbus/RS485 Home Assistant integration is required.
+Predbat has a built-in AlphaESS Cloud integration for AlphaESS hybrid inverters via the AlphaESS Open API, providing monitoring and timed charge control - no local Modbus/RS485 Home Assistant integration is required.
+
+**It cannot control export.** The AlphaESS Open API has no forced-export, working-mode or dispatch endpoint, and its discharge window turns out to be a *permission* window rather than a forced export, so neither Force Export nor Freeze Export reaches the grid - see [AlphaESS cannot be used to control export](apps-yaml.md#alphaess-cannot-be-used-to-control-export) for the detail and for why you should set `select.predbat_mode` to `Control charge` on these systems. Forced export is available on the hardware over local Modbus, just not over the cloud API.
 
 Nobody on the Predbat project has AlphaESS hardware, so this integration's wire behaviour is inferred from AlphaESS's published Open API documentation and the Home Assistant AlphaESS integration rather than confirmed against real inverters - every request and response is traced to the log by default so you can capture evidence for an issue report. A standalone diagnostics CLI (`apps/predbat/alphaess.py`) is included specifically so you can verify it against your own system, using the [diagnostics CLI](#verifying-with-the-alphaess-diagnostics-cli) below, before trusting Predbat with control.
 
@@ -250,7 +252,7 @@ python3 alphaess.py --app-id YOUR_APP_ID --app-secret YOUR_APP_SECRET --unbind -
 
 **`--unbind` is one-way from Home Assistant/the CLI.** Once unbound, Predbat can no longer read or control that system, and there is no `--bind`-from-nothing shortcut back - re-binding needs a fresh verification code emailed to the owner, via `--verify` then `--bind` as above, or via the AlphaESS portal.
 
-See [AlphaESS Cloud API](apps-yaml.md#alphaess-cloud-api) in `apps.yaml` for the full list of `alphaess_*` settings, defaults and important behaviour to be aware of - including the write-timing, freeze-signalling, `export_limit` and `battery_rate_max` notes that apply to every AlphaESS install.
+See [AlphaESS Cloud API](apps-yaml.md#alphaess-cloud-api) in `apps.yaml` for the full list of `alphaess_*` settings, defaults and important behaviour to be aware of - including the export-control limitation above, and the write-timing, freeze-signalling, `export_limit` and `battery_rate_max` notes that apply to every AlphaESS install.
 
 ## Canadian Solar EP Cube
 
@@ -973,7 +975,7 @@ Max value: (Inverter Battery max charge in watt)
 input_number.predbat_discharge_rate     # this is used to set battery discharge to zero
 Min value: 0
 Max value: (Inverter Battery max discharge in watt)
-```text
+```
 
 - To control the Kostal inverter you need to use a modbus/tcp connection, this is not a part of the Kostal integration. Add the following modbus configuration to your `configuration.yaml`:
 
@@ -1732,8 +1734,7 @@ triggers:
       entity_id: automation.luxpower_freeze_charge_watchdog
 
   mode: single
-
-  ```
+```
 
 **Enable Freeze Charging**
 
@@ -1751,7 +1752,7 @@ If you have a LuxPower inverter with the **Charge Last** feature, enable the Pre
 **Note**
 Freeze Exporting requires fewer supporting automations than Freeze Charging, as it relies primarily on inverter-side behaviour. No additional watchdog or guard logic is required.
 
- In your `apps.yaml` file:
+In your `apps.yaml` file:
 
 - Look for `support_discharge_freeze` in the inverter section and change `False` to `True`
     - Uncomment the last two lines of the `discharge_stop_service` section so Predbat turns `switch.lux_charge_last` off when Freeze exporting stops.
@@ -1774,7 +1775,7 @@ After Predbat recomputes, you may see some dark grey **FrzExp** slots in the sta
 ```yaml
 name: Predbat Ready
 entity_id: input_boolean.predbat_ready
-```text
+```
 
 The `predbat_ready` helper prevents automation actions until LuxPower entities are fully available after startup. Ensure it is On after it has been created.
 
@@ -2321,7 +2322,7 @@ sensor:
 
 If you have multiple batteries connected to your SolarEdge inverter and are using the SolarEdge Modbus Multi integration, this enumerates the multiple batteries as b1, b2, b3, etc with separate entities per battery.
 
-You will need to make a number of changes to the solaredge apps.yaml, replacing the following entries:
+You will need to make a number of changes to the solaredge `apps.yaml`, replacing the following entries:
 
 ```yaml
   battery_rate_max:
@@ -2971,9 +2972,12 @@ The component needs only your token in `apps.yaml` and no Home Assistant Tesla i
   teslemetry_key: 'your-teslemetry-token'
   teslemetry_site_id: 'your-energy-site-id'  # optional: omit to use the first site on your account
   teslemetry_automatic: True
+  teslemetry_tbc_control: False  # optional trial setting - see below
 ```
 
 Copy the template [teslemetry.yaml](https://raw.githubusercontent.com/springfall2008/batpred/main/templates/teslemetry.yaml) over the top of your `apps.yaml` and edit for your system. See [Tesla Powerwall Teslemetry API](components.md#tesla-powerwall-teslemetry-api-teslemetry) for details.
+
+`teslemetry_tbc_control` is off by default, so nothing changes unless you switch it on. When it is on, Predbat pushes a control-signal tariff (0p over the charge window, 100p over the export window, 50p import elsewhere) and switches the Powerwall to Time-Based Control, so Tesla's own Opticaster runs the charge at full rate rather than the slower reserve-driven charge. It is a trial setting, and while it is on Predbat's charge and export target percentages are advisory, because Tesla decides how much energy actually moves. Grid charging under this mode is enabled only inside a charge window that is below target and whose reserve resolves below 100% - it is off outside a charge window entirely (including the demand and export states). One known limitation: the reserve resolves to 100% not only when Predbat is deliberately holding the battery there, but also whenever it asks for anything in the 81-99% band, which Powerwall firmware since 25.18.4 will not hold below 100% - so a `set_reserve_min` anywhere from 81 to 99 (a plausible value in its own right) leaves grid charging disabled in every state, permanently, with only a one-off log line to explain why. This is deliberate: on a Powerwall, grid-charging up to a 100% reserve triggers the slow throttled charge this mode exists to avoid.
 
 ### Manual configuration via Home Assistant integrations
 
@@ -3527,7 +3531,6 @@ The following template can be used as a starting point:
     support_charge_freeze: False
     support_discharge_freeze: False
     has_ge_inverter_mode: False
-    has_fox_inverter_mode: False
     has_idle_time: False
     has_time_window: False
     charge_time_format: "S"
@@ -3775,10 +3778,6 @@ to `false` disables it regardless.
 ### has_ge_inverter_mode
 
 When True, the inverter supports the GivEnergy inverter modes (ECO, Timed Export etc).
-
-### has_fox_inverter_mode
-
-When True, the inverter supports Fox inverter modes, i.e. Eco (Paused) is treated the same as Eco mode and the inverter mode is always set to "SelfUse" as all charging and discharging is controlled by schedule, not inverter modes.
 
 ### has_idle_time
 

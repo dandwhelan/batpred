@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Predbat is a Home Assistant addon (app) that predicts and optimizes home battery charging/discharging based on electricity rates, solar forecasts, and historical load data. It supports inverters from GivEnergy, Solis, Huawei, SolarEdge, and Sofar, and integrates with energy providers like Octopus Energy, Kraken (EDF/E.ON), and Axle Energy VPP.
+Predbat is a Home Assistant App (addon) that predicts and optimizes home battery charging/discharging based on electricity rates, solar forecasts, and historical load data. It supports inverters from GivEnergy, Solis, Huawei, SolarEdge, and Sofar, and integrates with energy providers like Octopus Energy, Kraken (EDF/E.ON), and Axle Energy VPP.
 
 It also supports Predbat.com which is a cloud based product that does not use Home Assistant and can run in a Docker environment.
 
@@ -76,9 +76,13 @@ cd coverage
 
 It lists every config item that differs from its default, recalculates the plan, and writes `plan_orig.html` / `plan_final.json` into `coverage/`. Add `--redo` to recompute rates, load model and Octopus slots instead of reusing the ones in the dump. Committed examples live in `coverage/cases/*.yaml` and run as golden regressions under `./run_all --test debug_cases`.
 
+### Finding test order dependencies
+
+All tests share one `PredBat`/HA fixture, so a test that mutates shared state without fully restoring it can make an unrelated _later_ test fail depending on run order (see issue [#5079](https://github.com/springfall2008/batpred/issues/5079)). `./run_shuffle --hunt --quick` (from `coverage/`) fuzzes the test order, bisects any failure down to the minimal (culprit, victim) pair, and records it so the next run looks for a different one. See "Finding test order dependencies" in [docs/developing.md](docs/developing.md) for the full set of modes (`--bisect`, `--campaign`).
+
 ### Debugging notes
 
-`.claude/skills/issue-triage/references/debug-journal.md` records what past investigations found: per-integration API quirks, symptom-to-module pointers, and traps such as stale kernel binaries and test-order pollution. Read it before debugging an integration or a "the plan is wrong" report, and add to it when you learn something a future session would want.
+`tools/debug-journal.md` records what past investigations found: per-integration API quirks, symptom-to-module pointers, and traps such as stale kernel binaries and test-order pollution. Read it before debugging an integration or a "the plan is wrong" report, and add to it when you learn something a future session would want.
 
 ## Code Quality
 
@@ -133,6 +137,7 @@ The main loop (`update_pred()`) runs every 5 minutes: fetch data → run optimiz
 - Can be independently enabled/disabled
 - Has health monitoring with exponential backoff
 - Routes HA events via entity prefix filtering
+- Is registered in `COMPONENT_LIST` by its `"module.ClassName"` path and imported only when enabled (`load_component_class()`), so startup no longer compiles every component - the `components` test in the quick suite imports them all instead
 
 ### Key Data Flow
 
@@ -212,19 +217,20 @@ All sensors include attributes: `generation_income`, `deemed_export_income`, `ge
 
 ### C++ Kernel Note (fork)
 
-**FIT is Python-only.** The kernel carried FIT fields in `PkContext` at fork ABI/parity 103-105 until the 2026-08-24 upstream merge dropped them; the fork is now back on upstream's plain numbering (currently **5/10**) and the C++ kernel knows nothing about FIT. `kernel_supported()` therefore returns False whenever `metric_fit_generation_rate` or `metric_fit_deemed_export_rate` is above zero, so a FIT user falls back to the Python engine and gets the plan they configured for, just more slowly. Covered by `tests/test_fit.py`. If FIT is ever re-added to the kernel, that gate is what to remove.
+**FIT is Python-only.** The kernel carried FIT fields in `PkContext` at fork ABI/parity 103-105 until the 2026-08-24 upstream merge dropped them; the fork is now back on upstream's plain numbering (currently **7/14**) and the C++ kernel knows nothing about FIT. `kernel_supported()` therefore returns False whenever `metric_fit_generation_rate` or `metric_fit_deemed_export_rate` is above zero, so a FIT user falls back to the Python engine and gets the plan they configured for, just more slowly. Covered by `tests/test_fit.py`. If FIT is ever re-added to the kernel, that gate is what to remove.
 
-**The fork's kernel source is not upstream's.** Both sit at ABI/parity 5/10, but this fork carries its own C++ work on top: an exact-integer `round_py` fast path (~7ns vs upstream's ~96ns snprintf/strtod), a `shared_ptr` context map so `pk_context_free` on another thread cannot free a running context, a `calc_percent_limit` clamp at zero, the `pk_round_py_test` hook, and a `kernel_n_steps` guard. Because the revision numbers match upstream's, **the loader cannot tell fork binaries from upstream ones** — so on any upstream merge that touches `prediction_kernel.cpp`, taking either side's `.so` files wholesale is wrong. Merge the source, then rebuild all six `prediction_kernel_lib_*.so` from the merged tree via `build_kernel_cross.sh` (needs zig; `ZIG=/path/to/zig bash apps/predbat/build_kernel_cross.sh`) and confirm with `./run_all --test kernel_parity`.
+**The fork's kernel source is not upstream's.** Both sit at ABI/parity 7/14, but this fork carries its own C++ work on top: an exact-integer `round_py` fast path (~7ns vs upstream's ~96ns snprintf/strtod), a `shared_ptr` context map so `pk_context_free` on another thread cannot free a running context, a `calc_percent_limit` clamp at zero, the `pk_round_py_test` hook, and a `kernel_n_steps` guard. Because the revision numbers match upstream's, **the loader cannot tell fork binaries from upstream ones** — so on any upstream merge that touches `prediction_kernel.cpp`, taking either side's `.so` files wholesale is wrong. Merge the source, then rebuild all six `prediction_kernel_lib_*.so` from the merged tree via `build_kernel_cross.sh` (needs zig; `ZIG=/path/to/zig bash apps/predbat/build_kernel_cross.sh`) and confirm with `./run_all --test kernel_parity`.
 
 Any behavioural change to `prediction.py`'s hot loop must still be mirrored in `prediction_kernel.cpp` with `KERNEL_PARITY_REVISION` and `PK_PARITY_REVISION` both bumped, followed by a rebuild of all six binaries.
 
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.48.4). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.0.3). Fork changes on top of upstream:
 
 - **FIT support** — see the Feed-in Tariff section above
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
 - **DB history fix** — `db_manager`/HA history returns correct results for entities with no state change inside the query window
+- **GivTCP export-target robustness** — `givtcp_rest.py` treats GivTCP's own POST acknowledgement as proof a discharge-target write landed (some inverters never read the register back), and suppresses the every-cycle rewrite for a target already seen to be unwritable (`base.rest_discharge_target_unwritable`). Ported into the component when upstream moved REST out of `inverter.py`.
 - **Fork release pipeline** — see below
 
 ### Release Process (fork)
