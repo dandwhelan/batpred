@@ -4,6 +4,11 @@ on:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
+    # A hung test step otherwise sits until GitHub's 6 hour default and is reported as
+    # "cancelled" rather than as a failure - which is how the v9.0.3 merge's run burned six
+    # hours of runner time and told us nothing. Cap the job well above its real cost (the
+    # whole thing normally runs in well under fifteen minutes) so a hang fails fast and loudly.
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v4
@@ -19,8 +24,14 @@ jobs:
     - name: Build prediction kernel
       run: bash apps/predbat/build_kernel.sh
     - name: Run unit tests (quick mode)
+      # PYTHONUNBUFFERED so the log says which test was running when something wedges. Piped to
+      # the runner, Python block-buffers stdout, so a killed process loses its last block and the
+      # log stops at an arbitrary point several tests earlier - exactly what made the six hour
+      # hang above impossible to place from its log.
       env:
         PREDBAT_KERNEL_REQUIRED: "1"
+        PYTHONUNBUFFERED: "1"
+      timeout-minutes: 25
       run: |
         cd coverage
         pip install coverage
@@ -34,6 +45,8 @@ jobs:
     - name: Run unit tests (the slow ones quick mode skips)
       env:
         PREDBAT_KERNEL_REQUIRED: "1"
+        PYTHONUNBUFFERED: "1"
+      timeout-minutes: 15
       run: |
         cd coverage
         python3 -m coverage run -p ../apps/predbat/unit_test.py \
@@ -79,6 +92,7 @@ jobs:
   # back to the PR branch when they change (same auto-fix pattern as pre-commit)
   kernel-binaries:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     if: github.event.pull_request.head.repo.full_name == github.repository
