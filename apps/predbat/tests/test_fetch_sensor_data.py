@@ -68,7 +68,12 @@ class FetchFixture:
         what the power and temperature sensors in the default apps.yaml need.
         """
         per_minute = self.series_rates.get(entity_id)
-        now = datetime.now(self.base.now_utc.tzinfo)
+        # End the series at the harness clock, which create_predbat pins to noon
+        # (FIXTURE_MINUTES_NOW), rather than the machine's. fetch_sensor_data reads the tail of this
+        # history against that pinned clock, so a series built from the wall clock leaves the most
+        # recent prediction step empty whenever the machine is behind noon - load_last_period then
+        # comes back 0 and the test failed every morning and passed every afternoon.
+        now = self.base.now_utc
         step = self.history_step
         records = []
         for back in range(self.history_days * 24 * 60 // step, -1, -1):
