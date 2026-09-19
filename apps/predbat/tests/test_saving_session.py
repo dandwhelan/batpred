@@ -305,9 +305,13 @@ def test_saving_session_notify_config(my_predbat):
     date_today = my_predbat.midnight_utc.strftime("%Y-%m-%d")
     tz_offset = int(my_predbat.midnight_utc.tzinfo.utcoffset(my_predbat.midnight_utc).total_seconds() / 3600)
     tz_offset = f"{tz_offset:02d}"
-    # A joined event that has not finished yet, so the confirmation alert is due
-    joined_start = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:00")
-    joined_end = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:00")
+    # A joined event that has not finished yet, so the confirmation alert is due. Measured from the
+    # harness clock, which create_predbat pins to noon (FIXTURE_MINUTES_NOW), not the machine's: the
+    # alert is gated on the event not having ended yet, so a window built from the wall clock sits
+    # entirely in the past whenever the machine is more than two hours behind noon, and the test
+    # failed every morning and passed every evening. The date lines below already take this clock.
+    joined_start = (my_predbat.now_utc + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:00")
+    joined_end = (my_predbat.now_utc + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:00")
 
     session_binary = f"""
 state: off
