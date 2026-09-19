@@ -12,7 +12,6 @@ import time
 import re
 import requests
 import os
-import re
 import shutil
 import socket
 import tempfile
@@ -37,6 +36,10 @@ def run_test_web_if(my_predbat):
     original_dir = os.getcwd()
     temp_dir = tempfile.mkdtemp(prefix="predbat_test_")
     print(f"Using temporary directory: {temp_dir}")
+
+    # Bound in the try below, once the components this test starts are actually running. The
+    # finally reads it to tell "nothing to stop yet" from "started, and must be stopped".
+    orig_ha_if = None
 
     try:
         # Copy apps.yaml to temp directory
@@ -425,7 +428,7 @@ def run_test_web_if(my_predbat):
         # ever requesting them, so a handler that raised on an empty or unknown form would have
         # gone unnoticed until someone clicked the button.
         print("Test POST /annual")
-        res = requests.post("http://127.0.0.1:5052/annual", data={"battery_kwh": "9.5"})
+        res = requests.post(base_url + "/annual", data={"battery_kwh": "9.5"})
         if res.status_code in [200]:
             accessed_endpoints.add(("POST", "/annual"))
         else:
@@ -433,7 +436,7 @@ def run_test_web_if(my_predbat):
             failed = 1
 
         print("Test POST /annual_array")
-        res = requests.post("http://127.0.0.1:5052/annual_array", data={"array_op": "add"})
+        res = requests.post(base_url + "/annual_array", data={"array_op": "add"})
         if res.status_code in [200]:
             accessed_endpoints.add(("POST", "/annual_array"))
         else:
@@ -441,7 +444,7 @@ def run_test_web_if(my_predbat):
             failed = 1
 
         print("Test POST /annual_reset")
-        res = requests.post("http://127.0.0.1:5052/annual_reset", data={})
+        res = requests.post(base_url + "/annual_reset", data={})
         if res.status_code in [200]:
             accessed_endpoints.add(("POST", "/annual_reset"))
         else:
@@ -451,7 +454,7 @@ def run_test_web_if(my_predbat):
         # Deleting a run that was never stored must still redirect to the comparison table rather
         # than reporting a failure for something that is already true
         print("Test POST /annual_delete")
-        res = requests.post("http://127.0.0.1:5052/annual_delete", data={"run": "no_such_run"})
+        res = requests.post(base_url + "/annual_delete", data={"run": "no_such_run"})
         if res.status_code in [200]:
             accessed_endpoints.add(("POST", "/annual_delete"))
         else:
@@ -618,16 +621,24 @@ def run_test_web_if(my_predbat):
             else:
                 print("\nFAILED: All endpoints were accessed but some tests failed. Please review the errors above.")
 
-        # Run stop as task as we need to await it
-        my_predbat.create_task(my_predbat.components.stop("ha_interface"))
-        my_predbat.create_task(my_predbat.components.stop("web"))
-        my_predbat.create_task(my_predbat.components.stop("db"))
-        my_predbat.args.pop("web_port", None)
-        time.sleep(0.1)
-        my_predbat.components = Components(my_predbat)
-        my_predbat.ha_interface = orig_ha_if
-
     finally:
+        # Stopping the components has to happen even when a check above raises. The web server and
+        # the database manager run in non-daemon threads, so a test that failed part way through
+        # used to leave them running: the suite then finished, printed its summary, and the
+        # interpreter hung in shutdown waiting for threads nobody was going to stop - six hours,
+        # in CI, until the job timed out. It also left the shared PredBat instance holding a
+        # half-torn-down Components and a swapped ha_interface, which failed later tests that had
+        # nothing to do with the web interface.
+        if orig_ha_if is not None:
+            # Run stop as task as we need to await it
+            my_predbat.create_task(my_predbat.components.stop("ha_interface"))
+            my_predbat.create_task(my_predbat.components.stop("web"))
+            my_predbat.create_task(my_predbat.components.stop("db"))
+            my_predbat.args.pop("web_port", None)
+            time.sleep(0.1)
+            my_predbat.components = Components(my_predbat)
+            my_predbat.ha_interface = orig_ha_if
+
         # Clean up: return to original directory and remove temp dir
         os.chdir(original_dir)
         try:
