@@ -4947,8 +4947,6 @@ class Plan:
             final_import_kwh = pred.final_import_kwh
             final_import_kwh_house = pred.final_import_kwh_house
             final_import_kwh_battery = pred.final_import_kwh_battery
-            final_fit_generation_income = pred.final_fit_generation_income
-            final_fit_deemed_export_income = pred.final_fit_deemed_export_income
             hours_left = pred.hours_left
             final_car_soc = pred.final_car_soc
             import_kwh_h0 = pred.import_kwh_h0
@@ -5177,23 +5175,6 @@ class Plan:
                             "state_class": "measurement",
                             "unit_of_measurement": "g/kWh",
                             "icon": "mdi:molecule-co2",
-                        },
-                    )
-                if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
-                    fit_total_income = final_fit_generation_income + final_fit_deemed_export_income
-                    self.dashboard_item(
-                        self.prefix + ".fit_income",
-                        state=dp2(fit_total_income),
-                        attributes={
-                            "friendly_name": "Predicted FIT income",
-                            "state_class": "measurement",
-                            "unit_of_measurement": self.currency_symbols[1],
-                            "icon": "mdi:solar-power",
-                            "generation_income": dp2(final_fit_generation_income),
-                            "deemed_export_income": dp2(final_fit_deemed_export_income),
-                            "generation_rate": dp2(self.metric_fit_generation_rate),
-                            "deemed_export_rate": dp2(self.metric_fit_deemed_export_rate),
-                            "deemed_export_percentage": dp2(self.metric_fit_deemed_export_percentage),
                         },
                     )
 
@@ -5454,23 +5435,6 @@ class Plan:
                             "state_class": "measurement",
                             "unit_of_measurement": "g",
                             "icon": "mdi:molecule-co2",
-                        },
-                    )
-                if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
-                    fit_total_income = final_fit_generation_income + final_fit_deemed_export_income
-                    self.dashboard_item(
-                        self.prefix + ".fit_income_best",
-                        state=dp2(fit_total_income),
-                        attributes={
-                            "friendly_name": "Predicted FIT income best",
-                            "state_class": "measurement",
-                            "unit_of_measurement": self.currency_symbols[1],
-                            "icon": "mdi:solar-power",
-                            "generation_income": dp2(final_fit_generation_income),
-                            "deemed_export_income": dp2(final_fit_deemed_export_income),
-                            "generation_rate": dp2(self.metric_fit_generation_rate),
-                            "deemed_export_rate": dp2(self.metric_fit_deemed_export_rate),
-                            "deemed_export_percentage": dp2(self.metric_fit_deemed_export_percentage),
                         },
                     )
 

@@ -3118,19 +3118,6 @@ class Fetch:
 
         return validated_curve
 
-    def fit_apply_enable(self):
-        """
-        Apply the FIT master switch.
-
-        When metric_fit_enable is off the configured FIT rates are forced to zero so that
-        FIT is fully disabled everywhere - the prediction engine, the C++ kernel and the
-        published sensors all key off these rates being greater than zero.
-        """
-        if not getattr(self, "metric_fit_enable", True):
-            self.metric_fit_generation_rate = 0
-            self.metric_fit_deemed_export_rate = 0
-            self.metric_fit_deemed_export_percentage = 0
-
     def check_export_more_solar_effective(self):
         """
         Warn when export_more_solar is on but cannot have any effect.
@@ -3241,16 +3228,6 @@ class Fetch:
         self.metric_min_improvement_export_freeze = self.get_arg("metric_min_improvement_export_freeze")
         self.metric_battery_cycle = self.get_arg("metric_battery_cycle")
         self.metric_self_sufficiency = self.get_arg("metric_self_sufficiency")
-        self.metric_fit_enable = self.get_arg("metric_fit_enable")
-        self.metric_fit_generation_rate = self.get_arg("metric_fit_generation_rate")
-        self.metric_fit_deemed_export_rate = self.get_arg("metric_fit_deemed_export_rate")
-        self.metric_fit_deemed_export_percentage = self.get_arg("metric_fit_deemed_export_percentage")
-        fit_configured = self.metric_fit_generation_rate > 0 or self.metric_fit_deemed_export_rate > 0
-        self.fit_apply_enable()
-        if not self.metric_fit_enable and fit_configured:
-            self.log("FIT disabled: master switch (metric_fit_enable) is off, configured FIT rates ignored")
-        elif self.metric_fit_generation_rate > 0:
-            self.log("FIT enabled: generation rate {}p/kWh, deemed export rate {}p/kWh at {}%".format(dp2(self.metric_fit_generation_rate), dp2(self.metric_fit_deemed_export_rate), dp2(self.metric_fit_deemed_export_percentage)))
         self.metric_future_rate_offset_import = self.get_arg("metric_future_rate_offset_import")
         self.metric_future_rate_offset_export = self.get_arg("metric_future_rate_offset_export")
         self.metric_inday_adjust_damping = self.get_arg("metric_inday_adjust_damping")

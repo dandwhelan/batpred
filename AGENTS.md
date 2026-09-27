@@ -141,64 +141,10 @@ mkdocs serve   # Live preview at http://localhost:8000
 
 When adding a new doc page, add it to `mkdocs.yml`. The published site at <https://springfall2008.github.io/batpred/> is built automatically from `main` via GitHub Actions.
 
-## Feed-in Tariff (FIT) Support
-
-Predbat supports UK Feed-in Tariff schemes where users earn a generation tariff on all solar production plus a deemed export payment on a percentage of generation (typically 50%).
-
-### How It Works
-
-FIT is off by default. When the `metric_fit_enable` master switch is turned on **and** `metric_fit_generation_rate` is set above 0 (both Expert Mode), FIT mode is activated:
-
-- **Export rate zeroed in optimizer**: Since deemed export pays regardless of actual export, the optimizer treats actual export as having zero additional value. This makes the optimizer prefer self-consumption of solar over exporting it.
-- **Battery headroom for solar**: The optimizer will not charge the battery to 100% from the grid when solar generation is forecast, leaving room for solar to charge the battery during the day.
-- **FIT income tracked**: Generation and deemed export income are subtracted from the cost metric for accurate cost/savings display.
-
-Turning `metric_fit_enable` off zeroes the FIT rates at config-load time (`Fetch.fit_apply_enable()`), so every downstream consumer — the Python prediction engine, the C++ kernel, and the published sensors — sees FIT as inactive without the user having to clear their configured rates. Because this gate lives at the single point where rates are loaded, no kernel change or ABI bump is required for the toggle.
-
-### Config Items
-
-All under Expert Mode in `config.py`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `metric_fit_enable` | False | Master switch (off by default); must be turned on to activate FIT, otherwise all FIT behaviour is disabled and configured rates are ignored |
-| `metric_fit_generation_rate` | 0 p/kWh | FIT generation tariff rate |
-| `metric_fit_deemed_export_rate` | 0 p/kWh | Deemed export tariff rate |
-| `metric_fit_deemed_export_percentage` | 50% | Deemed export percentage |
-
-### HA Sensors (when FIT enabled)
-
-| Sensor | Description |
-|--------|-------------|
-| `predbat.fit_income` | Predicted FIT income (base plan) |
-| `predbat.fit_income_best` | Predicted FIT income (best/optimised plan) |
-| `predbat.fit_income_yesterday` | Predicted FIT income for yesterday's baseline |
-
-All sensors include attributes: `generation_income`, `deemed_export_income`, `generation_rate`, `deemed_export_rate`, `deemed_export_percentage`.
-
-### Key Files
-
-| File | What changed |
-|------|-------------|
-| `config.py` | `metric_fit_enable` master switch plus three FIT rate `CONFIG_ITEMS` entries |
-| `fetch.py` | Loads FIT config values, applies the `metric_fit_enable` gate (`fit_apply_enable()`), logs when FIT is enabled or disabled by the switch |
-| `prediction.py` | Zeros export rate when FIT enabled; tracks FIT income per simulation step |
-| `plan.py` | Extracts FIT income from prediction results; publishes `fit_income` / `fit_income_best` sensors |
-| `output.py` | Extracts FIT income from yesterday predictions; publishes `fit_income_yesterday` sensor |
-| `tests/test_infra.py` | FIT defaults (including `metric_fit_enable`) added to test config and `reset_inverter()` |
-| `tests/test_fit.py` | Covers the FIT calculator plus the `metric_fit_enable` master-switch toggle |
-| `prediction_kernel.cpp` / `prediction_kernel.py` | FIT rates passed into the C++ kernel; per-step clipped-PV tracking, export-rate zeroing and FIT income metric adjustment mirrored in the kernel (fork ABI/parity revision 103) |
-| `tests/test_kernel_parity.py` | FIT deterministic edge cases and FIT rate randomisation in the parity sweep |
-
-### C++ Kernel Note (fork)
-
-This fork's kernel binaries are built with ABI/parity revision **103** (upstream uses small integers like 2). Any change to the FIT logic in `prediction.py`'s hot loop must be mirrored in `prediction_kernel.cpp` and both revision numbers bumped, then all six `prediction_kernel_lib_*.so` binaries rebuilt via `build_kernel_cross.sh` (zig). When merging from upstream, re-apply the FIT kernel support if upstream bumps its ABI, and keep this fork's revision numbers strictly above upstream's.
-
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v8.46.4). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.3.0). Fork changes on top of upstream:
 
-- **FIT support** — see the Feed-in Tariff section above
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
 - **DB history fix** — `db_manager`/HA history returns correct results for entities with no state change inside the query window
 - **Fork release pipeline** — see below
@@ -214,7 +160,7 @@ Installations tracking this fork self-update from these releases via Predbat's b
 
 ### Merging from upstream
 
-When merging `upstream/main`, preserve the FIT feature (Python + C++ kernel), the custom dashboard, and the fork release workflow. If upstream bumps its kernel ABI revision, re-apply FIT kernel support and keep the fork's revision strictly above upstream's, then rebuild all six kernel binaries.
+When merging `upstream/main`, preserve the custom dashboard, the GivTCP export-target handling, the database changes and the fork release workflow. FIT support was removed in v712.35.
 
 <!-- gitnexus:start -->
 ## GitNexus — Code Intelligence

@@ -855,15 +855,7 @@ def kernel_supported(pred, save, step):
     granularity internally, which is strictly finer than the coarse "fast mode" step (e.g. 30)
     the Python engine falls back to for speed - so kernel runs are both faster and more accurate
     than a coarse-step Python run, never an approximation of what was asked for.
-
-    FIT is the exception: the 2026-08-24 upstream merge dropped this fork's FIT fields from
-    PkContext, so the kernel has no notion of the generation tariff, the deemed-export payment
-    or the export-rate zeroing that prediction.py applies when FIT is active. Running it anyway
-    would silently return a plan costed as though FIT were off, so an active FIT configuration
-    falls back to the Python engine - slower, but the answer the user configured for.
     """
-    if getattr(pred, "metric_fit_generation_rate", 0) > 0 or getattr(pred, "metric_fit_deemed_export_rate", 0) > 0:
-        return False
     return not save and not pred.debug_enable and getattr(pred, "kernel_handle", 0) != 0
 
 
