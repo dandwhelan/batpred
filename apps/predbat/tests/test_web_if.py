@@ -89,6 +89,8 @@ def run_test_web_if(my_predbat):
             ("GET", "/dash"),
             ("POST", "/dash"),
             ("GET", "/components"),
+            ("GET", "/discovery"),
+            ("GET", "/apps_value"),
             ("GET", "/component_entities"),
             ("POST", "/component_restart"),
             ("GET", "/component_config"),
@@ -161,6 +163,7 @@ def run_test_web_if(my_predbat):
             ("GET", "/debug_history_list"),
             ("GET", "/debug_history_download"),
             ("GET", "/debug_history_download_all"),
+            ("GET", "/debug_history_download_recent"),
             ("GET", "/images/{filename}"),
             # Upstream's chat routes (v8.54.0), covered instead by test_web_chat.py, which
             # drives them with a real conversation. The page itself is swept above; these
