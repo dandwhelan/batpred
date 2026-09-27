@@ -3385,9 +3385,6 @@ class Output:
             final_carbon_g,
         ) = self.run_prediction(charge_limit_best, charge_window_best, [], [], False, end_record=end_record, save="yesterday")
 
-        # Extract FIT income from the baseline prediction (defaults to 0 when FIT is disabled or the prediction was not saved)
-        fit_generation_income_baseline = getattr(self.prediction, "final_fit_generation_income", 0)
-        fit_deemed_export_income_baseline = getattr(self.prediction, "final_fit_deemed_export_income", 0)
 
         # Add back in battery value
         overall_metric, battery_value_baseline = self.compute_metric(
@@ -3639,25 +3636,6 @@ class Output:
                 "json": plan_json_baseline,
             },
         )
-
-        # Publish FIT income for yesterday's baseline prediction
-        if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
-            fit_total_income_yesterday = fit_generation_income_baseline + fit_deemed_export_income_baseline
-            self.dashboard_item(
-                self.prefix + ".fit_income_yesterday",
-                state=dp2(fit_total_income_yesterday),
-                attributes={
-                    "friendly_name": "Predicted FIT income yesterday",
-                    "state_class": "measurement",
-                    "unit_of_measurement": self.currency_symbols[1],
-                    "icon": "mdi:solar-power",
-                    "generation_income": dp2(fit_generation_income_baseline),
-                    "deemed_export_income": dp2(fit_deemed_export_income_baseline),
-                    "generation_rate": dp2(self.metric_fit_generation_rate),
-                    "deemed_export_rate": dp2(self.metric_fit_deemed_export_rate),
-                    "deemed_export_percentage": dp2(self.metric_fit_deemed_export_percentage),
-                },
-            )
 
         # Simulate no PV or battery
         self.prediction = Prediction(self, yesterday_pv_step_zero, yesterday_pv_step_zero, yesterday_load_step, yesterday_load_step, soc_kw=0, soc_max=0)

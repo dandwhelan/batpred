@@ -6,11 +6,7 @@
 
 ## About this fork
 
-This is a personal fork of [springfall2008/batpred](https://github.com/springfall2008/batpred) with the following additions on top of upstream (currently based on upstream v8.49.0):
-
-### Feed-in Tariff (FIT) support
-
-UK FIT scheme support for solar self-consumption optimisation. FIT is off by default; when the `metric_fit_enable` master switch is turned on and `metric_fit_generation_rate` is set (Expert Mode), the optimiser treats actual export as having no additional value (deemed export pays regardless), prefers self-consumption of solar, and leaves battery headroom for forecast solar rather than grid-charging to 100%. Turning `metric_fit_enable` off disables all FIT behaviour while leaving the configured rates in place. Adds config items `metric_fit_enable`, `metric_fit_generation_rate`, `metric_fit_deemed_export_rate` and `metric_fit_deemed_export_percentage`, plus sensors `predbat.fit_income`, `predbat.fit_income_best` and `predbat.fit_income_yesterday`. FIT logic is also implemented in the C++ prediction kernel (fork ABI revision 103) with parity tests, and all six platform kernel binaries are rebuilt with FIT support.
+This is a personal fork of [springfall2008/batpred](https://github.com/springfall2008/batpred) with the following additions on top of upstream (currently based on upstream v9.3.0):
 
 ### Custom web dashboard
 
@@ -23,7 +19,6 @@ This fork publishes its own GitHub releases (versioned `v712.xx`) via a release 
 ### Fixes
 
 * Database history now returns correct results for entities with no state change inside the query window
-* FIT payment calculator bug fixes
 * cspell dictionary ordering fixed to match the pre-commit hook
 
 ### Fork agent docs

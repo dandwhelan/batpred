@@ -271,7 +271,6 @@ from tests.test_rate_replicate_missing_slots import test_rate_replicate
 from tests.test_find_charge_window import test_find_charge_window
 from tests.test_random_scenarios import generate_scenarios, save_scenarios, run_scenarios_from_file, compare_results, profile_scenario, run_random_scenario_tests
 from tests.test_carbon import test_carbon
-from tests.test_fit import run_fit_tests
 from tests.test_storage import test_storage
 from tests.test_plan_persistence import test_plan_persistence
 from tests.test_github import test_github
@@ -735,7 +734,6 @@ def main():
         ("history_chunking", run_history_chunking_tests, "History chunking tests", False),
         # Carbon Intensity API unit tests
         ("carbon", test_carbon, "Carbon Intensity API comprehensive tests (fetch, cache, publish, config)", False),
-        ("fit", run_fit_tests, "FIT (Feed-in Tariff) calculator tests (clipping, deemed-only, generation-only, export coexistence)", False),
         # Storage component unit tests
         ("storage", test_storage, "Storage component tests (yaml/json/text round-trip, expiry, cleanup)", False),
         ("plan_persistence", test_plan_persistence, "Plan persistence tests (save/load round-trip, expiry, missing storage)", False),

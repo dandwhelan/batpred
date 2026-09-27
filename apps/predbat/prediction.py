@@ -214,9 +214,6 @@ class Prediction(PredictionBatch):
             self.prediction_cache = {}
             self.plan_interval_minutes = base.plan_interval_minutes
             self.charge_scaling10 = base.charge_scaling10
-            self.metric_fit_generation_rate = base.metric_fit_generation_rate
-            self.metric_fit_deemed_export_rate = base.metric_fit_deemed_export_rate
-            self.metric_fit_deemed_export_percentage = base.metric_fit_deemed_export_percentage
 
             # C++ prediction kernel context (0 = kernel unavailable, Python engine is used)
             self.prediction_kernel_enable = getattr(base, "prediction_kernel_enable", False)
@@ -610,10 +607,6 @@ class Prediction(PredictionBatch):
         final_battery_cycle = battery_cycle
         final_metric_keep = metric_keep
         final_carbon_g = carbon_g
-        fit_generation_income = 0
-        fit_deemed_export_income = 0
-        final_fit_generation_income = 0
-        final_fit_deemed_export_income = 0
         metric = self.cost_today_sofar
         final_soc = soc
         first_charge_soc = soc
@@ -744,11 +737,6 @@ class Prediction(PredictionBatch):
                 import_rate = self.rate_max  # Assume in worst case that slot goes away and max rate applies
             export_rate = rate_export.get(minute_absolute, 0)
 
-            # FIT deemed export: when deemed-export is active, actual exports earn nothing extra since payment is on a fixed % of generation.
-            # Generation tariff alone (with metered or no export) leaves the configured export rate signal intact.
-            if self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0:
-                export_rate = 0
-
             # Alert?
             alert_keep = all_active_keep.get(minute_absolute, 0)
             alert_keep_max = all_active_keep_max.get(minute_absolute, -1)
@@ -847,9 +835,6 @@ class Prediction(PredictionBatch):
             # Get load and pv forecast, total up for all values in the step
             pv_now = pv_forecast_minute_step_flat[minute]
             load_yesterday = load_minutes_step_flat[minute]
-
-            # Snapshot the running clipped total so the FIT calculation below can charge generation tariff only on PV the inverter actually delivers this step
-            clipped_before_step = clipped_today
 
             # Count PV kWh
             pv_kwh += pv_now
@@ -1310,17 +1295,6 @@ class Prediction(PredictionBatch):
                 pv_ac = max(pv_ac - over_limit, 0)
                 clipped_today += pv_ac_before - pv_ac
 
-            # FIT income: pay generation tariff on PV the inverter actually delivered (forecast minus what was clipped this step)
-            # plus deemed-export tariff on the configured percentage of that delivered PV. Subtracting from metric makes the optimiser
-            # treat clipped PV as lost FIT income, which encourages plans that absorb mid-day excess into the battery.
-            if self.metric_fit_generation_rate > 0 or (self.metric_fit_deemed_export_rate > 0 and self.metric_fit_deemed_export_percentage > 0):
-                pv_delivered = max(pv_now - (clipped_today - clipped_before_step), 0)
-                fit_gen = pv_delivered * self.metric_fit_generation_rate
-                fit_deemed = pv_delivered * (self.metric_fit_deemed_export_percentage / 100.0) * self.metric_fit_deemed_export_rate
-                fit_generation_income += fit_gen
-                fit_deemed_export_income += fit_deemed
-                metric -= fit_gen + fit_deemed
-
             # Adjust battery soc
             if battery_draw > 0:
                 soc = max(soc - battery_draw / battery_loss_discharge, reserve_expected)
@@ -1435,8 +1409,6 @@ class Prediction(PredictionBatch):
                 final_carbon_g = carbon_g
                 final_load_kwh = load_kwh
                 final_pv_kwh = pv_kwh
-                final_fit_generation_income = fit_generation_income
-                final_fit_deemed_export_income = fit_deemed_export_income
 
                 # Store export data
                 if diff < 0:
@@ -1488,8 +1460,6 @@ class Prediction(PredictionBatch):
             self.final_pv_kwh = round(final_pv_kwh, 4)
             self.final_iboost_kwh = round(final_iboost_kwh, 4)
             self.final_battery_cycle = round(final_battery_cycle, 4)
-            self.final_fit_generation_income = round(final_fit_generation_income, 4)
-            self.final_fit_deemed_export_income = round(final_fit_deemed_export_income, 4)
             self.final_soc_min = round(soc_min, 4)
             self.final_soc_min_minute = soc_min_minute
             self.export_to_first_charge = export_to_first_charge
