@@ -168,6 +168,7 @@ def _test_secrets_loading():
             os.remove("predbat.log")
     print("    PASS - Malformed secrets.yaml degrades to {} instead of crashing startup")
 
+
 def test_mask_secret_yaml_text():
     """The apps.yaml file download is redacted without being rewritten.
 

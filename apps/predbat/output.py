@@ -3385,7 +3385,6 @@ class Output:
             final_carbon_g,
         ) = self.run_prediction(charge_limit_best, charge_window_best, [], [], False, end_record=end_record, save="yesterday")
 
-
         # Add back in battery value
         overall_metric, battery_value_baseline = self.compute_metric(
             end_record, final_soc, final_soc, metric_baseline, metric_baseline, final_iboost, final_iboost, battery_cycle, metric_keep, final_carbon_g, import_kwh_battery, import_kwh_house, export_kwh
