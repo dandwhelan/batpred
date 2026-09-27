@@ -1,6 +1,7 @@
 # Custom Dictionary Words
 3hy
 aaaabbbbccccdddd
+acks
 activepower
 adata
 adbase
@@ -138,6 +139,7 @@ dayname
 daynumber
 daysymbol
 deadband
+deadbanding
 deadbeefdeadbeef
 dedup
 dedupe
@@ -172,6 +174,7 @@ eauth
 echargingpile
 Eddi
 eddis
+efgh
 elif
 elinter
 eload
@@ -237,6 +240,7 @@ foxess
 foxesscloud
 freelist
 freephase
+fromisoformat
 fronius
 funcs
 futurerate
@@ -268,6 +272,7 @@ gridconsumptionpower
 gridlines
 Groq
 growatt
+growattsph
 GWMQTT
 HACS
 hadashboard
@@ -434,6 +439,7 @@ nextafter
 njpwerner
 nobat
 nocharge
+NODETAIL
 nodischarge
 nohup
 noopener
@@ -510,12 +516,17 @@ preseed
 preseeded
 prevs
 protobuf
+pseudonymisation
+pseudonymise
+pseudonymised
+pseudonymises
 psum
 pthread
 pvbat
 pvenergytotal
 pvlib
 pvlimit
+PVONLY
 pvpower
 pvwatts
 pwindow
@@ -692,6 +703,7 @@ tzfile
 tzpath
 ULP
 unasserted
+uncalibrated
 uncompilable
 unconfigured
 underivable
@@ -709,6 +721,7 @@ unpushed
 unreachability
 unredacted
 unregisters
+unrepresentable
 unreproduced
 unsmoothed
 unstaged
@@ -725,9 +738,11 @@ venv
 Victron
 visibilitychange
 vlabel
+vvwwxxabcdefyyzzuu
 waf
 waitpid
 Wallbox
+weakref
 weblink
 welink
 Werror
@@ -735,8 +750,10 @@ WEXITSTATUS
 WIFEXITED
 WNOHANG
 workmode
+worktree
 writeonly
 wrongsha
+wwxxabcdefyyzz
 xaxis
 xaxistooltip
 xlabel
@@ -744,6 +761,7 @@ xlim
 xload
 xrtkq
 xticks
+xxabcdefyy
 yaxis
 yaxistooltip
 yday

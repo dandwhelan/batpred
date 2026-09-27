@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from predbat_metrics import record_api_call
 from const import TIME_FORMAT, TIME_FORMAT_OCTOPUS
-from utils import str2time, minutes_to_time, dp1, dp2, dp4, minute_data, is_edge_block_body, token_mint_backoff_seconds, TOKEN_MINT_BACKOFF_LOG_INTERVAL_SECONDS
+from utils import str2time, minutes_to_time, dp1, dp2, dp4, minute_data, filter_payment_method, is_edge_block_body, token_mint_backoff_seconds, TOKEN_MINT_BACKOFF_LOG_INTERVAL_SECONDS
 from component_base import ComponentBase
 from mock_base import MockBase as SharedMockBase
 import aiohttp
@@ -62,6 +62,16 @@ OCTOPUS_SLOT_MAX_CAPPED = 12  # 6 hours with 30-minute slots
 # Per-device settings read from the Octopus intelligent settings query. Kept as a list so a poll
 # whose settings query fails can carry the previous values forward rather than dropping the device.
 INTELLIGENT_DEVICE_SETTING_KEYS = ["suspended", "weekday_target_time", "weekday_target_soc", "weekend_target_time", "weekend_target_soc", "minimum_soc", "maximum_soc"]
+
+# Discovery catalogue entity key -> (domain, get_entity_name() suffix, access) for a car record.
+# Mirrors automatic_config()'s own octopus_intelligent_slot/octopus_ready_time/octopus_charge_limit
+# wiring exactly (see build_discovery()), so a future change to that wiring is picked up here too
+# rather than the catalogue drifting out of step with what apps.yaml actually points at.
+OCTOPUS_CAR_ENTITY_SPEC = {
+    "octopus_intelligent_slot": ("binary_sensor", "intelligent_dispatch", "r"),
+    "octopus_ready_time": ("select", "intelligent_target_time", "rw"),
+    "octopus_charge_limit": ("number", "intelligent_target_soc", "rw"),
+}
 
 BASE_TIME = datetime.strptime("00:00", "%H:%M")
 OPTIONS_TIME = [((BASE_TIME + timedelta(seconds=minute * 60)).strftime("%H:%M")) for minute in range(4 * 60, 11 * 60, 30)]
@@ -553,6 +563,8 @@ class OctopusAPI(ComponentBase):
         self.token_mint_blocked_until = None
         self.token_mint_block_count = 0
         self.token_mint_backoff_logged_at = None
+        # Set by async_read_response() when a GraphQL response is a rate limit, so the retry loop does not re-read it
+        self.last_read_rate_limited = False
         self.account_data = {}
         self.tariffs = {}
         self.saving_sessions = {}
@@ -719,6 +731,7 @@ class OctopusAPI(ComponentBase):
             active_devices = self.get_active_intelligent_device_ids()
             if first:
                 self.automatic_config(self.tariffs)
+                self.refresh_discovery()
             elif sensor_due and active_devices != self.intelligent_config_devices:
                 # The set of live, non-suspended Intelligent devices has moved - a second EV
                 # registered on the account, one deregistered, or the customer suspended one in
@@ -726,6 +739,27 @@ class OctopusAPI(ComponentBase):
                 # dispatch sensor and Predbat never sees the live IOG window (issue #4648).
                 self.log("OctopusAPI: Live intelligent devices changed from {} to {}, reconfiguring car slots".format(self.intelligent_config_devices, active_devices))
                 self.automatic_config(self.tariffs)
+                self.refresh_discovery()
+
+        # Unconditional and outside the "if self.automatic:" block above (unlike the two calls
+        # inside it, which exist only to refresh the report in the SAME cycle a wiring change
+        # happens): those three call sites beside automatic_config() cover a stable installation's
+        # ongoing life, but every one of them is reachable only from a narrow, one-off condition
+        # ("first", an intelligent-device-set change, a tariff-structure change) or is itself
+        # gated on self.automatic. For a stable installation - one EV, an unchanging tariff - none
+        # of those conditions is ever true again after startup, so a build_discovery() failure on
+        # that very first call would otherwise never be retried for the life of the process, and
+        # an installation running octopus_automatic: false would never be reported on at all - even
+        # though self.tariffs, self.mpan, the intelligent-device data and the entities this reports
+        # against are all populated regardless of that flag (self.automatic gates only
+        # automatic_config()'s own apps.yaml wiring, referenced nowhere else in this file). Placed
+        # here, at the end of every cycle, sensor_due has always already been true at least once
+        # this cycle by the time this runs (guaranteed on the first cycle, since sensor_due = first
+        # or ...), so entity publication has already happened before this executes. The extra call
+        # is a cheap no-op once the rebuilt report matches the last one filed; an empty or partial
+        # snapshot taken too early self-corrects once real tariff/device data lands, because that
+        # changes the report - see ComponentBase.refresh_discovery().
+        self.refresh_discovery()
 
         return True
 
@@ -906,14 +940,21 @@ class OctopusAPI(ComponentBase):
                         isExport = True
                         deviceID_export = None
                         self.log("OctopusAPI: No export meter found but tariff code indicates export, treating as export tariff with device ID None")
+                # Each agreement carries its own supply point: an export agreement is a SEPARATE
+                # meterPoint with a different MPAN from the import one, and self.mpan only ever
+                # holds the import MPAN (set above, first active import meter wins). Recorded per
+                # direction so build_discovery() can give each meter record its own identity rather
+                # than publishing the import MPAN as the export meter's - which also gave the two
+                # records the same device_id. None for gas: a gas meterPoint is keyed by MPRN.
+                agreement_mpan = meterpoint.get("mpan")
                 if isImport:
                     self.log("OctopusAPI: Adding import tariff with code {} product {} device ID {}".format(tariffCode, productCode, deviceID_import))
-                    tariffs["import"] = {"tariffCode": tariffCode, "productCode": productCode, "deviceID": deviceID_import}
+                    tariffs["import"] = {"tariffCode": tariffCode, "productCode": productCode, "deviceID": deviceID_import, "mpan": agreement_mpan}
                     tariffs["import"]["data"] = self.tariffs.get("import", {}).get("data", None)
                     tariffs["import"]["standing"] = self.tariffs.get("import", {}).get("standing", None)
                 if isExport:
                     self.log("OctopusAPI: Adding export tariff with code {} product {} device ID {}".format(tariffCode, productCode, deviceID_export))
-                    tariffs["export"] = {"tariffCode": tariffCode, "productCode": productCode, "deviceID": deviceID_export}
+                    tariffs["export"] = {"tariffCode": tariffCode, "productCode": productCode, "deviceID": deviceID_export, "mpan": agreement_mpan}
                     tariffs["export"]["data"] = self.tariffs.get("export", {}).get("data", None)
                     tariffs["export"]["standing"] = self.tariffs.get("export", {}).get("standing", None)
                 if isGas:
@@ -928,6 +969,7 @@ class OctopusAPI(ComponentBase):
         if old_tariff_keys and new_tariff_keys != old_tariff_keys and self.automatic:
             self.log("OctopusAPI: Tariff structure changed from {} to {}, reconfiguring".format(old_tariff_keys, new_tariff_keys))
             self.automatic_config(self.tariffs)
+            self.refresh_discovery()
 
         return self.tariffs
 
@@ -1432,6 +1474,137 @@ class OctopusAPI(ComponentBase):
         # Record the device set this wiring was built for so run() can spot it changing later
         self.intelligent_config_devices = self.get_active_intelligent_device_ids()
 
+    def _current_standing_charge_p(self, direction):
+        """
+        Today's standing charge for one tariff direction, in pence, or None if not yet fetched.
+
+        Reuses _get_rate_for_time against the raw standing-charges list fetch_tariffs() already
+        downloaded (self.tariffs[direction]["standing"]), rather than re-deriving it through
+        get_octopus_rates_direct()'s minute_data() conversion - that helper always returns a
+        number, falling back to an all-zero dict before any data has ever been fetched, and
+        reporting a fabricated 0 as a real standing charge would be worse than reporting nothing.
+        """
+        standing = self.tariffs.get(direction, {}).get("standing")
+        if not standing:
+            return None
+        return self._get_rate_for_time(standing, self.now_utc_exact)
+
+    def build_discovery(self):
+        """
+        Describe the discovered Octopus meters, tariffs and intelligent-device cars for the discovery catalogue.
+
+        One `meters` record per direction present in self.tariffs ("import", "export", "gas") -
+        never a fixed list, since not every account has an export or gas agreement. Each direction
+        uses ITS OWN agreement's mpan, recorded per direction by async_find_tariffs(): export is a
+        separate supply point with a different MPAN, so taking self.mpan (the import one) for both
+        published the import MPAN as the export meter's identity and gave the two records the same
+        device_id. self.mpan is still the fallback for import alone, the one direction it is known
+        to describe. mpan is only known for electricity (import/export); this component tracks no
+        separate MPRN for gas, so a gas record's account_ids carries only the account id rather
+        than mislabelling it with the electricity MPAN. Both mpan and account genuinely identify the customer, so they go in
+        account_ids, the pseudonym container the redactor tokenises - see the module's docstring
+        and docs/superpowers/specs/2026-09-10-discovery-catalogue-design.md. The tariff and product
+        codes describe a publicly listed Octopus product rather than the customer, so they go in
+        the clear, in the nested `tariff` sub-record's info container, alongside flags built from
+        this component's own existing classifiers (is_intelligent_go_tariff, has_six_hour_cap) plus
+        "agile" when the product code names an Agile product - so a future change to those
+        classifiers is picked up here too, rather than a second copy of the same logic drifting out
+        of step with the one automatic_config() and the rest of this component already use.
+        standing_charge_p is today's standing charge in pence, reported only once it has actually
+        been fetched.
+
+        One `cars` record per ACTIVE (non-suspended) intelligent device: get_active_intelligent_device_ids()
+        is the exact filter automatic_config() itself applies when wiring the car slots into
+        apps.yaml, so the catalogue never lists a slot that is no longer being wired. Its three
+        entities (octopus_intelligent_slot, octopus_ready_time, octopus_charge_limit - see
+        OCTOPUS_CAR_ENTITY_SPEC) are included only when they actually exist in the state store:
+        async_intelligent_update_sensor() publishes them per device, never as a fixed set, so the
+        catalogue must not claim one exists that Home Assistant has never seen. Vehicle battery
+        size and charge-point power are reported in ratings where Octopus's own vehicle/charger
+        catalogue lookup found them. The Intelligent device id itself is carried in account_ids
+        (not left as a bare structural device_id) since it is a UUID unique to this account's
+        vehicle enrolment, not a public identifier - without a pseudonym container present, this
+        record's device_id would have nothing to mark it as identity-derived and would publish the
+        raw UUID verbatim (see coordinator.py's _has_pseudonym_container).
+
+        Reporting is independent of self.automatic: it records what Octopus's own account
+        describes, not whether this component wired Predbat's apps.yaml to it - that distinction is
+        what the report's own "automatic" flag is for, not a gate on reporting here. run() calls
+        refresh_discovery() (which calls this) unconditionally once per cycle, in addition to
+        beside each of automatic_config()'s own three call sites, so this genuinely is reached
+        regardless of self.automatic - see run()'s own comment for why the automatic-gated call
+        sites alone are not enough.
+        """
+        meters = []
+        for direction, tariff in self.tariffs.items():
+            tariff_code = tariff.get("tariffCode")
+            product_code = tariff.get("productCode")
+            mpan = tariff.get("mpan") if direction in ("import", "export") else None
+            if not mpan and direction == "import":
+                mpan = self.mpan
+            record = {"device_id": "octopus:{}".format(mpan or direction), "direction": direction}
+
+            account_ids = {}
+            if mpan:
+                account_ids["mpan"] = mpan
+            if self.account_id:
+                account_ids["account"] = self.account_id
+            if account_ids:
+                record["account_ids"] = account_ids
+
+            info = {}
+            if tariff_code:
+                info["tariff_code"] = tariff_code
+            if product_code:
+                info["product_code"] = product_code
+            flags = []
+            if self.is_intelligent_go_tariff(tariff_code):
+                flags.append("intelligent_go")
+            if self.has_six_hour_cap(tariff_code):
+                flags.append("six_hour_cap")
+            if product_code and "AGILE" in product_code:
+                flags.append("agile")
+            tariff_record = {}
+            if info:
+                tariff_record["info"] = info
+            if flags:
+                tariff_record["flags"] = flags
+            if tariff_record:
+                record["tariff"] = tariff_record
+
+            standing_charge_p = self._current_standing_charge_p(direction)
+            if standing_charge_p is not None:
+                record["ratings"] = {"standing_charge_p": standing_charge_p}
+
+            meters.append(record)
+
+        cars = []
+        for device_id in self.get_active_intelligent_device_ids():
+            device = self.intelligent_devices.get(device_id, {})
+            index_suffix = self.device_id_to_index_suffix(device_id)
+            # account_ids carries the Intelligent device id itself: it is a UUID assigned by
+            # Octopus to this specific account's vehicle enrolment, not a public identifier like a
+            # tariff or product code, so it belongs in the pseudonymised container on the same
+            # reasoning the meter records above apply to mpan/account - see _has_pseudonym_container.
+            # Without it the record's device_id ("octopus:{uuid}") has no pseudonym container
+            # anywhere in it and is never noted at all, publishing the raw UUID verbatim.
+            record = {"device_id": "octopus:{}".format(device_id), "account_ids": {"intelligent_device_id": device_id}}
+
+            ratings = {}
+            battery_size = device.get("vehicle_battery_size_in_kwh")
+            if battery_size is not None:
+                ratings["vehicle_battery_kwh"] = battery_size
+            charge_point_power = device.get("charge_point_power_in_kw")
+            if charge_point_power is not None:
+                ratings["charge_point_power_kw"] = charge_point_power
+            record["ratings"] = ratings
+
+            record["entities"] = self.discovery_entities({name: {"entity_id": self.get_entity_name(domain, suffix, index=index_suffix), "domain": domain, "access": access} for name, (domain, suffix, access) in OCTOPUS_CAR_ENTITY_SPEC.items()})
+
+            cars.append(record)
+
+        return {"automatic": self.automatic, "meters": meters, "cars": cars}
+
     async def async_get_saving_sessions(self, account_id):
         """
         Get the saving sessions
@@ -1680,8 +1853,11 @@ class OctopusAPI(ComponentBase):
         self.log("Info: OctopusAPI: tariff has day and night rates, fetching both")
         url_day = url.replace("standard-unit-rates", "day-unit-rates")
         url_night = url.replace("standard-unit-rates", "night-unit-rates")
-        result_day = await self.fetch_url_cached(url_day)
-        result_night = await self.fetch_url_cached(url_night)
+        # A Flexible dual-register tariff returns both payment method variants of each window here
+        # too, and the schedule built below carries no payment_method of its own, so the filter
+        # applied at get_octopus_rates_direct would never see these rows - resolve them up front.
+        result_day = filter_payment_method(await self.fetch_url_cached(url_day))
+        result_night = filter_payment_method(await self.fetch_url_cached(url_night))
         self.log("Info: OctopusAPI: Day rate entries: {} night rate entries: {}".format(len(result_day) if result_day else 0, len(result_night) if result_night else 0))
         if result_day and result_night:
             # A hand-configured schedule wins outright: it exists precisely for a meter whose real
@@ -1934,6 +2110,7 @@ class OctopusAPI(ComponentBase):
                     if valid_to is None:
                         rate["valid_to"] = (self.midnight_utc + timedelta(days=7)).strftime(TIME_FORMAT_OCTOPUS)
 
+            tariff_data = filter_payment_method(tariff_data)
             pdata, ignore_io = minute_data(tariff_data, 3, self.midnight_utc, "value_inc_vat", "valid_from", backwards=False, to_key="valid_to")
             return pdata
         else:
@@ -1952,14 +2129,16 @@ class OctopusAPI(ComponentBase):
                 self.log("OctopusAPI: Aborting retry loop due to shutdown")
                 return None
 
+            self.last_read_rate_limited = False
             data_as_json = await self.async_read_response(response, url, ignore_errors=ignore_errors)
             if data_as_json is not None:
                 return data_as_json
             else:
-                # 401/403 are definitive for this response. aiohttp caches the body, so
-                # re-reading the same response cannot change the outcome - it would only
-                # duplicate log lines and sleep through the backoff for nothing.
-                if response.status in [401, 403]:
+                # 401/403 and a rate limit (KT-CT-1199) are definitive for this response. aiohttp
+                # caches the body, so re-reading the same response cannot change the outcome - it
+                # would only duplicate log lines and sleep through the backoff for nothing (a
+                # rate-limited request logged five warnings and stalled ~35s before giving up).
+                if response.status in [401, 403] or self.last_read_rate_limited:
                     self.failures_total += 1
                     return None
                 if attempt < max_retries - 1:
@@ -1999,7 +2178,8 @@ class OctopusAPI(ComponentBase):
             self.log(f"Warn: OctopusAPI: Failed to extract response json: {e} - {url} - {text}")
             return None
 
-        # Check for rate limit errors - these should return None immediately (no retry)
+        # Check for rate limit errors - these return None immediately, and async_read_response_retry()
+        # does not re-read them (last_read_rate_limited): re-reading the same response cannot help
         if ("graphql" in url) and data_as_json and ("errors" in data_as_json):
             for error in data_as_json.get("errors", []):
                 error_code = error.get("extensions", {}).get("errorCode")
@@ -2007,9 +2187,7 @@ class OctopusAPI(ComponentBase):
                     msg = f'Warn: OctopusAPI: Rate limit error in request ({url}): {data_as_json["errors"]}'
                     self.log(msg)
                     record_api_call("octopus", False, "rate_limit")
-                    # Don't sleep if shutting down
-                    if not self.api_stop:
-                        await asyncio.sleep(5)  # Sleep briefly to avoid hammering
+                    self.last_read_rate_limited = True
                     return None
 
         # Return the response as-is - let caller handle other errors (including auth errors that need retry)
@@ -2845,26 +3023,9 @@ class Octopus:
             url = data.get("next", None)
             pages += 1
 
+        mdata = filter_payment_method(mdata)
         pdata, _ = minute_data(mdata, 3, self.midnight_utc, "value_inc_vat", "valid_from", backwards=False, to_key="valid_to")
         return pdata
-
-    def add_now_to_octopus_slot(self, car_n, octopus_slots, now_utc):
-        """
-        For intelligent charging, add in if the car is charging now as a low rate slot (workaround for Ohme)
-        """
-        if car_n < len(self.car_charging_now) and self.car_charging_now[car_n]:
-            minutes_start_slot = int(self.minutes_now / 30) * 30
-            minutes_end_slot = minutes_start_slot + 30
-            slot_start_date = self.midnight_utc + timedelta(minutes=minutes_start_slot)
-            slot_end_date = self.midnight_utc + timedelta(minutes=minutes_end_slot)
-            slot = {}
-            slot["start"] = slot_start_date.strftime(TIME_FORMAT)
-            slot["end"] = slot_end_date.strftime(TIME_FORMAT)
-            slot["source"] = "car_charging_now"
-            slot["kwh"] = self.car_charging_rate[car_n] * 30 / 60  # Scale to 30 minute slot
-            octopus_slots.append(slot)
-            self.log("Octopus: Car is charging now - added new IO slot {}".format(slot))
-        return octopus_slots
 
     def octopus_slots_signature(self, octopus_slots):
         """
@@ -3515,6 +3676,10 @@ class Octopus:
         slots_added_set = set()
         plan_interval_minutes = self.plan_interval_minutes
         saved_slots = set()  # For logging purposes, track which slots we actually applied as low rate
+        # Dynamic load has seen this car in its slot but not charging: none of its dispatches from now
+        # on get the cheap rate (see dynamic_load_car_check()). Elapsed minutes keep theirs - they record
+        # what the tariff charged, and today's cost is built from them.
+        car_cancelled = self.dynamic_load_car_effective.get(car_n, False)
 
         if octopus_slots:
             # Add in IO slots
@@ -3551,6 +3716,9 @@ class Octopus:
                             # the previous cycle's data here. (On main these were the same object, so this
                             # is behaviour-preserving there and simply avoids the staleness this PR adds.)
                             assumed_price = rates.get(start_minutes, self.rate_min)
+
+                        if car_cancelled and minute >= self.minutes_now:
+                            continue  # Car is not charging, its dispatch is not trusted as cheap
 
                         if minute in saved_slots:
                             continue  # Already applied a low rate slot to this minute, skip
@@ -3600,6 +3768,60 @@ class Octopus:
             if slots_per_day[day_offset] > 0:
                 self.log("Octopus: Intelligent slots for day {}: {} of {} max".format(day_offset, slots_per_day[day_offset], octopus_slot_max))
 
+        return rates
+
+    def dynamic_load_car_strip_feed_rates(self, rates):
+        """
+        Remove an Octopus Intelligent discount the rate feed itself delivered for a dispatch of a car that
+        dynamic load has cancelled (see dynamic_load_car_check()).
+
+        The feed marks dispatch minutes as is_intelligent_adjusted (self.io_adjusted) and has already
+        lowered their price, so unlike rate_add_io_slots()'s own overlay there is nothing to withhold -
+        the price has to be overwritten. Called before the rates are replicated and snapshotted, so
+        nothing downstream sees the discount.
+
+        A minute is set back to rate_max_base, and loses its io_adjusted marker, only when it is from now
+        onwards, outside the fixed 23:30-05:30 window (cheap by tariff, not by dispatch), covered by a
+        cancelled car's dispatch and not covered by a dispatch of any car still trusted - the rates are
+        shared by every car.
+        """
+        cancelled_cars = [car_n for car_n in range(self.num_cars) if self.dynamic_load_car_effective.get(car_n, False)]
+        if not cancelled_cars or not self.io_adjusted:
+            self.dynamic_load_car_stripped = 0
+            return rates
+
+        # Rounded out to whole 30 minute rate periods: the feed marks and prices whole periods, and
+        # rate_add_io_slots() likewise treats any overlap with a period as the whole period
+        cancelled_minutes = set()
+        trusted_minutes = set()
+        for car_n in range(min(self.num_cars, len(self.octopus_slots))):
+            covered = cancelled_minutes if car_n in cancelled_cars else trusted_minutes
+            for slot in self.octopus_slots[car_n]:
+                start_minutes, end_minutes, _, _, _ = self.decode_octopus_slot(car_n, slot, raw=True, boundaries_only=True)
+                if start_minutes == end_minutes:
+                    continue
+                start_minutes = (start_minutes // 30) * 30
+                end_minutes = ((end_minutes + 29) // 30) * 30
+                covered.update(range(max(start_minutes, self.minutes_now), end_minutes))
+
+        window = OCTOPUS_NIGHT_RATE_WINDOWS["iog"]
+        window_start = window["start"][0] * 60 + window["start"][1]
+        window_end = window["end"][0] * 60 + window["end"][1]
+        stripped = 0
+        for minute in sorted(cancelled_minutes - trusted_minutes):
+            if not self.io_adjusted.get(minute, False):
+                continue
+            minute_of_day = minute % (24 * 60)
+            if minute_of_day >= window_start or minute_of_day < window_end:
+                continue
+            rates[minute] = self.rate_max_base
+            del self.io_adjusted[minute]
+            stripped += 1
+        # The feed is re-read every cycle, so the same minutes are stripped again each time - log only
+        # when that changes, not every 5 minutes for the length of a cancellation
+        if stripped and stripped != self.dynamic_load_car_stripped:
+            self.log("Octopus Intelligent: removed the dispatch rate from {} minutes of cars {} which are not charging".format(stripped, cancelled_cars))
+        self.dynamic_load_car_stripped = stripped
         return rates
 
     def fetch_octopus_rates(self, entity_id, adjust_key=None):
@@ -3758,6 +3980,7 @@ class Octopus:
             saving_rate = 200  # Default rate if not reported
             octopoints_per_penny = self.get_arg("octopus_saving_session_octopoints_per_penny", 8)  # Default 8 octopoints per penny
             octopoints_min_threshold = self.get_arg("octopus_saving_session_min_octopoints_per_kwh", 0)
+            join_lead_hours = self.get_arg("octopus_saving_auto_join_lead_hours", 0)
 
             joined_events = []
             available_events = []
@@ -3823,6 +4046,10 @@ class Octopus:
                         # Do not auto-join a saving session that overlaps an Axle VPP session - we cannot honour both for the same period
                         if self._saving_event_conflicts_axle(start_time, end_time, axle_sessions):
                             self.log("Octopus: Skipping saving event code {} {}-{} - conflicts with an Axle VPP session".format(code, start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M")))
+                            continue
+                        # If a lead hours is set, skip joining session until we are within that many hours of the start time
+                        if join_lead_hours and (start_time - timedelta(hours=join_lead_hours)) > self.now_utc:
+                            self.log("Octopus: Delaying join of saving event code {} {}-{} - not within configured lead hours ({}) of start of event".format(code, start_time.strftime("%a %d/%m %H:%M"), end_time.strftime("%H:%M"), join_lead_hours))
                             continue
                         if code:  # Request to join the new Octopus saving event
                             # The join is asynchronous and can be refused (e.g. region-targeted events), so
