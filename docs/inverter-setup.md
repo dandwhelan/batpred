@@ -2704,10 +2704,13 @@ To run PredBat with Solis hybrid inverters with firmware level FB00 or later (yo
 
 4. Save the file as `apps.yaml` to the appropriate [Predbat software directory](apps-yaml.md#appsyaml-settings).
 
-5. Predbat keeps the inverter's Energy Storage Control Switch (**energy_control_switch** in `apps.yaml`) on `Self-Use`.
+5. Predbat keeps the inverter's Energy Storage Control Switch (**energy_control_switch** in `apps.yaml`) on `Backup/Reserve`: Self-Use with the inverter's Battery Reserve switched on and grid charging allowed.
    This firmware has no separate `Timed Charge/Discharge` control mode - timed charging and exporting are turned on and off for each slot instead, and Predbat does this using the slot 1 enable switches (**scheduled_charge_enable** and **scheduled_discharge_enable** in `apps.yaml`).
-   The switch still decides whether a charge slot may charge from the grid: in any of the `No Grid Charging` modes the battery just holds through a charge slot, so Predbat puts it back to `Self-Use` if it finds it there (for example after a period controlled by SolisCloud).
-   If **energy_control_switch** is missing from your `apps.yaml`, Predbat warns during charge slots and you will need to keep the switch on `Self-Use` yourself.
+   The Battery Reserve makes the Reserved SOC (**reserve** in `apps.yaml`, `number.solis_inverter_backup_mode_soc`) a real discharge floor, so Predbat can hold the battery on it - for **freeze charging**, while a car or iBoost charges, and when it holds a charge at its target. Turn on **switch.predbat_set_reserve_enable** for these holds.
+   Grid charging matters too: in any of the `No Grid Charging` modes a charge slot cannot charge from the grid, so Predbat puts the switch back to `Backup/Reserve` if it finds it there (for example after a period controlled by SolisCloud).
+   During a freeze or hold Predbat switches to `Backup/Reserve - No Grid Charging`, so the inverter does not import from the grid to reach the raised reserve, and back to `Backup/Reserve` afterwards.
+   For **freeze exporting** it switches to `Feed-in priority - No Grid Charging`, so solar goes to the house and then the grid rather than into the battery, while the battery still covers the house load down to the inverter's own minimum SoC.
+   If **energy_control_switch** is missing from your `apps.yaml`, Predbat warns during charge slots and you will need to keep the switch on `Backup/Reserve` yourself.
    If you use the pre-FB00 setup (`inverter_type: "GS"`) on this firmware, charging can appear to work but exports will not, and Predbat will repeatedly report control interference on the Energy Storage Control Switch.
 
 6. Note: Predbat will read the minimum SoC level set on the inverter via **number.solis_inverter_battery_minimum_soc** configured in `apps.yaml`.
@@ -2729,12 +2732,14 @@ Nobody on the Predbat project has a Sunsynk account, so this integration's wire 
 You need a Sunsynk Connect account e-mail and password - the same login used by the Sunsynk phone app. Add them to `apps.yaml`:
 
 ```yaml
-  sunsynk_username: 'you@example.com'
-  sunsynk_password: 'your-password'
+  sunsynk_username: !secret sunsynk_username
+  sunsynk_password: !secret sunsynk_password
   sunsynk_region: 'sunsynk'
   sunsynk_automatic: true
   sunsynk_control_enable: true
 ```
+
+Keep your Sunsynk login in `secrets.yaml` rather than in `apps.yaml` - see [Storing secrets](apps-yaml.md#storing-secrets).
 
 Set `sunsynk_region` to `'inteless'` instead of `'sunsynk'` if your account logs in via the `pv.inteless.com` host rather than `api.sunsynk.net` - check with your installer, or try the [diagnostics CLI](#verifying-with-the-sunsynk-diagnostics-cli) below with each region if you are not sure.
 
@@ -2967,11 +2972,13 @@ template:
 The component needs only your token in `apps.yaml` and no Home Assistant Tesla integration (`site_id` is optional - omit it to use the first site on your account):
 
 ```yaml
-  teslemetry_key: 'your-teslemetry-token'
+  teslemetry_key: !secret teslemetry_key
   teslemetry_site_id: 'your-energy-site-id'  # optional: omit to use the first site on your account
   teslemetry_automatic: True
   #teslemetry_tbc_control: False  # optional: on by default, uncomment to opt out - see below
 ```
+
+Keep the token in `secrets.yaml` rather than in `apps.yaml` - see [Storing secrets](apps-yaml.md#storing-secrets).
 
 Copy the template [teslemetry.yaml](https://raw.githubusercontent.com/springfall2008/batpred/main/templates/teslemetry.yaml) over the top of your `apps.yaml` and edit for your system. See [Tesla Powerwall Teslemetry API](components.md#tesla-powerwall-teslemetry-api-teslemetry) for details.
 
@@ -3829,5 +3836,10 @@ Defines the units of the SoC setting (currently not used), it defaults to "%".
 ### write_and_poll_sleep
 
 Sets the number of seconds between polls of inverter settings.
+
+### rate_step_percent_of_capacity
+
+Optional, defaults to 0. Set it when the inverter stores its charge and discharge rates in steps of this percentage of nominal battery capacity (the built-in GivEnergy `GE` type uses 1).
+Predbat then accepts a rate read-back up to one step *below* the rate it wrote, rather than re-writing it every cycle. A read-back above the rate written still has to be within 5% of the rate ceiling, so this suits an inverter that rounds its rates down.
 
 <!-- markdownlint-enable MD046 -->

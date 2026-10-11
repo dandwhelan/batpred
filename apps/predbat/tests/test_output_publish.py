@@ -91,6 +91,7 @@ class OutputFixture:
         base.num_cars = self.num_cars
         base.car_charging_slots = [[] for _ in range(max(self.num_cars, 1))]
         base.low_rates = []
+        base.low_rates_tariff = []
         base.high_export_rates = []
         base.dashboard_values = {}
         return base
@@ -281,6 +282,8 @@ def _test_publish_rates_import(my_predbat):
             {"start": MINUTES_NOW + 120, "end": MINUTES_NOW + 240, "average": 7.5},
             {"start": MINUTES_NOW + 600, "end": MINUTES_NOW + 660, "average": 12.0},
         ]
+        # The sensors are published from the tariff's own windows (upstream #5050)
+        base.low_rates_tariff = base.low_rates
         base.publish_rates_import()
 
         for entity in ("predbat.low_rate_start", "predbat.low_rate_end", "predbat.low_rate_cost"):
@@ -312,6 +315,7 @@ def _test_publish_rates_import_none(my_predbat):
     print("Test: publish_rates_import with no low rate windows")
     with OutputFixture(my_predbat) as base:
         base.low_rates = []
+        base.low_rates_tariff = []
         base.publish_rates_import()
 
         entry = published(base, "predbat.low_rate_start")

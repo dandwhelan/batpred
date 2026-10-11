@@ -65,6 +65,7 @@ BLAS
 boostable
 Bottlecap
 brickatius
+britkat1980
 bwignore
 byok
 cadata
@@ -169,9 +170,11 @@ dnoregion
 docstrings
 dstamp
 dstart
+dtype
 dwindow
 eauth
 echargingpile
+ecosmart
 Eddi
 eddis
 efgh
@@ -258,10 +261,12 @@ getall
 getattr
 getrusage
 Ginlong
+githubusercontent
 gitnexus
 giv
 GivEnergy
 givtcp
+gmtime
 gnueabihf
 GOELEC
 goldens
@@ -299,6 +304,7 @@ holdout
 homeassistant
 houseb
 htmlcov
+hultenvp
 husforbrukning
 hypervolt
 iboost
@@ -332,6 +338,7 @@ jstatus
 jsyaml
 kaiming
 keepalive
+kellerza
 keydb
 khtml
 killall
@@ -344,6 +351,7 @@ Krakenflex
 Kuzu
 kvar
 kvarh
+kwarg
 kwargs
 kwhb
 labelcolor
@@ -421,6 +429,7 @@ mpxn
 mqtt
 mtok
 mult
+multiarray
 myaccount
 myenergi
 mypy
@@ -510,6 +519,7 @@ preclip
 pred
 predai
 predbat
+predbatsolcast
 predbatt
 predheat
 preseed
@@ -541,6 +551,7 @@ pythonunbuffered
 pytz
 Qwen
 randn
+rany2
 rarr
 reactivepower
 readback
@@ -591,6 +602,7 @@ sess
 setattr
 setdefault
 setpoints
+setstate
 SFMB
 sg05lp1
 SIGABRT
