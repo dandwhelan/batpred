@@ -448,6 +448,12 @@ def test_validate_config(my_predbat):
         print(f"  [transient_ok] {name} pointing at an entity that does not exist still fails")
         _run(my_predbat, {name: "sensor.test_charger_typo"}, expect_errors=[name])
 
+    # car_charging_soc: a car's SoC sensor reads 'unavailable' whenever the car is asleep or out of range
+    print("  [transient_ok] car_charging_soc reading 'unavailable' passes")
+    _run(my_predbat, {"car_charging_soc": ["sensor.test_car_soc"], "num_cars": 1}, extra_states={"sensor.test_car_soc": "unavailable"}, expect_clean=["car_charging_soc"])
+    print("  [transient_ok] car_charging_soc reading a non-numeric value still fails")
+    _run(my_predbat, {"car_charging_soc": ["sensor.test_car_soc"], "num_cars": 1}, extra_states={"sensor.test_car_soc": "banana"}, expect_errors=["car_charging_soc"])
+
     # ==========================================================================
     # car_charging_battery_size  (#2172)
     #
