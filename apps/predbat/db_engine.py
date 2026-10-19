@@ -19,7 +19,7 @@ import sqlite3
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 TIME_FORMAT_DB = "%Y-%m-%dT%H:%M:%S.%f"
 
@@ -445,11 +445,17 @@ class DatabaseEngine:
         except sqlite3.IntegrityError:
             self.log("Warn: SQL Integrity error inserting data for {}".format(entity_id))
 
-    def _get_history_db(self, sensor, now, days=30):
+    def _get_history_db(self, sensor, now, days=30, from_time=None):
         """
         Get the history for a sensor from the SQLLite database.
+
+        The window runs from from_time when given (an incremental refresh), otherwise from days before now.
         """
-        start = now - timedelta(days=days)
+        if from_time:
+            # Rows are stored as naive UTC (see _set_state_db), so compare a timezone-aware start in UTC
+            start = from_time.astimezone(timezone.utc).replace(tzinfo=None) if from_time.tzinfo else from_time
+        else:
+            start = now - timedelta(days=days)
 
         entity_index = self._get_entity_index_db(sensor)
         if not entity_index:

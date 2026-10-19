@@ -74,8 +74,10 @@ class MockDatabaseManager:
         """Mock get_all_entities_db - returns list of entity IDs"""
         return list(self.state_data.keys())
 
-    def get_history_db(self, sensor, now, days=30):
-        """Mock get_history_db - returns empty list"""
+    def get_history_db(self, sensor, now, days=30, from_time=None):
+        """Mock get_history_db - records the call and returns an empty list"""
+        self.history_calls = getattr(self, "history_calls", [])
+        self.history_calls.append({"sensor": sensor, "now": now, "days": days, "from_time": from_time})
         return []
 
 

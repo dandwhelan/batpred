@@ -122,7 +122,7 @@ class DatabaseManager(ComponentBase):
             try:
                 queue_id, command, info = item[0], item[1], item[2]
                 if command == "get_history":
-                    history = self.db_engine._get_history_db(info["sensor"], info["now"], info["days"])
+                    history = self.db_engine._get_history_db(info["sensor"], info["now"], info["days"], from_time=info.get("from_time"))
                     self.queue_results[queue_id] = history
                     self.return_event.set()  # Notify that the result is ready
                 elif command == "set_state":
@@ -278,10 +278,12 @@ class DatabaseManager(ComponentBase):
         item = {"last_changed": now_utc.strftime(TIME_FORMAT_DB), "state": state, "attributes": attributes}
         return item
 
-    def get_history_db(self, sensor, now, days=30):
+    def get_history_db(self, sensor, now, days=30, from_time=None):
         """
         Get history but run it from the DB thread
+
+        from_time, when given, starts the window there instead of days before now.
         """
         # Queue the request using IPC and wait for the result
-        result = self.send_via_ipc("get_history", {"sensor": sensor, "now": now, "days": days}, expect_response=True)
+        result = self.send_via_ipc("get_history", {"sensor": sensor, "now": now, "days": days, "from_time": from_time}, expect_response=True)
         return result

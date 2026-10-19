@@ -359,6 +359,31 @@ def _test_db_manager_entities_and_history(my_predbat=None):
             assert datetime.strptime(injected_ts, TIME_FORMAT_DB) == expected_start.replace(tzinfo=None), f"Injected timestamp {injected_ts} not clamped to window start {expected_start}"
             print("✓ Stale entity state injected at window start")
 
+            # Test 7: an incremental refresh (from_time) - what HAHistory does for every tracked entity every two
+            # minutes - returns only the changes since from_time. Rows are written in UTC here, as live ones are.
+            utc_base = datetime(2025, 12, 26, 0, 0, 0, tzinfo=timezone.utc)
+            inc_entity = "sensor.incremental"
+            for i in range(10):
+                await loop.run_in_executor(None, db_mgr.set_state_db, inc_entity, str(i), {}, utc_base + timedelta(hours=i))
+            inc_now = utc_base + timedelta(hours=12)
+            inc_history = await loop.run_in_executor(None, db_mgr.get_history_db, inc_entity, inc_now, 1, utc_base + timedelta(hours=6))
+            inc_states = [entry["state"] for entry in inc_history[0]]
+            assert inc_states == ["6", "7", "8", "9"], f"from_time refresh should return only the rows from 06:00, got {inc_states}"
+            print("✓ from_time limits the window to the changes since then")
+
+            # Test 8: with no change since from_time, the refresh reports the state at from_time - not a record a
+            # whole day back, which HAHistory appended as a new "oldest" record on every refresh and so cut
+            # Predheat's history to a day once the real record was pruned
+            quiet_entity = "input_number.quiet_slider"
+            await loop.run_in_executor(None, db_mgr.set_state_db, quiet_entity, "18.0", {}, utc_base - timedelta(days=60))
+            quiet_from = inc_now - timedelta(minutes=2)
+            quiet_history = await loop.run_in_executor(None, db_mgr.get_history_db, quiet_entity, inc_now, 1, quiet_from)
+            quiet_data = quiet_history[0]
+            assert len(quiet_data) == 1, f"Expected the one state in effect at from_time, got {quiet_data}"
+            quiet_ts = datetime.strptime(quiet_data[0]["last_updated"].rstrip("Z"), TIME_FORMAT_DB)
+            assert quiet_ts == quiet_from.replace(tzinfo=None), f"Injected state should sit at from_time {quiet_from}, not {quiet_ts}"
+            print("✓ A quiet entity's refresh reports its state at from_time, not a day back")
+
             # Stop the component and verify thread exits
             await db_mgr.stop()
 

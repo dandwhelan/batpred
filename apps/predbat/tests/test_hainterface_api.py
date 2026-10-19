@@ -8,7 +8,7 @@ Tests for HAInterface API-related methods:
 - get_history() - Historical data fetching
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 import requests
 
@@ -487,6 +487,34 @@ def test_hainterface_get_history_no_key(my_predbat=None):
     return failed
 
 
+def test_hainterface_get_history_db_from_time(my_predbat=None):
+    """Test get_history() hands from_time on to the database in db_primary mode"""
+    print("\n=== Testing HAInterface get_history() passes from_time to the DB ===")
+    failed = 0
+
+    mock_base = MockBase()
+    mock_db = MockDatabaseManager()
+    ha_interface = create_ha_interface(mock_base, ha_key="test_key", db_enable=True, db_mirror_ha=False, db_primary=True)
+    ha_interface.db_manager = mock_db
+
+    now = datetime.now(timezone.utc)
+    from_time = now - timedelta(minutes=2)
+    ha_interface.get_history("sensor.battery", now, days=1, from_time=from_time)
+
+    calls = getattr(mock_db, "history_calls", [])
+    if not calls:
+        print("ERROR: get_history_db was not called")
+        failed += 1
+    elif calls[-1]["from_time"] != from_time:
+        # Dropping it made every two-minute HAHistory refresh re-read a whole day from the DB
+        print(f"ERROR: from_time not passed to the DB, got {calls[-1]['from_time']}")
+        failed += 1
+    else:
+        print("✓ from_time passed to the DB")
+
+    return failed
+
+
 def test_hainterface_get_history_api_error(my_predbat=None):
     """Test get_history() handles API errors"""
     print("\n=== Testing HAInterface get_history() API error ===")
@@ -567,6 +595,7 @@ def run_hainterface_api_tests(my_predbat):
     failed += test_hainterface_get_history_no_key(my_predbat)
     failed += test_hainterface_get_history_api_error(my_predbat)
     failed += test_hainterface_get_history_from_time(my_predbat)
+    failed += test_hainterface_get_history_db_from_time(my_predbat)
 
     print("\n" + "=" * 80)
     if failed == 0:

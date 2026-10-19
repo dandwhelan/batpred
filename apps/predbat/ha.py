@@ -950,7 +950,11 @@ class HAInterface(ComponentBase):
         self.db_mirror_list[sensor.lower()] = True
 
         if (self.db_primary or force_db) and self.db_enable:
-            return self.db_manager.get_history_db(sensor, now, days=days)
+            # from_time must reach the DB too: HAHistory refreshes every tracked entity every two minutes with
+            # from_time set to its newest cached record, and without it each refresh re-read a whole day and,
+            # for an entity with no change in that day, got its state injected at now - 1 day - a fresh fake
+            # record every refresh, which became the oldest record once the real one was pruned
+            return self.db_manager.get_history_db(sensor, now, days=days, from_time=from_time)
 
         if from_time:
             start = from_time
