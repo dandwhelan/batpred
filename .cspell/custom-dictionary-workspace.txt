@@ -149,6 +149,7 @@ denorm
 derate
 derated
 derating
+dess
 desync
 desynced
 devcontainer
@@ -174,6 +175,7 @@ dtype
 dwindow
 eauth
 echargingpile
+ECONNRESET
 ecosmart
 Eddi
 eddis
@@ -199,10 +201,12 @@ energythroughput
 enho
 Enlighten
 enlm
+ENOTFOUND
 enph
 enphase
 enphaseenergy
 Enpower
+entityfilter
 entrez
 entrypoint
 epod
@@ -210,6 +214,7 @@ epvtoday
 errno
 errorcode
 ESSAPI
+ETIMEDOUT
 etoday
 etok
 euids
@@ -358,6 +363,7 @@ labelcolor
 labelledby
 labelnames
 ladybugdb
+Lanmate
 larr
 libbi
 libc
@@ -367,6 +373,7 @@ linebreak
 linecap
 linejoin
 linestyle
+Liskov
 loadml
 loadmlpower
 loadspower
@@ -489,6 +496,7 @@ overfitting
 oversizing
 overvoltage
 ownerapi
+pac
 parseable
 pbat
 pbgw
@@ -549,6 +557,7 @@ pytest
 pythonhashseed
 pythonunbuffered
 pytz
+Quattro
 Qwen
 randn
 rany2
@@ -649,6 +658,7 @@ startswith
 startt
 stdlib
 stepline
+stevekirtley
 Storion
 Stromligning
 strptime
@@ -707,6 +717,7 @@ Trefor
 treforsiphone
 treforsouthwell
 triggerable
+trydan
 tunables
 twinx
 typecode
@@ -724,6 +735,7 @@ undriven
 unencodable
 unfetchable
 unflushed
+unhashable
 unindexed
 unnormalised
 unparseable
