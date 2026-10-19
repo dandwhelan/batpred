@@ -609,7 +609,10 @@ def published(my_predbat, suffix):
 
 
 def test_publish_fresh_install(my_predbat):
-    """Nothing to restore and nothing counted: the 24h sensor publishes 0, the total is not written."""
+    """
+    The total has never been written - neither a state nor any history: it is restored as 0 and
+    published on the first cycle, so the entity exists and later reads of it find it.
+    """
     saved = publish_setup(my_predbat)
     source = RestoreSource(my_predbat)
     failed = False
@@ -618,19 +621,71 @@ def test_publish_fresh_install(my_predbat):
         if published(my_predbat, ".control_failures") != 0:
             print("ERROR: 24h sensor not published as 0")
             failed = True
-        if published(my_predbat, ".control_failures_total") is not None or my_predbat.control_monitor.restored:
-            print("ERROR: a 0 total was written over a total that could not be read")
+        if published(my_predbat, ".control_failures_total") != 0 or not my_predbat.control_monitor.restored:
+            print("ERROR: a total that has never been written was not created as 0: {}".format(published(my_predbat, ".control_failures_total")))
             failed = True
-        # The first counted failure is written, and resolves the restore
+        reads = source.full_reads + source.state_reads
         my_predbat.control_monitor.events.append(make_event(T0 + 60))
         my_predbat.control_monitor.total = 1
         my_predbat.publish_control_failures(T0 + 120)
-        if published(my_predbat, ".control_failures_total") != 1 or not my_predbat.control_monitor.restored:
+        if source.full_reads + source.state_reads != reads:
+            print("ERROR: a resolved restore kept reading")
+            failed = True
+        if published(my_predbat, ".control_failures_total") != 1:
             print("ERROR: first failure on a fresh install did not publish the total")
             failed = True
         attributes = my_predbat.dashboard_values[my_predbat.prefix + ".control_failures"]["attributes"]
         if published(my_predbat, ".control_failures") != 1 or attributes["by_mode"] != {MODE_CHARGING: 1} or len(attributes["events"]) != 1:
             print("ERROR: 24h sensor attributes wrong: {}".format(attributes))
+            failed = True
+    finally:
+        source.close()
+        my_predbat.control_monitor = saved
+    return failed
+
+
+def test_publish_unreadable_total_not_zeroed(my_predbat):
+    """A total that exists but reads unavailable is not written as 0; the first counted failure is written, and resolves the restore."""
+    saved = publish_setup(my_predbat)
+    source = RestoreSource(my_predbat, total="unavailable")
+    failed = False
+    try:
+        my_predbat.publish_control_failures(T0)
+        if published(my_predbat, ".control_failures_total") is not None or my_predbat.control_monitor.restored:
+            print("ERROR: a 0 total was written over a total that could not be read")
+            failed = True
+        my_predbat.control_monitor.events.append(make_event(T0 + 60))
+        my_predbat.control_monitor.total = 1
+        my_predbat.publish_control_failures(T0 + 120)
+        if published(my_predbat, ".control_failures_total") != 1 or not my_predbat.control_monitor.restored:
+            print("ERROR: first failure with an unreadable total did not publish the total")
+            failed = True
+    finally:
+        source.close()
+        my_predbat.control_monitor = saved
+    return failed
+
+
+def test_publish_never_written_needs_history_read(my_predbat):
+    """
+    Only a history read decides the total has never been written. The state-only reads in between
+    cannot tell absent from unavailable, so an entity that vanishes from state after the first read
+    stays unresolved until the next history read, which then creates it as 0.
+    """
+    saved = publish_setup(my_predbat)
+    source = RestoreSource(my_predbat, total="unavailable")
+    failed = False
+    try:
+        my_predbat.publish_control_failures(T0)  # attempt 1: history read, exists but unreadable
+        source.total = None
+        for cycle in range(1, 12):  # attempts 2-12: state only
+            my_predbat.publish_control_failures(T0 + cycle * 300)
+        if my_predbat.control_monitor.restored or published(my_predbat, ".control_failures_total") is not None:
+            print("ERROR: a state-only read decided the total had never been written")
+            failed = True
+        my_predbat.publish_control_failures(T0 + 12 * 300)  # attempt 13: history read
+        if source.full_reads != 4 or not my_predbat.control_monitor.restored or published(my_predbat, ".control_failures_total") != 0:
+            print("ERROR: history read did not create the total as 0: full {} restored {} total {}".format(source.full_reads, my_predbat.control_monitor.restored, published(my_predbat, ".control_failures_total")))
             failed = True
     finally:
         source.close()
@@ -657,7 +712,7 @@ def test_publish_restores_total_and_events(my_predbat):
 def test_publish_late_restore_adds_counted(my_predbat):
     """Unreadable at first, readable later, with a failure counted in between: total = restored + counted."""
     saved = publish_setup(my_predbat)
-    source = RestoreSource(my_predbat)
+    source = RestoreSource(my_predbat, total="unavailable")
     failed = False
     try:
         my_predbat.publish_control_failures(T0)
@@ -680,7 +735,7 @@ def test_publish_history_read_cadence(my_predbat):
     finds the total still resolves the restore.
     """
     saved = publish_setup(my_predbat)
-    source = RestoreSource(my_predbat)
+    source = RestoreSource(my_predbat, total="unavailable")
     failed = False
     try:
         for cycle in range(25):
@@ -749,6 +804,8 @@ def run_control_monitor_tests(my_predbat):
             failed = True
     for name, fn in [
         ("publish_fresh_install", test_publish_fresh_install),
+        ("publish_unreadable_not_zeroed", test_publish_unreadable_total_not_zeroed),
+        ("publish_never_written_needs_history_read", test_publish_never_written_needs_history_read),
         ("publish_restores", test_publish_restores_total_and_events),
         ("publish_late_restore", test_publish_late_restore_adds_counted),
         ("publish_history_read_cadence", test_publish_history_read_cadence),

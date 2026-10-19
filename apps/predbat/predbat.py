@@ -34,7 +34,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v712.39"
+THIS_VERSION = "v712.40"
 THIS_VERSION_DISPLAY = THIS_VERSION
 
 # Restart Predbat if a component stays unhealthy for this long
@@ -835,12 +835,20 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         read current state only, so an install that has never failed does not search 30 days of
         history every cycle.
 
+        A history read that finds the total in neither state nor history is different: the entity
+        has never been written, as on an install that has never had a failure, so there is no total
+        to lose and it is restored as 0. Otherwise it is never created, and every history refresh
+        of it warns that it does not exist. One that exists but reads unavailable or unknown comes
+        back as that string, not None, so it stays unresolved; the state-only reads cannot tell the
+        two apart, so they never decide this.
+
         Args:
             now (float): epoch seconds
         """
         monitor = self.control_monitor
         if not monitor.restored:
-            if monitor.history_read_due():
+            history_read = monitor.history_read_due()
+            if history_read:
                 read = self.load_previous_value_from_ha
             else:
 
@@ -849,10 +857,9 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
                     value = self.get_state_wrapper(entity, attribute=attribute)
                     return None if value in ("unavailable", "unknown") else value
 
-            monitor.restore(
-                read(self.prefix + ".control_failures", attribute="events"),
-                read(self.prefix + ".control_failures_total"),
-            )
+            events = read(self.prefix + ".control_failures", attribute="events")
+            total = read(self.prefix + ".control_failures_total")
+            monitor.restore(events, 0 if history_read and total is None else total)
         monitor.prune(now)
         recent = monitor.recent_events(now)
         by_mode = monitor.by_mode(recent)
