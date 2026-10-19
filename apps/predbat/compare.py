@@ -813,3 +813,22 @@ class Compare:
                 # A re-plan requested while the comparison ran (a setting or override changed) must still happen
                 my_predbat.plan_valid = saved["plan_valid"] and not my_predbat.update_pending
                 my_predbat.io_adjusted = io_adjusted_base
+
+        # Keep this run in the plan archive, so the Compare page can show earlier runs
+        self.archive_results(results)
+
+    def archive_results(self, results):
+        """
+        Save a completed run's results to the plan archive (see plan_archive.py), named after when it ran.
+
+        Each run otherwise overwrites the last in comparisons.yaml, so this is the only record of an
+        earlier day's comparison. plan_archive_days of 0 turns the archive off.
+        """
+        archive = getattr(self.pb, "plan_archive", None)
+        if not archive or not results:
+            return
+        days = self.pb.get_arg("plan_archive_days", 4)
+        if not days or days <= 0:
+            return
+        if archive.save("compare", self.pb.now_utc, {"results": results}):
+            archive.prune(self.pb.now_utc, days)

@@ -1947,8 +1947,25 @@ class Output:
             # The live plan is republished on every re-plan; the web page's stale check reads this
             raw_plan["refresh_minutes"] = self.calculate_plan_every
             self.dashboard_item(self.prefix + ".plan_html", state="", attributes={"text": self.text_plan, "html": html, "raw": raw_plan, "friendly_name": "Plan in HTML", "icon": "mdi:web-box"})
+            self.archive_plan(raw_plan)
 
         return html, raw_plan
+
+    def archive_plan(self, raw_plan):
+        """
+        Keep a copy of the live plan in the plan archive, so the Plan page can show past plans.
+
+        Only the published (live) plan reaches here - the tariff comparison and the annual tool build
+        their plans with publish=False. plan_archive_days of 0 turns the archive off.
+        """
+        archive = getattr(self, "plan_archive", None)
+        if not archive:
+            return
+        days = self.get_arg("plan_archive_days", 4)
+        if not days or days <= 0:
+            return
+        if archive.save_plan(self.now_utc, raw_plan, self.get_arg("plan_archive_interval", 30)):
+            archive.prune(self.now_utc, days)
 
     def publish_rates(self, rates, export, gas=False):
         """

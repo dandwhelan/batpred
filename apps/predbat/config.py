@@ -2744,6 +2744,8 @@ APPS_SCHEMA = {
     "car_charging_battery_size": {"type": "sensor", "zero": False, "sensor_type": "float", "entries": "num_cars"},
     "car_charging_soc": {"type": "sensor", "sensor_type": "float", "entries": "num_cars", "transient_ok": True},
     "car_charging_soc_max_age": {"type": "integer"},
+    "plan_archive_days": {"type": "integer"},
+    "plan_archive_interval": {"type": "integer"},
     "car_charging_limit": {"type": "sensor", "sensor_type": "float", "entries": "num_cars"},
     "car_charging_exclusive": {"type": "boolean_list", "entries": "num_cars"},
     "carbon_intensity": {"type": "sensor", "sensor_type": "string"},

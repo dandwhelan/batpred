@@ -112,6 +112,7 @@ from fetch import Fetch
 from output import Output
 from userinterface import UserInterface
 from compare import Compare
+from plan_archive import PlanArchive
 from plugin_system import PluginSystem
 from github import GitHub
 from ha import run_async
@@ -341,6 +342,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.components = None
         self.CONFIG_ITEMS = copy.deepcopy(CONFIG_ITEMS)
         self.comparison = None
+        self.plan_archive = None
         self.predheat = None
         self.predbat_mode = "Monitor"
         self.soc_kwh_history = {}
@@ -2254,6 +2256,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
             self.auto_config()
             self.load_user_config(quiet=False, register=False, load_config=True)
             self.comparison = Compare(self)
+            self.plan_archive = PlanArchive(self.config_root, self.log)
 
             self.components.initialize(phase=1)
             if not self.components.start(phase=1):

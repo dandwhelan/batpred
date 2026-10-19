@@ -129,6 +129,7 @@ def run_test_web_if(my_predbat):
             ("GET", "/dash_entities"),
             ("GET", "/api/dash_states"),
             ("GET", "/api/plan_data"),
+            ("GET", "/api/plan_archive"),
             ("GET", "/kraken_key"),
             ("GET", "/annual"),
             ("GET", "/annual_view"),
