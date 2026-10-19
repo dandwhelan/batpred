@@ -234,6 +234,42 @@ def _test_web_routes(my_predbat, tmpdir):
     return failed
 
 
+def _test_debug_yaml_skips_archive(my_predbat, tmpdir):
+    """
+    The plan archive must stay out of the debug yaml.
+
+    create_debug_yaml() dumps every non-callable PredBat member not in DEBUG_EXCLUDE_LIST. The archive
+    holds my_predbat.log, a bound method, so yaml.dump() followed it into the whole PredBat graph and
+    died on the first in-flight coroutine there - "Failed to capture debug history snapshot: cannot
+    pickle 'coroutine' object" on the first live run of v712.38. A pending coroutine is planted on
+    ha_interface below, as on a live system, so dropping "plan_archive" from the exclude list fails this.
+    """
+    failed = False
+
+    async def _pending():
+        """A stand-in for an in-flight component call."""
+        return None
+
+    coro = _pending()
+    saved_archive = getattr(my_predbat, "plan_archive", None)
+    try:
+        my_predbat.plan_archive = PlanArchive(tmpdir, my_predbat.log)
+        my_predbat.ha_interface.plan_archive_test_pending_call = coro
+        try:
+            text = my_predbat.create_debug_yaml(write_file=False)
+        except Exception as e:
+            print("  ERROR: create_debug_yaml raised {}: {}".format(type(e).__name__, e))
+            return True
+        if "plan_archive:" in text:
+            print("  ERROR: the plan archive was dumped into the debug yaml")
+            failed = True
+    finally:
+        my_predbat.plan_archive = saved_archive
+        my_predbat.ha_interface.__dict__.pop("plan_archive_test_pending_call", None)
+        coro.close()
+    return failed
+
+
 def test_plan_archive(my_predbat):
     """Run the plan archive tests"""
     print("**** Testing plan archive ****")
@@ -250,6 +286,7 @@ def test_plan_archive(my_predbat):
         ("archive_plan hook", lambda d: _test_archive_plan_hook(my_predbat, d)),
         ("compare results hook", lambda d: _test_compare_archive_results(my_predbat, d)),
         ("web routes", lambda d: _test_web_routes(my_predbat, d)),
+        ("debug yaml skips the archive", lambda d: _test_debug_yaml_skips_archive(my_predbat, d)),
     ]:
         tmpdir = tempfile.mkdtemp(prefix="predbat_test_plan_archive_")
         try:

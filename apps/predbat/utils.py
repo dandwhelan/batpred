@@ -296,6 +296,8 @@ DEBUG_EXCLUDE_LIST = [
     "CONFIG_ITEMS",
     "config_index",
     "comparison",
+    # A file store holding Predbat's log method, so dumping it would drag in the whole PredBat graph
+    "plan_archive",
     "plugin_system",
     "ge_url_cache",
     "github_url_cache",
