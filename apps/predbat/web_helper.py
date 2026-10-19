@@ -8243,6 +8243,10 @@ def get_plan_renderer_js():
         if (!data) {
             if (currentView === 'plan') {
                 container.innerHTML = '<h2>Plan data is loading, please wait...</h2>';
+            } else if (currentView === 'saved') {
+                container.innerHTML = '<h2>Pick a saved plan</h2>' +
+                    '<p>Choose a time from the <b>Saved plans</b> list to see the plan Predbat had made then. ' +
+                    'A plan is saved every half hour and kept for a few days (plan_archive_days in apps.yaml).</p>';
             } else {
                 // The yesterday/baseline views are only produced once calculate_yesterday() has run,
                 // which it can't do without the recorded history of predbat.cost_today - say so rather
@@ -8284,6 +8288,10 @@ def get_plan_renderer_js():
 
     // The data the current view shows
     function currentViewData() {
+        if (currentView === 'saved') {
+            // A past plan picked from the plan archive (see loadSavedPlan on the Plan page)
+            return window.savedData;
+        }
         return currentView === 'plan' ? window.planData : (currentView === 'yesterday' ? window.yesterdayData : window.baselineData);
     }
 
@@ -8291,6 +8299,11 @@ def get_plan_renderer_js():
     function checkStaleness(data) {
         const staleWarning = document.getElementById('staleWarning');
         if (!staleWarning) return;
+        // A saved plan is old on purpose
+        if (currentView === 'saved') {
+            staleWarning.style.display = 'none';
+            return;
+        }
         if (!data || !data.timestamp) {
             staleWarning.style.display = 'none';
             return;

@@ -429,6 +429,21 @@ Docker users can change the web port for the Predbat web interface by setting **
   web_port: 5052
 ```
 
+### plan_archive_days
+
+Predbat keeps a copy of the plan it made every half hour, and of every tariff comparison run, so you can look back at them later:
+pick a time from the **Saved plans** list on the [Plan view](web-interface.md) to see that plan, or an earlier run from the **Show run**
+list on the [Compare view](compare.md#running-a-comparison).
+
+**plan_archive_days** sets how many days of these are kept (default 4), and **plan_archive_interval** how many minutes apart the plans
+are saved (default 30). Setting **plan_archive_days** to 0 turns the archive off. The copies are compressed and stored in the `plan_archive`
+folder next to `apps.yaml`; four days at the defaults is about a megabyte.
+
+```yaml
+  plan_archive_days: 4
+  plan_archive_interval: 30
+```
+
 ### notify_devices
 
 A list of device names to notify when Predbat sends a notification. The default is just 'notify' which contacts all mobile devices

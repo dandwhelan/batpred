@@ -132,6 +132,9 @@ You can view the comparison on the [Predbat web interface](web-interface.md#comp
 
 You can manually trigger a new comparison by hitting the 'Compare now' button, or by turning on **switch.predbat_compare_active**.
 
+Every run is also kept for a few days (see [plan_archive_days](apps-yaml.md#plan_archive_days)), so an earlier day's comparison can be looked at again:
+pick it from the **Show run** list at the top of the Compare view.
+
 When a compare is running **switch.predbat_compare_active** will be turned on, otherwise it will be off.
 
 Predbat will highlight which tariff may be the best cost-wise for the next 24-hour period based on the plan optimisation metrics you have defined.

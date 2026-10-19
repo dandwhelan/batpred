@@ -101,6 +101,7 @@ from predbat import THIS_VERSION_DISPLAY
 from component_base import ComponentBase
 from config import APPS_SCHEMA
 from compare import check_compare_list
+from plan_archive import snapshot_label, snapshot_day
 import debug_history
 from web_annual import AnnualPage
 from web_chat import WebChat
@@ -574,6 +575,7 @@ class WebInterface(ComponentBase):
         app.router.add_post("/api/state", self.html_api_post_state)
         app.router.add_post("/api/service", self.html_api_post_service)
         app.router.add_get("/api/plan_data", self.html_api_plan_data)
+        app.router.add_get("/api/plan_archive", self.html_api_plan_archive)
         app.router.add_get("/api/log", self.html_api_get_log)
         app.router.add_get("/api/entities", self.html_api_get_entities)
         app.router.add_post("/api/login", self.html_api_login)
@@ -2818,6 +2820,43 @@ pbRegisterChart(chart, pbChartSize);
 
         return web.json_response(response_data)
 
+    async def html_api_plan_archive(self, request):
+        """
+        JSON API - the plan archive (see plan_archive.py)
+
+        With no arguments, the saved plan and comparison ids, newest first. With kind (plan or compare)
+        and id, that one snapshot as {"time", "data"}; 404 when it does not exist.
+        """
+        archive = getattr(self.base, "plan_archive", None)
+        kind = request.query.get("kind")
+        snapshot_id = request.query.get("id")
+        if kind or snapshot_id:
+            snapshot = archive.load(kind, snapshot_id) if archive else None
+            if snapshot is None:
+                return web.json_response({"error": "No saved {} {}".format(kind, snapshot_id)}, status=404)
+            return web.json_response(snapshot)
+        plans = archive.list("plan") if archive else []
+        compares = archive.list("compare") if archive else []
+        return web.json_response({"enabled": bool(archive), "plans": plans, "compares": compares})
+
+    def saved_snapshot_options(self, kind, selected=None):
+        """<option>s for a kind's saved snapshots, newest first and grouped by day"""
+        archive = getattr(self.base, "plan_archive", None)
+        ids = archive.list(kind) if archive else []
+        text = ""
+        day = None
+        for snapshot_id in ids:
+            this_day = snapshot_day(snapshot_id)
+            if this_day != day:
+                if day is not None:
+                    text += "</optgroup>"
+                text += '<optgroup label="{}">'.format(html_module.escape(this_day))
+                day = this_day
+            text += '<option value="{}"{}>{}</option>'.format(snapshot_id, " selected" if snapshot_id == selected else "", html_module.escape(snapshot_label(snapshot_id)))
+        if day is not None:
+            text += "</optgroup>"
+        return text, len(ids)
+
     async def html_plan(self, request):
         """
         Return the Predbat plan as an HTML page with client-side JSON rendering
@@ -2839,6 +2878,12 @@ pbRegisterChart(chart, pbChartSize);
         text += '<button class="view-button" data-view="plan" onclick="switchView(\'plan\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #4CAF50; color: white; cursor: pointer;">Plan</button>'
         text += '<button class="view-button" data-view="yesterday" onclick="switchView(\'yesterday\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #f0f0f0; color: black; cursor: pointer;">History</button>'
         text += '<button class="view-button" data-view="baseline" onclick="switchView(\'baseline\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #f0f0f0; color: black; cursor: pointer;">Yesterday Without Predbat</button>'
+        # Past plans from the plan archive, shown read-only in the same table
+        saved_options, saved_count = self.saved_snapshot_options("plan")
+        text += '<button class="view-button" data-view="saved" onclick="switchView(\'saved\')" style="padding: 6px 12px; border-radius: 3px; font-size: 14px; border: 1px solid #ddd; background-color: #f0f0f0; color: black; cursor: pointer;">Saved</button>'
+        text += '<select id="savedPlanSelect" onchange="loadSavedPlan(this.value)" style="padding: 5px; font-size: 14px;" title="Plans saved every half hour for the last few days">'
+        text += '<option value="">{}</option>'.format("Saved plans ({})".format(saved_count) if saved_count else "No saved plans yet")
+        text += saved_options + "</select>"
         text += '<span id="planTimestamp" style="margin-left: 16px; font-size: 13px; color: #666;"></span>'
         text += '<label id="debugToggleLabel" style="margin-left: auto;"><input type="checkbox" id="debugToggle" onchange="onDebugToggleChange()"> Show Debug</label>'
         text += "</div>"
@@ -2912,6 +2957,20 @@ pbRegisterChart(chart, pbChartSize);
         text += "if (initialTimestamps.length > 0) newestDataTimestamp = initialTimestamps.reduce((a, b) => a > b ? a : b);\n"
         text += "window.addEventListener('load', function() { updateTimestampDisplay(); startPlanUpdates(); });\n"
         text += "window.addEventListener('resize', adjustResponsiveSizes);\n"
+        # Fetch one saved plan into the Saved view; switchView/refreshPlan come from the plan renderer
+        text += "async function loadSavedPlan(id) {\n"
+        text += "  if (!id) { return; }\n"
+        text += "  try {\n"
+        text += "    const response = await fetch('./api/plan_archive?kind=plan&id=' + encodeURIComponent(id));\n"
+        text += "    if (!response.ok) { throw new Error('HTTP error ' + response.status); }\n"
+        text += "    const snapshot = await response.json();\n"
+        text += "    window.savedData = snapshot.data;\n"
+        text += "    switchView('saved');\n"
+        text += "  } catch (error) {\n"
+        text += "    const errorDiv = document.getElementById('planError');\n"
+        text += "    if (errorDiv) { errorDiv.textContent = 'Error loading saved plan: ' + error.message; errorDiv.style.display = 'block'; }\n"
+        text += "  }\n"
+        text += "}\n"
         text += "</script>"
 
         text += "</body></html>\n"
@@ -4647,6 +4706,33 @@ pbRegisterChart(chart, pbChartSize);
         text += '<input type="hidden" name="run" value="run">\n'
         text += "</form>"
 
+        # An earlier run from the plan archive (see plan_archive.py) in place of the latest one
+        archive = getattr(self.base, "plan_archive", None)
+        # The page is also rendered with no request at all (tests), when there is no run to pick
+        run_id = (getattr(request, "query", None) or {}).get("run", "")
+        archived_results = None
+        if run_id and archive:
+            snapshot = archive.load("compare", run_id)
+            if snapshot and isinstance(snapshot.get("data"), dict):
+                archived_results = snapshot["data"].get("results", {}) or {}
+        run_options, run_count = self.saved_snapshot_options("compare", selected=run_id)
+        if run_count:
+            text += "<p>Show run: <select onchange=\"window.location.href = './compare' + (this.value ? '?run=' + encodeURIComponent(this.value) : '')\">"
+            text += '<option value="">Latest</option>' + run_options + "</select>"
+            if archived_results is not None:
+                text += " &nbsp; Showing the run from <b>{}</b> - <a href='./compare'>back to the latest</a>".format(html_module.escape(snapshot_label(run_id)))
+            elif run_id:
+                text += " &nbsp; No saved run {} - showing the latest".format(html_module.escape(run_id))
+            text += "</p>\n"
+
+        def get_result(tariff_id):
+            """A tariff's result from the chosen archived run, or else from the latest one"""
+            if archived_results is not None:
+                return archived_results.get(tariff_id, {}) or {}
+            if self.base.comparison:
+                return self.base.comparison.get_comparison(tariff_id)
+            return {}
+
         text += "<table class='comparison-table'>\n"
         text += "<tr><th>ID</th><th>Name</th><th>Date</th><th>True cost</th><th>Cost</th><th>Cost 10%</th><th>7d avg</th><th>Export</th><th>Import</th><th>Final SoC</th>"
         if self.base.iboost_enable:
@@ -4684,10 +4770,7 @@ pbRegisterChart(chart, pbChartSize);
             name = compare.get("name", "")
             id = compare.get("id", "")
 
-            if self.base.comparison:
-                result = self.base.comparison.get_comparison(id)
-            else:
-                result = {}
+            result = get_result(id)
 
             cost = result.get("cost", "")
             cost10 = result.get("cost10", "")
@@ -4785,10 +4868,7 @@ pbRegisterChart(chart, pbChartSize);
         for compare in compare_list:
             name = compare.get("name", "")
             id = compare.get("id", "")
-            if self.base.comparison:
-                result = self.base.comparison.get_comparison(id)
-            else:
-                result = {}
+            result = get_result(id)
 
             html = result.get("html", "")
 

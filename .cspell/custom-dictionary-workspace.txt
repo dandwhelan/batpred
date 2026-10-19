@@ -101,6 +101,7 @@ COEFF
 collaps
 collapsable
 compareform
+compresslevel
 configform
 connack
 Consolas
@@ -305,6 +306,7 @@ heatingtemp
 heatpump
 heatsink
 hellip
+hhmm
 holdout
 homeassistant
 houseb
@@ -490,6 +492,7 @@ onmouseover
 openapi
 openrouter
 openweathermap
+optgroup
 Opticaster
 overclaim
 overfitting
@@ -792,6 +795,7 @@ yday
 ylabel
 YOURSERIAL
 yuanzhi
+yyyymmdd
 zappi
 zappis
 zcat
