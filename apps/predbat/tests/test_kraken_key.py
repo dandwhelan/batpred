@@ -381,124 +381,45 @@ def test_page_script_has_no_broken_string_literals():
 # ---------------------------------------------------------------------------
 
 
-def menu_popup(html, menu_id):
-    """Return the markup of one sub-menu popup."""
-    start = html.index('id="{}"'.format(menu_id))
+# The fork keeps its own menu (the app bar, an "Advanced" <details> menu and a mobile drawer, see
+# web_helper.get_menu_html) in place of upstream's Settings/Advanced popups, so upstream's menu
+# tests are replaced here by ones for the fork's structure.
+
+
+def advanced_menu(html):
+    """Return the markup of the fork's Advanced menu."""
+    start = html.index('<div class="nav-more-menu">')
     return html[start : html.index("</div>", start)]
 
 
+def nav_drawer(html):
+    """Return the markup of the fork's mobile navigation drawer."""
+    start = html.index('<nav class="nav-drawer" id="nav-drawer">')
+    return html[start : html.index("</nav>", start)]
+
+
 def test_menu_groups_advanced_pages():
-    """Discovery, Browse, Internals and Kraken API Key live under an Advanced sub-menu, not the top bar."""
+    """Discovery, Browse, Internals and Kraken API Key are in the Advanced menu, and Kraken API Key in the drawer too."""
     from web_helper import get_menu_html
 
     html = get_menu_html(False, "./dash", [], "v0.0.0", "")
-    dropdown = menu_popup(html, "advanced-menu")
+    menu = advanced_menu(html)
     for href in ("./discovery", "./browse", "./internals", "./kraken_key"):
-        assert f"href='{href}'" in dropdown, href
-        assert html.count(f"href='{href}'") == 1, f"{href} should appear only inside Advanced"
-    # The toggle is a button, not a link, so setActiveMenuItem() cannot match it to every page
-    assert '<button class="menu-dropdown-toggle" type="button" data-menu="advanced-menu"' in html
+        assert f"href='{href}'" in menu, href
+    assert "href='./kraken_key'" in nav_drawer(html), "the Kraken API Key page must be reachable on a phone too"
+    assert html.count("href='./kraken_key'") == 2, "Kraken API Key belongs in the Advanced menu and the drawer, nowhere else"
 
 
-def test_menu_groups_settings_pages():
-    """Apps, Config, Components and Editor live under a Settings sub-menu, in that order."""
-    from web_helper import get_menu_html
-
-    html = get_menu_html(False, "./dash", [], "v0.0.0", "")
-    dropdown = menu_popup(html, "settings-menu")
-    positions = []
-    for href in ("./apps", "./config", "./components", "./apps_editor"):
-        assert f"href='{href}'" in dropdown, href
-        assert html.count(f"href='{href}'") == 1, f"{href} should appear only inside Settings"
-        positions.append(dropdown.index(f"href='{href}'"))
-    assert positions == sorted(positions), "Settings should list Apps, Config, Components, Editor"
-    assert '<button class="menu-dropdown-toggle" type="button" data-menu="settings-menu"' in html
-
-
-def test_menu_top_bar_order():
-    """Dash, Metrics, Plan, Charts, Entities ... Log, then Settings, Advanced and Docs."""
-    from web_helper import get_menu_html
-
-    html = get_menu_html(False, "./dash", [], "v0.0.0", "", chat_enabled=True)
-    order = ["href='./dash'", "href='./metrics_dashboard'", "href='./plan'", "href='./charts'", "href='./entity'", "href='./log'", 'data-menu="settings-menu"', 'data-menu="advanced-menu"', "springfall2008.github.io/batpred/'"]
-    positions = [html.index(marker) for marker in order]
-    assert positions == sorted(positions), list(zip(order, positions))
-    assert html.index("href='./chat'") < html.index("href='./log'")
-
-
-def test_menu_settings_toggle_carries_the_config_warning():
-    """An apps.yaml error flags the Settings toggle too, so the warning is visible with the menu closed."""
+def test_menu_advanced_carries_the_config_warning():
+    """An apps.yaml error flags the Advanced menu, so the warning is visible with the menu closed."""
     from web_helper import get_menu_html
 
     warning = "&#9888;"
     clean = get_menu_html(False, "./dash", [], "v0.0.0", "")
     assert warning not in clean
     html = get_menu_html(False, "./dash", {"some_arg": "bad value"}, "v0.0.0", "")
-    toggle_start = html.index('data-menu="settings-menu"')
-    assert warning in html[toggle_start : html.index("</button>", toggle_start)]
-    assert warning in menu_popup(html, "settings-menu"), "the Apps link keeps its warning too"
-
-
-def test_menu_popup_is_not_inside_the_menu_bar():
-    """The Advanced popup must sit outside .menu-bar.
-
-    The bar is position: fixed with overflow-x: auto, and WebKit (Safari, the iOS companion app)
-    clips a position: fixed child to such a parent - so inside it the popup opened invisibly on
-    iPhones while Chrome showed it fine.
-    """
-    from html.parser import HTMLParser
-
-    from web_helper import get_menu_html
-
-    class AncestorFinder(HTMLParser):
-        """Record the class lists of every open element around each sub-menu popup."""
-
-        VOID = {"img", "br", "input", "meta", "link", "hr"}
-
-        def __init__(self):
-            """Start with an empty element stack."""
-            super().__init__()
-            self.stack = []
-            self.ancestors = {}
-
-        def handle_starttag(self, tag, attrs):
-            """Push the element; note the ancestors when a popup opens."""
-            attrs = dict(attrs)
-            if attrs.get("id") in ("advanced-menu", "settings-menu"):
-                self.ancestors[attrs["id"]] = [classes for _, classes in self.stack]
-            if tag not in self.VOID:
-                self.stack.append((tag, attrs.get("class") or ""))
-
-        def handle_endtag(self, tag):
-            """Pop back to the matching element."""
-            for index in range(len(self.stack) - 1, -1, -1):
-                if self.stack[index][0] == tag:
-                    del self.stack[index:]
-                    break
-
-    finder = AncestorFinder()
-    finder.feed(get_menu_html(False, "./dash", [], "v0.0.0", ""))
-    assert set(finder.ancestors) == {"advanced-menu", "settings-menu"}, finder.ancestors
-    for menu_id, ancestors in finder.ancestors.items():
-        assert not any("menu-bar" in classes.split() for classes in ancestors), (menu_id, ancestors)
-
-
-def test_menu_toggle_is_not_painted_by_the_dark_mode_button_rule():
-    """The Advanced toggle is a <button>, and dark mode paints every button red with !important.
-
-    Its own dark-mode colours must therefore be !important too, so it looks like the other tabs.
-    """
-    import re
-
-    from web_helper import get_menu_html
-
-    html = get_menu_html(False, "./dash", [], "v0.0.0", "")
-    for selector, colour in (("body.dark-mode .menu-dropdown-toggle", "transparent"), ("body.dark-mode .menu-dropdown-toggle:hover", "#2c652f"), ("body.dark-mode .menu-dropdown-toggle.active", "#4CAF50")):
-        match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", html)
-        assert match, selector
-        rule = match.group(1)
-        assert re.search(r"background-color:\s*" + re.escape(colour) + r"\s*!important", rule), (selector, rule)
-        assert re.search(r"(^|[;\s])color:\s*white\s*!important", rule), (selector, rule)
+    summary_start = html.index('<details class="nav-more">')
+    assert warning in html[summary_start : html.index("</summary>", summary_start)]
 
 
 def run_kraken_key_tests(my_predbat):

@@ -129,6 +129,7 @@ def run_test_web_if(my_predbat):
             ("GET", "/dash_entities"),
             ("GET", "/api/dash_states"),
             ("GET", "/api/plan_data"),
+            ("GET", "/kraken_key"),
             ("GET", "/annual"),
             ("GET", "/annual_view"),
             ("GET", "/annual_compare"),
@@ -165,6 +166,9 @@ def run_test_web_if(my_predbat):
             ("GET", "/debug_history_download_all"),
             ("GET", "/debug_history_download_recent"),
             ("GET", "/images/{filename}"),
+            # Upstream's Kraken API key generator (v9.4.1): the page itself is swept above, but the
+            # API acts on a Kraken token a bare request cannot supply - test_kraken_key.py drives it.
+            ("POST", "/api/kraken_key"),
             # Upstream's chat routes (v8.54.0), covered instead by test_web_chat.py, which
             # drives them with a real conversation. The page itself is swept above; these
             # cannot be: /chat/stream is a long-lived SSE response that never completes,
