@@ -3,1913 +3,1499 @@
 # Copyright Trefor Southwell 2026 - All Rights Reserved
 # This application maybe used for personal use only and not for commercial use
 # -----------------------------------------------------------------------------
-# fmt: off
+# fmt off
 # pylint: disable=consider-using-f-string
 # pylint: disable=line-too-long
 # pylint: disable=attribute-defined-outside-init
-# fmt: on
 
-"""Unit tests for the Predbat MCP (Model Context Protocol) server.
+"""Tests for the MCP server's log and apps.yaml tools (#4768).
 
-The MCP server exposes plan data and configuration writes over HTTP, gated by an OAuth 2.1
-flow and JWT bearer tokens. It had 9% line coverage, which meant the authentication code -
-token signing, audience validation, PKCE verification and the single-use authorization code
-rules - had almost no tests behind it.
-
-These tests drive the request handlers directly with a lightweight request stub rather than
-standing up a real aiohttp server, so they stay fast and deterministic while still asserting
-on real status codes, headers and JSON bodies.
+Covers the new get_log tool, get_apps' credential redaction, the widened
+mask_secret_args() key match, and the log-filter helpers now shared between the
+MCP tool and the web log view.
 """
 
-import base64
-import hashlib
+import asyncio
 import json
-from datetime import datetime, timedelta, timezone
-
-import jwt as pyjwt
-
-from tests.test_infra import run_async
-from web_mcp import MCPServerWrapper, PredbatMCPServer
-
-MCP_SECRET = "test-mcp-secret"
-MCP_PORT = 8199
-
-
-class MockRequest:
-    """Stand-in for an aiohttp request, exposing only what the MCP handlers read."""
-
-    def __init__(self, method="GET", query=None, headers=None, post_data=None, json_data=None, host="predbat.local:8199", path="/mcp", remote="10.0.0.5", raise_on_body=False):
-        """Build a request with the given method, parameters, headers and body."""
-        self.method = method
-        self.query = dict(query or {})
-        self.headers = dict(headers or {})
-        self._post_data = dict(post_data or {})
-        self._json_data = json_data
-        self._raise_on_body = raise_on_body
-        self.host = host
-        self.path = path
-        self.remote = remote
-
-    async def post(self):
-        """Return the form-encoded body, or fail when the test asked for a broken body."""
-        if self._raise_on_body:
-            raise RuntimeError("could not read the request body")
-        return dict(self._post_data)
-
-    async def json(self):
-        """Return the JSON body, raising when there is none, as aiohttp does."""
-        if self._raise_on_body:
-            raise RuntimeError("could not read the request body")
-        if self._json_data is None:
-            raise ValueError("no JSON body")
-        return self._json_data
-
-
-class MockHAInterface:
-    """Records configuration writes made through the Home Assistant interface."""
-
-    def __init__(self, base=None):
-        """Start with no recorded writes and no injected failure."""
-        self.writes = []
-        self.fail = False
-        self.base = base
-
-    async def set_state_external(self, entity_id, value):
-        """Record a configuration write, or fail if the test asked for a failure.
-
-        Also lands the value on the matching CONFIG_ITEMS entry, because that is what a real
-        service call does and set_config now reads the setting back to confirm the write took
-        effect (v8.54.0). A mock that only recorded the call would report every write as
-        "did not take effect".
-        """
-        if self.fail:
-            raise RuntimeError("home assistant unavailable")
-        self.writes.append((entity_id, value))
-        for item in getattr(self.base, "CONFIG_ITEMS", []) or []:
-            if item.get("entity") == entity_id or item.get("name") == entity_id:
-                item["value"] = value
-                break
-
-
-class MockMCPBase:
-    """Minimal Predbat base for the MCP server wrapper's tool implementations."""
-
-    def __init__(self):
-        """Set up the state, entity and configuration data the tools read."""
-        self.prefix = "predbat"
-        self.plan_interval_minutes = 30
-        self.log_messages = []
-        self.states = {}
-        self.dashboard_values = []
-        self.args = {}
-        self.CONFIG_ITEMS = []
-        self.ha_config = {}
-        self.ha_interface = MockHAInterface(self)
-        self.manual_selects = []
-        self.update_pending = False
-        self.plan_valid = True
-        self.now_utc = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        self.soc_kw = 5.0
-        self.soc_max = 10.0
-        self.reserve = 1.0
-        self.carbon_enable = True
-        self.iboost_enable = False
-        self.forecast_minutes = 1440
-        self.grid_power = 100
-        self.battery_power = -200
-        self.pv_power = 300
-        self.load_power = 400
-        self.running = True
-
-    def log(self, message):
-        """Record a log line."""
-        self.log_messages.append(message)
-
-    def is_running(self):
-        """Report whether a plan calculation is in progress."""
-        return self.running
-
-    def get_ha_config(self, name, default):
-        """Return a Home Assistant config value and the default, as the real base does."""
-        return self.ha_config.get(name, default), default
-
-    async def async_manual_select(self, config_item, value):
-        """Record a manual plan override selection."""
-        self.manual_selects.append((config_item, value))
-
-    def get_state_wrapper(self, entity_id, attribute=None, default=None):
-        """Return a stored state or attribute, falling back to the supplied default."""
-        entry = self.states.get(entity_id)
-        if entry is None:
-            return default
-        if attribute:
-            return entry.get("attributes", {}).get(attribute, default)
-        return entry.get("state", default)
-
-
-def make_mcp_server(secret=MCP_SECRET, port=MCP_PORT):
-    """Build a PredbatMCPServer without running ComponentBase's constructor.
-
-    ``initialize()`` sets up everything the request handlers need, so bypassing ``__init__``
-    avoids dragging in the component registry and health monitoring for these tests.
-    """
-    server = PredbatMCPServer.__new__(PredbatMCPServer)
-    server.base = MockMCPBase()
-    server.log_messages = []
-    server.log = server.log_messages.append
-    # Lifecycle flags normally set by ComponentBase.__init__
-    server.api_started = False
-    server.api_stop = False
-    server.initialize(mcp_enable=True, mcp_secret=secret, mcp_port=port)
-    return server
-
-
-def response_json(response):
-    """Decode the JSON body of an aiohttp response object."""
-    return json.loads(response.body.decode())
-
-
-def pkce_pair(verifier="a-code-verifier-that-is-long-enough-for-pkce"):
-    """Return a PKCE verifier and its matching S256 challenge."""
-    digest = hashlib.sha256(verifier.encode()).digest()
-    challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-    return verifier, challenge
-
-
-def store_auth_code(server, code="test-auth-code", client_id="client-a", redirect_uri="https://client/callback", challenge=None, expires_in_minutes=10, used=False):
-    """Insert an authorization code into the server's store, as the authorize endpoint would."""
-    server.authorization_codes[code] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256" if challenge else None,
-        "state": "xyz",
-        "expires": datetime.now(timezone.utc) + timedelta(minutes=expires_in_minutes),
-        "used": used,
-    }
-    return code
-
-
-def _test_jwt_secret_derivation(_my_predbat):
-    """The JWT signing key is derived from the MCP secret, never equal to it."""
-    print("Test: the JWT signing key is derived from, not equal to, the MCP secret")
-    server = make_mcp_server()
-
-    if server.jwt_secret == MCP_SECRET:
-        print("ERROR: the signing key must not be the client secret itself")
-        return 1
-    expected = hashlib.sha256("jwt_signing_key_{}".format(MCP_SECRET).encode()).hexdigest()
-    if server.jwt_secret != expected:
-        print("ERROR: unexpected signing key derivation")
-        return 1
-
-    # A different configured secret must produce a different signing key, otherwise tokens
-    # would remain valid across a secret rotation
-    other = make_mcp_server(secret="a-different-secret")
-    if other.jwt_secret == server.jwt_secret:
-        print("ERROR: rotating the MCP secret did not change the signing key")
-        return 1
-    return 0
-
-
-def _test_generate_access_token_claims(_my_predbat):
-    """Generated tokens carry the subject, audience, scope and expiry the MCP spec requires."""
-    print("Test: generate_access_token sets the required claims")
-    server = make_mcp_server()
-
-    token = server.generate_access_token("client-a", resource="http://predbat.local:8199", scopes=["mcp:read"])
-    payload = pyjwt.decode(token, server.jwt_secret, algorithms=["HS256"], audience="http://predbat.local:8199")
-
-    if payload["sub"] != "client-a" or payload["client_id"] != "client-a":
-        print("ERROR: the subject claims do not identify the client")
-        return 1
-    if payload["aud"] != "http://predbat.local:8199":
-        print("ERROR: expected the resource to become the audience, got {}".format(payload["aud"]))
-        return 1
-    if payload["scope"] != "mcp:read":
-        print("ERROR: expected the requested scope, got {}".format(payload["scope"]))
-        return 1
-    if payload["type"] != "access":
-        print("ERROR: expected an access token type, got {}".format(payload["type"]))
-        return 1
-    if payload["exp"] <= payload["iat"]:
-        print("ERROR: the token expiry is not in the future")
-        return 1
-
-    # Omitting the scopes grants the full default set against the default audience
-    token = server.generate_access_token("client-b")
-    payload = pyjwt.decode(token, server.jwt_secret, algorithms=["HS256"], audience="http://localhost:{}".format(MCP_PORT))
-    if payload["scope"] != "mcp:read mcp:write mcp:control":
-        print("ERROR: expected the default scopes, got {}".format(payload["scope"]))
-        return 1
-    return 0
-
-
-def _test_verify_access_token_valid(_my_predbat):
-    """A token issued by this server verifies against its own audience and the default one."""
-    print("Test: verify_access_token accepts a token it issued")
-    server = make_mcp_server()
-
-    token = server.generate_access_token("client-a", resource="http://predbat.local:8199")
-    payload = server.verify_access_token(token, expected_audience="http://predbat.local:8199")
-    if not payload or payload.get("client_id") != "client-a":
-        print("ERROR: a freshly issued token was rejected")
-        return 1
-
-    # Tokens minted against the default localhost audience stay valid for compatibility
-    default_token = server.generate_access_token("client-b")
-    payload = server.verify_access_token(default_token, expected_audience="http://predbat.local:8199")
-    if not payload:
-        print("ERROR: the default audience should still be accepted")
-        return 1
-    return 0
-
-
-def _test_verify_access_token_rejects_foreign_signature(_my_predbat):
-    """A token signed with another server's key is rejected."""
-    print("Test: verify_access_token rejects a token signed with a different key")
-    server = make_mcp_server()
-    attacker = make_mcp_server(secret="attacker-secret")
-
-    forged = attacker.generate_access_token("client-a", resource="http://predbat.local:8199")
-    if server.verify_access_token(forged, expected_audience="http://predbat.local:8199") is not None:
-        print("ERROR: a token signed with a foreign key was accepted")
-        return 1
-
-    # A token with a tampered signature must also fail
-    header, payload, _signature = server.generate_access_token("client-a").split(".")
-    tampered = "{}.{}.{}".format(header, payload, "AAAAAAAAAAAAAAAAAAAAAAAA")
-    if server.verify_access_token(tampered) is not None:
-        print("ERROR: a token with a broken signature was accepted")
-        return 1
-    return 0
-
-
-def _test_verify_access_token_rejects_wrong_audience(_my_predbat):
-    """A token minted for another resource is rejected."""
-    print("Test: verify_access_token rejects a token for a different audience")
-    server = make_mcp_server()
-
-    token = server.generate_access_token("client-a", resource="http://somewhere-else.example")
-    if server.verify_access_token(token, expected_audience="http://predbat.local:8199") is not None:
-        print("ERROR: a token for another audience was accepted")
-        return 1
-    return 0
-
-
-def _test_verify_access_token_rejects_expired(_my_predbat):
-    """An expired token is rejected and reported."""
-    print("Test: verify_access_token rejects an expired token")
-    server = make_mcp_server()
-    server.access_token_lifetime = timedelta(seconds=-60)
-
-    token = server.generate_access_token("client-a", resource="http://predbat.local:8199")
-    if server.verify_access_token(token, expected_audience="http://predbat.local:8199") is not None:
-        print("ERROR: an expired token was accepted")
-        return 1
-    return 0
-
-
-def _test_verify_access_token_rejects_wrong_type(_my_predbat):
-    """A correctly signed token that is not an access token is rejected.
-
-    Guards against a refresh or authorization token being replayed at the resource endpoint.
-    """
-    print("Test: verify_access_token rejects a non-access token type")
-    server = make_mcp_server()
-
-    payload = {
-        "sub": "client-a",
-        "client_id": "client-a",
-        "aud": "http://predbat.local:8199",
-        "scope": "mcp:read",
-        "type": "refresh",
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc) + timedelta(days=1),
-    }
-    token = pyjwt.encode(payload, server.jwt_secret, algorithm="HS256")
-
-    if server.verify_access_token(token, expected_audience="http://predbat.local:8199") is not None:
-        print("ERROR: a refresh token was accepted as an access token")
-        return 1
-    return 0
-
-
-def _test_verify_access_token_rejects_garbage(_my_predbat):
-    """A non-JWT string is rejected without raising."""
-    print("Test: verify_access_token rejects a malformed token")
-    server = make_mcp_server()
-    for token in ("", "not-a-jwt", "a.b.c"):
-        if server.verify_access_token(token) is not None:
-            print("ERROR: malformed token {!r} was accepted".format(token))
-            return 1
-    return 0
-
-
-def _test_verify_oauth_client(_my_predbat):
-    """Client verification compares against the configured shared secret."""
-    print("Test: verify_oauth_client checks the shared secret")
-    server = make_mcp_server()
-
-    if not server.verify_oauth_client("any-client", MCP_SECRET):
-        print("ERROR: the correct secret was rejected")
-        return 1
-    for bad in ("wrong", "", None, MCP_SECRET + " "):
-        if server.verify_oauth_client("any-client", bad):
-            print("ERROR: secret {!r} was accepted".format(bad))
-            return 1
-    return 0
-
-
-def _test_canonical_server_uri(_my_predbat):
-    """The canonical URI follows the request host, falling back to the configured port."""
-    print("Test: get_canonical_server_uri resolves the server identity")
-    server = make_mcp_server()
-
-    if server.get_canonical_server_uri("predbat.local:8199") != "http://predbat.local:8199":
-        print("ERROR: expected the request host to be used")
-        return 1
-    if server.get_canonical_server_uri() != "http://localhost:{}".format(MCP_PORT):
-        print("ERROR: expected the configured port in the fallback URI")
-        return 1
-    return 0
-
-
-def _test_authorize_get_requires_parameters(_my_predbat):
-    """A GET authorize request missing OAuth parameters redirects with an error."""
-    print("Test: the authorize endpoint rejects a request with missing parameters")
-    server = make_mcp_server()
-
-    request = MockRequest(method="GET", query={"redirect_uri": "https://client/callback", "state": "xyz"})
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 302:
-        print("ERROR: expected a redirect, got {}".format(response.status))
-        return 1
-    if "error=invalid_request" not in response.location:
-        print("ERROR: expected an invalid_request error, got {}".format(response.location))
-        return 1
-    return 0
-
-
-def _test_authorize_get_requires_pkce(_my_predbat):
-    """PKCE is mandatory: a request without a challenge is refused."""
-    print("Test: the authorize endpoint requires PKCE")
-    server = make_mcp_server()
-
-    request = MockRequest(method="GET", query={"client_id": "client-a", "redirect_uri": "https://client/callback", "response_type": "code", "state": "xyz"})
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 302 or "error=invalid_request" not in response.location:
-        print("ERROR: expected a PKCE rejection redirect, got {}".format(getattr(response, "location", response.status)))
-        return 1
-    if "PKCE" not in response.location:
-        print("ERROR: expected the error description to mention PKCE, got {}".format(response.location))
-        return 1
-    return 0
-
-
-def _test_authorize_get_requires_s256(_my_predbat):
-    """The deprecated plain PKCE method is refused; only S256 is accepted."""
-    print("Test: the authorize endpoint only accepts the S256 PKCE method")
-    server = make_mcp_server()
-
-    request = MockRequest(
-        method="GET",
-        query={"client_id": "client-a", "redirect_uri": "https://client/callback", "response_type": "code", "code_challenge": "abc", "code_challenge_method": "plain", "state": "xyz"},
-    )
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 302 or "S256" not in response.location:
-        print("ERROR: expected the plain method to be refused, got {}".format(getattr(response, "location", response.status)))
-        return 1
-    return 0
-
-
-def _test_authorize_get_shows_login(_my_predbat):
-    """A well-formed GET authorize request renders the sign-in page."""
-    print("Test: the authorize endpoint shows the sign-in page")
-    server = make_mcp_server()
-    _verifier, challenge = pkce_pair()
-
-    request = MockRequest(
-        method="GET",
-        query={"client_id": "client-a", "redirect_uri": "https://client/callback", "response_type": "code", "code_challenge": challenge, "code_challenge_method": "S256", "state": "xyz"},
-    )
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 200:
-        print("ERROR: expected the login page, got status {}".format(response.status))
-        return 1
-    body = response.text
-    if "Predbat MCP" not in body or 'name="secret"' not in body:
-        print("ERROR: the login form was not rendered")
-        return 1
-    # The PKCE parameters must survive the round trip through the form
-    if challenge not in body:
-        print("ERROR: the code challenge was not carried into the form")
-        return 1
-    # No code should be issued merely by loading the page
-    if server.authorization_codes:
-        print("ERROR: an authorization code was issued before authentication")
-        return 1
-    return 0
-
-
-def _test_authorize_post_wrong_secret(_my_predbat):
-    """Submitting the wrong secret re-renders the form and issues no code."""
-    print("Test: the authorize endpoint refuses a bad secret")
-    server = make_mcp_server()
-    _verifier, challenge = pkce_pair()
-
-    request = MockRequest(
-        method="POST",
-        post_data={"client_id": "client-a", "redirect_uri": "https://client/callback", "response_type": "code", "state": "xyz", "code_challenge": challenge, "code_challenge_method": "S256", "secret": "wrong-secret"},
-    )
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 200:
-        print("ERROR: expected the login page to be re-rendered, got {}".format(response.status))
-        return 1
-    if "Invalid secret" not in response.text:
-        print("ERROR: expected an invalid secret message")
-        return 1
-    if server.authorization_codes:
-        print("ERROR: an authorization code was issued despite a bad secret")
-        return 1
-    return 0
-
-
-def _test_authorize_post_issues_code(_my_predbat):
-    """The correct secret issues a single-use code and redirects back with the state."""
-    print("Test: the authorize endpoint issues a code for the correct secret")
-    server = make_mcp_server()
-    _verifier, challenge = pkce_pair()
-
-    request = MockRequest(
-        method="POST",
-        post_data={"client_id": "client-a", "redirect_uri": "https://client/callback", "response_type": "code", "state": "xyz", "code_challenge": challenge, "code_challenge_method": "S256", "secret": MCP_SECRET},
-    )
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 302:
-        print("ERROR: expected a redirect back to the client, got {}".format(response.status))
-        return 1
-    if not response.location.startswith("https://client/callback?code="):
-        print("ERROR: unexpected redirect target {}".format(response.location))
-        return 1
-    if "state=xyz" not in response.location:
-        print("ERROR: the state parameter was not returned")
-        return 1
-
-    if len(server.authorization_codes) != 1:
-        print("ERROR: expected exactly one stored code, got {}".format(len(server.authorization_codes)))
-        return 1
-    stored = list(server.authorization_codes.values())[0]
-    if stored["code_challenge"] != challenge:
-        print("ERROR: the PKCE challenge was not stored with the code")
-        return 1
-    if stored["used"]:
-        print("ERROR: a freshly issued code should not be marked used")
-        return 1
-    if stored["expires"] <= datetime.now(timezone.utc):
-        print("ERROR: the issued code is already expired")
-        return 1
-    return 0
-
-
-def _test_authorize_post_missing_parameters(_my_predbat):
-    """A POST without the required OAuth parameters never reaches the secret check."""
-    print("Test: the authorize endpoint rejects a POST with missing parameters")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", post_data={"secret": MCP_SECRET})
-    response = run_async(server.oauth_authorize(request))
-
-    if response.status != 200:
-        print("ERROR: expected the login page, got {}".format(response.status))
-        return 1
-    if "Missing required OAuth parameters" not in response.text:
-        print("ERROR: expected the missing parameter message")
-        return 1
-    if server.authorization_codes:
-        print("ERROR: no code should be issued for an incomplete request")
-        return 1
-    return 0
-
-
-def _test_token_unsupported_grant(_my_predbat):
-    """An unknown grant type is refused with unsupported_grant_type."""
-    print("Test: the token endpoint refuses an unknown grant type")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={"grant_type": "password"})
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 400:
-        print("ERROR: expected a 400, got {}".format(response.status))
-        return 1
-    if response_json(response)["error"] != "unsupported_grant_type":
-        print("ERROR: expected unsupported_grant_type, got {}".format(response_json(response)))
-        return 1
-    return 0
-
-
-def _test_token_client_credentials_success(_my_predbat):
-    """A valid client_credentials exchange returns a usable bearer token."""
-    print("Test: the token endpoint issues a token for valid client credentials")
-    server = make_mcp_server()
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "client_credentials", "client_id": "client-a", "client_secret": MCP_SECRET, "resource": "http://predbat.local:8199", "scope": "mcp:read"},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 200:
-        print("ERROR: expected a 200, got {}".format(response.status))
-        return 1
-    body = response_json(response)
-    if body["token_type"] != "Bearer":
-        print("ERROR: expected a Bearer token")
-        return 1
-    if body["scope"] != "mcp:read":
-        print("ERROR: expected the requested scope back, got {}".format(body["scope"]))
-        return 1
-    # The issued token must actually verify against this server
-    payload = server.verify_access_token(body["access_token"], expected_audience="http://predbat.local:8199")
-    if not payload or payload["client_id"] != "client-a":
-        print("ERROR: the issued token does not verify")
-        return 1
-    return 0
-
-
-def _test_token_client_credentials_bad_secret(_my_predbat):
-    """A wrong client secret is refused with 401 and issues no token."""
-    print("Test: the token endpoint refuses invalid client credentials")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={"grant_type": "client_credentials", "client_id": "client-a", "client_secret": "wrong"})
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 401:
-        print("ERROR: expected a 401, got {}".format(response.status))
-        return 1
-    body = response_json(response)
-    if body["error"] != "invalid_client":
-        print("ERROR: expected invalid_client, got {}".format(body))
-        return 1
-    if "access_token" in body:
-        print("ERROR: a token was issued despite invalid credentials")
-        return 1
-    return 0
-
-
-def _test_token_client_credentials_missing(_my_predbat):
-    """Missing credentials are refused with 400 rather than treated as empty."""
-    print("Test: the token endpoint requires both client credentials")
-    server = make_mcp_server()
-
-    for payload in ({"grant_type": "client_credentials", "client_id": "client-a"}, {"grant_type": "client_credentials", "client_secret": MCP_SECRET}):
-        request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data=payload)
-        response = run_async(server.oauth_token(request))
-        if response.status != 400:
-            print("ERROR: expected a 400 for {}, got {}".format(payload, response.status))
-            return 1
-        if response_json(response)["error"] != "invalid_request":
-            print("ERROR: expected invalid_request for {}".format(payload))
-            return 1
-    return 0
-
-
-def _test_token_form_encoded_body(_my_predbat):
-    """The token endpoint accepts a form-encoded body as well as JSON."""
-    print("Test: the token endpoint accepts a form-encoded body")
-    server = make_mcp_server()
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        post_data={"grant_type": "client_credentials", "client_id": "client-a", "client_secret": MCP_SECRET},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 200:
-        print("ERROR: expected a 200 for a form-encoded request, got {}".format(response.status))
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_success(_my_predbat):
-    """A valid code plus matching PKCE verifier exchanges for a token and burns the code."""
-    print("Test: the token endpoint exchanges an authorization code with PKCE")
-    server = make_mcp_server()
-    verifier, challenge = pkce_pair()
-    code = store_auth_code(server, challenge=challenge)
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": verifier, "resource": "http://predbat.local:8199"},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 200:
-        print("ERROR: expected a 200, got {} body {}".format(response.status, response_json(response)))
-        return 1
-    body = response_json(response)
-    payload = server.verify_access_token(body["access_token"], expected_audience="http://predbat.local:8199")
-    if not payload or payload["client_id"] != "client-a":
-        print("ERROR: the issued token does not verify")
-        return 1
-    # The code must be burnt so a stolen code cannot be replayed
-    if not server.authorization_codes[code]["used"]:
-        print("ERROR: the authorization code was not marked as used")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_replay(_my_predbat):
-    """Replaying a used code is refused and the code is discarded."""
-    print("Test: an authorization code cannot be replayed")
-    server = make_mcp_server()
-    verifier, challenge = pkce_pair()
-    code = store_auth_code(server, challenge=challenge, used=True)
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": verifier},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: expected an invalid_grant refusal, got {} {}".format(response.status, response_json(response)))
-        return 1
-    if code in server.authorization_codes:
-        print("ERROR: the replayed code should have been discarded")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_expired(_my_predbat):
-    """An expired code is refused and discarded."""
-    print("Test: an expired authorization code is refused")
-    server = make_mcp_server()
-    verifier, challenge = pkce_pair()
-    code = store_auth_code(server, challenge=challenge, expires_in_minutes=-1)
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": verifier},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: expected an invalid_grant refusal, got {}".format(response.status))
-        return 1
-    if code in server.authorization_codes:
-        print("ERROR: the expired code should have been discarded")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_binding(_my_predbat):
-    """A code is bound to the client and redirect URI it was issued for."""
-    print("Test: an authorization code is bound to its client and redirect URI")
-    server = make_mcp_server()
-    verifier, challenge = pkce_pair()
-
-    # Wrong client_id
-    code = store_auth_code(server, code="code-client", challenge=challenge)
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "other-client", "redirect_uri": "https://client/callback", "code_verifier": verifier},
-    )
-    response = run_async(server.oauth_token(request))
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: a code redeemed by the wrong client was accepted")
-        return 1
-
-    # Wrong redirect_uri
-    code = store_auth_code(server, code="code-redirect", challenge=challenge)
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://attacker/callback", "code_verifier": verifier},
-    )
-    response = run_async(server.oauth_token(request))
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: a code redeemed against the wrong redirect URI was accepted")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_pkce_enforced(_my_predbat):
-    """PKCE is enforced: a missing or mismatched verifier is refused."""
-    print("Test: PKCE verification is enforced on the code exchange")
-    server = make_mcp_server()
-    _verifier, challenge = pkce_pair()
-
-    # Missing verifier
-    code = store_auth_code(server, code="code-no-verifier", challenge=challenge)
-    request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback"})
-    response = run_async(server.oauth_token(request))
-    if response.status != 400 or response_json(response)["error"] != "invalid_request":
-        print("ERROR: a missing code_verifier was accepted")
-        return 1
-
-    # Wrong verifier
-    code = store_auth_code(server, code="code-bad-verifier", challenge=challenge)
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": "the-wrong-verifier"},
-    )
-    response = run_async(server.oauth_token(request))
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: a mismatched code_verifier was accepted")
-        return 1
-
-    # A code stored without a challenge at all is refused rather than skipping PKCE
-    code = store_auth_code(server, code="code-no-challenge", challenge=None)
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": code, "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": "anything"},
-    )
-    response = run_async(server.oauth_token(request))
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: a code without a PKCE challenge was accepted")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_unknown(_my_predbat):
-    """An unknown code is refused."""
-    print("Test: an unknown authorization code is refused")
-    server = make_mcp_server()
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={"grant_type": "authorization_code", "code": "never-issued", "client_id": "client-a", "redirect_uri": "https://client/callback", "code_verifier": "x"},
-    )
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 400 or response_json(response)["error"] != "invalid_grant":
-        print("ERROR: an unknown code was accepted")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_missing_params(_my_predbat):
-    """The code exchange requires the code, client and redirect URI."""
-    print("Test: the code exchange requires its mandatory parameters")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={"grant_type": "authorization_code", "client_id": "client-a"})
-    response = run_async(server.oauth_token(request))
-
-    if response.status != 400 or response_json(response)["error"] != "invalid_request":
-        print("ERROR: expected an invalid_request refusal, got {}".format(response.status))
-        return 1
-    return 0
-
-
-def _test_register_requires_json(_my_predbat):
-    """Dynamic client registration insists on a JSON body."""
-    print("Test: client registration requires a JSON content type")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", headers={"Content-Type": "text/plain"})
-    response = run_async(server.oauth_register(request))
-
-    if response.status != 400 or response_json(response)["error"] != "invalid_request":
-        print("ERROR: expected a 400 invalid_request, got {}".format(response.status))
-        return 1
-    return 0
-
-
-def _test_register_returns_credentials(_my_predbat):
-    """Registration returns a unique client id against the shared secret."""
-    print("Test: client registration returns credentials")
-    server = make_mcp_server()
-
-    request = MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={"client_name": "Test Client", "redirect_uris": ["https://client/callback"]})
-    response = run_async(server.oauth_register(request))
-
-    if response.status != 201:
-        print("ERROR: expected a 201, got {}".format(response.status))
-        return 1
-    body = response_json(response)
-    if not body["client_id"].startswith("mcp-client-"):
-        print("ERROR: unexpected client_id {}".format(body["client_id"]))
-        return 1
-    if body["client_secret"] != MCP_SECRET:
-        print("ERROR: registration should hand back the shared secret")
-        return 1
-    if body["client_name"] != "Test Client":
-        print("ERROR: the client name was not echoed back")
-        return 1
-
-    # Each registration must mint a distinct client id
-    second = run_async(server.oauth_register(MockRequest(method="POST", headers={"Content-Type": "application/json"}, json_data={})))
-    if response_json(second)["client_id"] == body["client_id"]:
-        print("ERROR: two registrations produced the same client id")
-        return 1
-    return 0
-
-
-def _test_metadata_endpoints(_my_predbat):
-    """The discovery endpoints advertise this host with CORS headers."""
-    print("Test: the OAuth discovery endpoints advertise the server")
-    server = make_mcp_server()
-    request = MockRequest(method="GET", host="predbat.local:8199")
-
-    for handler, required_keys in (
-        (server.oauth_metadata, ("issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint")),
-        (server.oauth_metadata_mcp, ("issuer", "authorization_endpoint", "token_endpoint")),
-        (server.oauth_protected_resource_metadata, ("resource", "authorization_servers", "scopes_supported")),
-    ):
-        response = run_async(handler(request))
-        if response.status != 200:
-            print("ERROR: {} returned {}".format(handler.__name__, response.status))
-            return 1
-        body = response_json(response)
-        for key in required_keys:
-            if key not in body:
-                print("ERROR: {} is missing {}".format(handler.__name__, key))
-                return 1
-        if response.headers.get("Access-Control-Allow-Origin") != "*":
-            print("ERROR: {} is missing CORS headers".format(handler.__name__))
-            return 1
-
-    # Only S256 may be advertised - plain is deprecated in OAuth 2.1
-    body = response_json(run_async(server.oauth_metadata(request)))
-    if body["code_challenge_methods_supported"] != ["S256"]:
-        print("ERROR: expected only S256 to be advertised, got {}".format(body["code_challenge_methods_supported"]))
-        return 1
-    if body["issuer"] != "http://predbat.local:8199":
-        print("ERROR: expected the request host as the issuer, got {}".format(body["issuer"]))
-        return 1
-    return 0
-
-
-def _test_options_and_static_routes(_my_predbat):
-    """CORS preflight, the favicon and the catch-all route behave as expected."""
-    print("Test: preflight, favicon and unmatched routes")
-    server = make_mcp_server()
-
-    response = run_async(server.handle_options(MockRequest(method="OPTIONS")))
-    if response.status != 200 or response.headers.get("Access-Control-Allow-Origin") != "*":
-        print("ERROR: the CORS preflight response is wrong")
-        return 1
-    if "Authorization" not in response.headers.get("Access-Control-Allow-Headers", ""):
-        print("ERROR: the preflight must allow the Authorization header")
-        return 1
-
-    response = run_async(server.favicon(MockRequest(method="GET")))
-    if response.status != 200 or response.content_type != "image/svg+xml":
-        print("ERROR: unexpected favicon response")
-        return 1
-
-    response = run_async(server.default_route(MockRequest(method="GET", path="/nope")))
-    if response.status != 404:
-        print("ERROR: expected a 404 from the catch-all route, got {}".format(response.status))
-        return 1
-    return 0
-
-
-def _install_mcp_server_stub(server):
-    """Attach a stub MCP server that records the requests it handled."""
-    handled = []
-
-    class StubMCPServer:
-        """Records handled requests in place of the real MCP protocol handler."""
-
-        async def handle_mcp_request(self, request, mcp_server):
-            """Record the request and return a fixed JSON-RPC result."""
-            handled.append(request)
-            return {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
-
-    server.mcp_server = StubMCPServer()
-    return handled
-
-
-def _test_mcp_endpoints_require_bearer(_my_predbat):
-    """Both MCP endpoints refuse a request with no bearer token and advertise how to get one."""
-    print("Test: the MCP endpoints require a bearer token")
-    server = make_mcp_server()
-    handled = _install_mcp_server_stub(server)
-
-    for handler in (server.html_mcp_get, server.html_mcp_post):
-        for headers in ({}, {"Authorization": "Basic abc"}):
-            response = run_async(handler(MockRequest(method="POST", headers=headers)))
-            if response.status != 401:
-                print("ERROR: {} returned {} for headers {}".format(handler.__name__, response.status, headers))
-                return 1
-            www_auth = response.headers.get("WWW-Authenticate", "")
-            if "resource_metadata" not in www_auth:
-                print("ERROR: {} must advertise resource_metadata, got {!r}".format(handler.__name__, www_auth))
-                return 1
-    if handled:
-        print("ERROR: an unauthenticated request reached the MCP handler")
-        return 1
-    return 0
-
-
-def _test_mcp_endpoints_reject_bad_token(_my_predbat):
-    """A bearer token that is neither a valid JWT nor the shared secret is refused."""
-    print("Test: the MCP endpoints refuse an invalid bearer token")
-    server = make_mcp_server()
-    handled = _install_mcp_server_stub(server)
-    attacker = make_mcp_server(secret="attacker-secret")
-    forged = attacker.generate_access_token("client-a", resource="http://predbat.local:8199")
-
-    for handler in (server.html_mcp_get, server.html_mcp_post):
-        for token in ("garbage", forged, MCP_SECRET + "x"):
-            response = run_async(handler(MockRequest(method="POST", headers={"Authorization": "Bearer " + token})))
-            if response.status != 401:
-                print("ERROR: {} accepted token {!r} with status {}".format(handler.__name__, token[:20], response.status))
-                return 1
-            if "invalid_token" not in response.headers.get("WWW-Authenticate", ""):
-                print("ERROR: {} did not report an invalid token".format(handler.__name__))
-                return 1
-    if handled:
-        print("ERROR: an invalid token reached the MCP handler")
-        return 1
-    return 0
-
-
-def _test_mcp_endpoints_accept_oauth_token(_my_predbat):
-    """A valid OAuth token reaches the MCP handler."""
-    print("Test: the MCP endpoints accept a valid OAuth token")
-    server = make_mcp_server()
-    handled = _install_mcp_server_stub(server)
-    token = server.generate_access_token("client-a", resource="http://predbat.local:8199")
-
-    response = run_async(server.html_mcp_post(MockRequest(method="POST", headers={"Authorization": "Bearer " + token})))
-
-    if response.status != 200:
-        print("ERROR: expected a 200, got {}".format(response.status))
-        return 1
-    if len(handled) != 1:
-        print("ERROR: expected the request to reach the MCP handler")
-        return 1
-    if response_json(response)["result"] != {"ok": True}:
-        print("ERROR: the handler result was not returned")
-        return 1
-    return 0
-
-
-def _test_mcp_endpoints_accept_legacy_secret(_my_predbat):
-    """The shared secret is still accepted directly as a bearer token."""
-    print("Test: the MCP endpoints accept the legacy shared secret")
-    server = make_mcp_server()
-    handled = _install_mcp_server_stub(server)
-
-    response = run_async(server.html_mcp_get(MockRequest(method="POST", headers={"Authorization": "Bearer " + MCP_SECRET})))
-
-    if response.status != 200:
-        print("ERROR: expected a 200, got {}".format(response.status))
-        return 1
-    if len(handled) != 1:
-        print("ERROR: the legacy secret did not reach the MCP handler")
-        return 1
-    return 0
-
-
-def _test_mcp_endpoints_unavailable(_my_predbat):
-    """With no MCP server running the endpoints report 503 before checking credentials."""
-    print("Test: the MCP endpoints report an unavailable server")
-    server = make_mcp_server()
-    server.mcp_server = None
-
-    for handler in (server.html_mcp_get, server.html_mcp_post):
-        response = run_async(handler(MockRequest(method="POST", headers={"Authorization": "Bearer " + MCP_SECRET})))
-        if response.status != 503:
-            print("ERROR: {} returned {} instead of 503".format(handler.__name__, response.status))
-            return 1
-    return 0
-
-
-def _test_mcp_endpoints_handler_error(_my_predbat):
-    """A failure inside the MCP handler becomes a JSON-RPC internal error, not a stack trace."""
-    print("Test: the MCP endpoints wrap handler failures")
-    server = make_mcp_server()
-
-    class FailingMCPServer:
-        """Raises from the request handler to exercise the error path."""
-
-        async def handle_mcp_request(self, request, mcp_server):
-            """Fail as a broken tool implementation would."""
-            raise RuntimeError("tool exploded")
-
-    server.mcp_server = FailingMCPServer()
-
-    response = run_async(server.html_mcp_post(MockRequest(method="POST", headers={"Authorization": "Bearer " + MCP_SECRET})))
-
-    if response.status != 500:
-        print("ERROR: expected a 500, got {}".format(response.status))
-        return 1
-    body = response_json(response)
-    if body["error"]["code"] != -32603:
-        print("ERROR: expected the JSON-RPC internal error code, got {}".format(body))
-        return 1
-    return 0
-
-
-def _test_endpoint_error_handling(_my_predbat):
-    """A body that cannot be read becomes a 500 error response, not an unhandled exception.
-
-    These endpoints are reachable before authentication, so an unhandled exception here would be
-    an availability problem rather than just an untidy response.
-    """
-    print("Test: the OAuth endpoints handle a broken request body")
-    server = make_mcp_server()
-
-    response = run_async(server.oauth_token(MockRequest(method="POST", headers={"Content-Type": "application/json"}, raise_on_body=True)))
-    if response.status != 500 or response_json(response)["error"] != "server_error":
-        print("ERROR: the token endpoint did not report a server error, got {}".format(response.status))
-        return 1
-
-    response = run_async(server.oauth_register(MockRequest(method="POST", headers={"Content-Type": "application/json"}, raise_on_body=True)))
-    if response.status != 500 or response_json(response)["error"] != "server_error":
-        print("ERROR: the register endpoint did not report a server error, got {}".format(response.status))
-        return 1
-
-    response = run_async(server.oauth_authorize(MockRequest(method="POST", raise_on_body=True)))
-    if response.status != 500:
-        print("ERROR: the authorize endpoint did not report a server error, got {}".format(response.status))
-        return 1
-    if server.authorization_codes:
-        print("ERROR: a failed authorize request issued a code")
-        return 1
-    return 0
-
-
-def _test_token_authorization_code_scope(_my_predbat):
-    """A scope requested at the code exchange is carried into the issued token."""
-    print("Test: the code exchange honours a requested scope")
-    server = make_mcp_server()
-    verifier, challenge = pkce_pair()
-    code = store_auth_code(server, code="code-scoped", challenge=challenge)
-
-    request = MockRequest(
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        json_data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": "client-a",
-            "redirect_uri": "https://client/callback",
-            "code_verifier": verifier,
-            "resource": "http://predbat.local:8199",
-            "scope": "mcp:read mcp:write",
-        },
-    )
-    response = run_async(server.oauth_token(request))
-
-    body = response_json(response)
-    if body["scope"] != "mcp:read mcp:write":
-        print("ERROR: expected the requested scope back, got {}".format(body["scope"]))
-        return 1
-    payload = server.verify_access_token(body["access_token"], expected_audience="http://predbat.local:8199")
-    if payload["scope"] != "mcp:read mcp:write":
-        print("ERROR: the token does not carry the requested scope, got {}".format(payload["scope"]))
-        return 1
-    return 0
-
-
-def _test_mcp_get_oauth_and_errors(_my_predbat):
-    """The GET endpoint accepts an OAuth token and wraps handler failures."""
-    print("Test: the MCP GET endpoint with an OAuth token and a failing handler")
-    server = make_mcp_server()
-    handled = _install_mcp_server_stub(server)
-    token = server.generate_access_token("client-a", resource="http://predbat.local:8199")
-
-    response = run_async(server.html_mcp_get(MockRequest(method="POST", headers={"Authorization": "Bearer " + token})))
-    if response.status != 200 or len(handled) != 1:
-        print("ERROR: a valid OAuth token did not reach the GET handler")
-        return 1
-
-    class FailingMCPServer:
-        """Raises from the request handler to exercise the GET error path."""
-
-        async def handle_mcp_request(self, request, mcp_server):
-            """Fail as a broken tool implementation would."""
-            raise RuntimeError("tool exploded")
-
-    server.mcp_server = FailingMCPServer()
-    response = run_async(server.html_mcp_get(MockRequest(method="POST", headers={"Authorization": "Bearer " + MCP_SECRET})))
-    if response.status != 500 or response_json(response)["error"]["code"] != -32603:
-        print("ERROR: the GET endpoint did not wrap the handler failure, got {}".format(response.status))
-        return 1
-    return 0
-
-
-class StubRunner:
-    """Stands in for aiohttp's AppRunner without binding a socket."""
-
-    def __init__(self, app):
-        """Record the application whose routes are being served."""
-        self.app = app
-        self.cleaned_up = False
-
-    async def setup(self):
-        """Pretend the runner is ready."""
-
-    async def cleanup(self):
-        """Record that the runner was torn down."""
-        self.cleaned_up = True
-
-
-class StubSite:
-    """Stands in for aiohttp's TCPSite without listening on a port."""
-
-    def __init__(self, runner, host, port):
-        """Record the bind parameters."""
-        self.runner = runner
-        self.host = host
-        self.port = port
-
-    async def start(self):
-        """Pretend the site is listening."""
-
-
-def run_server_start(server):
-    """Run the server's start() against stubbed aiohttp plumbing, returning the runners created."""
-    import web_mcp
-
-    runners = []
-
-    def make_runner(app):
-        """Build a stub runner and remember it for assertions."""
-        runner = StubRunner(app)
-        runners.append(runner)
-        return runner
-
-    async def instant_sleep(_seconds):
-        """Skip the keep-alive delay so the test does not wait on real time."""
-
-    real_app_runner = web_mcp.web.AppRunner
-    real_tcp_site = web_mcp.web.TCPSite
-    real_sleep = web_mcp.asyncio.sleep
-    web_mcp.web.AppRunner = make_runner
-    web_mcp.web.TCPSite = StubSite
-    web_mcp.asyncio.sleep = instant_sleep
-    try:
-        run_async(server.start())
-    finally:
-        web_mcp.web.AppRunner = real_app_runner
-        web_mcp.web.TCPSite = real_tcp_site
-        web_mcp.asyncio.sleep = real_sleep
-    return runners
-
-
-EXPECTED_MCP_ROUTES = (
-    "/.well-known/oauth-authorization-server",
-    "/.well-known/oauth-protected-resource",
-    "/oauth/authorize",
-    "/oauth/token",
-    "/oauth/register",
-    "/mcp",
-    "/",
-    "/favicon.ico",
+import os
+import tempfile
+from datetime import datetime, timedelta
+
+import agent_tools
+import web
+from aiohttp import web as aiohttp_web
+from aiohttp.test_utils import make_mocked_request
+from web import WebInterface
+from web_mcp import (
+    PredbatMCPServer,
+    MCPServerWrapper,
+    LOG_FILTER_TYPES,
+    MCP_LOG_DEFAULT_LINES,
+    MCP_LOG_MAX_LINES,
+    MCP_LOG_MAX_LINE_CHARS,
+    MCP_LOG_DEFAULT_MAX_BYTES,
+    parse_bool_argument,
+    json_safe_value,
+    summarise_state_value,
+    measure_state_value,
+    MCP_STATE_DEFAULT_MAX_BYTES,
+    MCP_STATE_LARGE_COLLECTION,
+    MCP_STATE_MAX_BYTES_LIMIT,
+    MCPArgumentError,
+    parse_number_argument,
+    compile_filter_argument,
 )
+from utils import mask_secret_args, is_secret_key, is_debug_excluded_key, read_predbat_log, classify_log_line, log_line_included, parse_log_timestamp
 
 
-def _test_server_start_registers_routes(_my_predbat):
-    """Starting the server wires every documented endpoint onto the aiohttp application.
+class FakeRequest:
+    """A minimal aiohttp-request stand-in exposing only the query string a handler reads."""
 
-    The routing table is the only place the OAuth endpoints are bound to their handlers, so a
-    typo there would silently disable authentication discovery without any test noticing.
+    def __init__(self, query=None):
+        """Store the query string a handler will read."""
+        self.query = query or {}
+
+
+def _stamp(minutes_ago):
+    """Return a predbat.log-style timestamp prefix for a line written N minutes ago."""
+    return "{}: ".format(datetime.now() - timedelta(minutes=minutes_ago))
+
+
+def _sample_log():
+    """Return a small synthetic predbat.log, newest line last, spanning three days."""
+    lines = [
+        _stamp(60 * 48) + "Info: Predbat starting up two days ago",
+        _stamp(60 * 48) + "Warn: An old warning from before the window",
+        _stamp(60 * 3) + "Info: Fetched Octopus rates",
+        _stamp(60 * 2) + "Warn: battery_rate_max_charge clamped to 3.0",
+        _stamp(60) + "Error: Failed to write charge window to inverter",
+        "Traceback (most recent call last):",  # a continuation line, written without its own stamp
+        _stamp(30) + "Fetched 48 slots of solar forecast",
+        _stamp(10) + "Warn: iboost target not reached",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _make_mcp(my_predbat):
+    """Build an MCPServerWrapper bound to my_predbat without starting any server."""
+    return MCPServerWrapper(my_predbat, log_func=my_predbat.log)
+
+
+def _make_web(my_predbat):
+    """Build a minimal WebInterface bound to my_predbat, bypassing ComponentBase.__init__
+    (which would stand up the real aiohttp app) - same pattern as test_web_debug_history_routes.py.
     """
-    print("Test: starting the MCP server registers its routes")
-    server = make_mcp_server()
-
-    heartbeats = []
-
-    def record_heartbeat():
-        """Record a liveness heartbeat and ask the keep-alive loop to stop."""
-        heartbeats.append(True)
-        server.api_stop = True
-
-    server.update_success_timestamp = record_heartbeat
-    runners = run_server_start(server)
-
-    if not runners:
-        print("ERROR: the server never created a runner")
-        return 1
-    if not heartbeats:
-        print("ERROR: the keep-alive loop never reported liveness")
-        return 1
-    if not runners[0].cleaned_up:
-        print("ERROR: the runner was not cleaned up on shutdown")
-        return 1
-    if server.api_started:
-        print("ERROR: api_started should be cleared once the server stops")
-        return 1
-
-    paths = {resource.canonical for resource in runners[0].app.router.resources()}
-    missing = [route for route in EXPECTED_MCP_ROUTES if route not in paths]
-    if missing:
-        print("ERROR: routes not registered: {}".format(missing))
-        return 1
-
-    # The MCP server itself must have been created and then stopped again
-    if server.mcp_server is None or server.mcp_server.is_running:
-        print("ERROR: the MCP protocol server was not started and stopped cleanly")
-        return 1
-    return 0
+    w = WebInterface.__new__(WebInterface)
+    w.base = my_predbat
+    w.log = my_predbat.log
+    w.prefix = my_predbat.prefix
+    return w
 
 
-def _test_server_start_disabled(_my_predbat):
-    """A disabled MCP server does nothing when started."""
-    print("Test: a disabled MCP server does not start")
-    server = make_mcp_server()
-    server.mcp_enable = False
-
-    run_async(server.start())
-
-    if server.mcp_server is not None:
-        print("ERROR: a disabled server should not create an MCP protocol server")
-        return 1
-    if server.api_started:
-        print("ERROR: a disabled server should not report itself as started")
-        return 1
-    return 0
+def _call_tool(mcp, name, arguments=None):
+    """Run one tool through the MCP tools/call path and return the decoded JSON result."""
+    result = asyncio.run(mcp._handle_tools_call({"name": name, "arguments": arguments or {}}))
+    return json.loads(result["content"][0]["text"]), result.get("isError", False)
 
 
-def make_wrapper():
-    """Build an MCPServerWrapper over a mock base."""
-    base = MockMCPBase()
-    wrapper = MCPServerWrapper(base, log_func=base.log)
-    return wrapper, base
+def test_mask_secret_args(my_predbat):
+    """Credential-like apps.yaml keys are redacted, including the *_secret and *_token names
+    the original "_key"/"password" match missed (#4768), while timestamps stay readable.
+    """
+    failed = False
+    print("**** Testing mask_secret_args key matching ****")
 
-
-def _test_wrapper_lifecycle(_my_predbat):
-    """The wrapper tracks its running state across start and stop."""
-    print("Test: the MCP server wrapper start/stop lifecycle")
-    wrapper, _base = make_wrapper()
-
-    if wrapper.is_running:
-        print("ERROR: the wrapper should not start out running")
-        return 1
-    run_async(wrapper.start())
-    if not wrapper.is_running:
-        print("ERROR: start() did not mark the wrapper as running")
-        return 1
-    run_async(wrapper.stop())
-    if wrapper.is_running:
-        print("ERROR: stop() did not clear the running flag")
-        return 1
-    return 0
-
-
-def _test_wrapper_rejects_non_post(_my_predbat):
-    """Only POST carries JSON-RPC; a GET is answered with an invalid request error."""
-    print("Test: the wrapper refuses non-POST JSON-RPC requests")
-    wrapper, _base = make_wrapper()
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="GET"), wrapper))
-
-    if result["error"]["code"] != -32600:
-        print("ERROR: expected an invalid request error, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_parse_error(_my_predbat):
-    """A body that is not JSON produces a JSON-RPC parse error."""
-    print("Test: the wrapper reports a parse error for a non-JSON body")
-    wrapper, _base = make_wrapper()
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST"), wrapper))
-
-    if result["error"]["code"] != -32700:
-        print("ERROR: expected a parse error, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_method_routing(_my_predbat):
-    """initialize, tools/list and notifications route correctly; unknown methods 404."""
-    print("Test: the wrapper routes JSON-RPC methods")
-    wrapper, _base = make_wrapper()
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 1, "method": "initialize"}), wrapper))
-    if result["result"]["serverInfo"]["name"] != "Predbat MCP Server":
-        print("ERROR: initialize did not return the server info, got {}".format(result))
-        return 1
-    if result["id"] != 1:
-        print("ERROR: the request id was not echoed back")
-        return 1
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), wrapper))
-    tool_names = [tool["name"] for tool in result["result"]["tools"]]
-    for expected in ("get_plan", "get_status", "get_config", "get_entities", "set_config", "set_plan_override"):
-        if expected not in tool_names:
-            print("ERROR: tools/list is missing {}".format(expected))
-            return 1
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 3, "method": "notifications/initialized"}), wrapper))
-    if result.get("result") != {}:
-        print("ERROR: a notification should return an empty result, got {}".format(result))
-        return 1
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 4, "method": "no/such/method"}), wrapper))
-    if result["error"]["code"] != -32601:
-        print("ERROR: expected a method not found error, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_get_plan(_my_predbat):
-    """get_plan returns the stored raw plan, and reports cleanly when there is none."""
-    print("Test: the get_plan tool")
-    wrapper, base = make_wrapper()
-
-    result = run_async(wrapper._execute_get_plan({}))
-    if result["success"] or result["data"] is not None:
-        print("ERROR: expected a failure when no plan is available, got {}".format(result))
-        return 1
-
-    base.states["predbat.plan_html"] = {"state": "on", "attributes": {"raw": [{"minute": 0, "soc": 50}]}}
-    result = run_async(wrapper._execute_get_plan({}))
-    if not result["success"] or result["data"] != [{"minute": 0, "soc": 50}]:
-        print("ERROR: expected the raw plan data, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_get_entities_filter(_my_predbat):
-    """get_entities returns entity metadata and honours the regex filter."""
-    print("Test: the get_entities tool and its filter")
-    wrapper, base = make_wrapper()
-    base.dashboard_values = [
-        {"entity_id": "predbat.soc_kw", "state": "5.0", "friendly_name": "SOC", "unit_of_measurement": "kWh"},
-        {"entity_id": "predbat.status", "state": "Idle", "friendly_name": "Status"},
-        "predbat.plain_string",
-    ]
-
-    result = run_async(wrapper._execute_get_entities({}))
-    if not result["success"] or len(result["data"]) != 3:
-        print("ERROR: expected all three entities, got {}".format(result))
-        return 1
-    if result["data"][0].get("unit_of_measurement") != "kWh":
-        print("ERROR: the unit was not carried through, got {}".format(result["data"][0]))
-        return 1
-
-    result = run_async(wrapper._execute_get_entities({"filter": "soc"}))
-    if len(result["data"]) != 1 or result["data"][0]["entity_id"] != "predbat.soc_kw":
-        print("ERROR: the filter did not narrow the results, got {}".format(result["data"]))
-        return 1
-
-    # An invalid regex must be reported rather than raising out of the tool
-    result = run_async(wrapper._execute_get_entities({"filter": "["}))
-    if result["success"]:
-        print("ERROR: expected an invalid regex to be reported as a failure")
-        return 1
-    return 0
-
-
-def _test_wrapper_get_apps(_my_predbat):
-    """get_apps returns the apps.yaml arguments and honours the regex filter."""
-    print("Test: the get_apps tool and its filter")
-    wrapper, base = make_wrapper()
-    base.args = {"battery_size": 9.5, "battery_rate_max": 3.6, "inverter_type": "GE"}
-
-    result = run_async(wrapper._execute_get_apps({}))
-    if not result["success"] or len(result["data"]) != 3:
-        print("ERROR: expected all three settings, got {}".format(result))
-        return 1
-
-    result = run_async(wrapper._execute_get_apps({"filter": "^battery"}))
-    if sorted(result["data"].keys()) != ["battery_rate_max", "battery_size"]:
-        print("ERROR: the filter did not narrow the settings, got {}".format(result["data"]))
-        return 1
-
-    result = run_async(wrapper._execute_get_apps({"filter": "("}))
-    if result["success"]:
-        print("ERROR: an invalid regex should be reported as a failure")
-        return 1
-    return 0
-
-
-def _test_wrapper_get_config(_my_predbat):
-    """get_config returns the live config items and honours the entity filter."""
-    print("Test: the get_config tool and its filter")
-    wrapper, base = make_wrapper()
-    base.CONFIG_ITEMS = [
-        {"name": "mode", "entity": "select.predbat_mode", "value": "Control charge"},
-        {"name": "battery_size", "entity": "input_number.predbat_battery_size", "value": 9.5},
-        {"name": "no_entity_item", "value": 1},
-    ]
-
-    result = run_async(wrapper._execute_get_config({}))
-    if not result["success"] or len(result["data"]) != 3:
-        print("ERROR: expected all config items, got {}".format(result))
-        return 1
-
-    result = run_async(wrapper._execute_get_config({"filter": "battery"}))
-    if len(result["data"]) != 1 or result["data"][0]["name"] != "battery_size":
-        print("ERROR: the filter did not narrow the config items, got {}".format(result["data"]))
-        return 1
-
-    # Items with no entity are skipped by a filtered query rather than raising
-    result = run_async(wrapper._execute_get_config({"filter": "no_entity_item"}))
-    if result["data"]:
-        print("ERROR: an item with no entity should not match an entity filter")
-        return 1
-
-    result = run_async(wrapper._execute_get_config({"filter": "("}))
-    if result["success"]:
-        print("ERROR: an invalid regex should be reported as a failure")
-        return 1
-    return 0
-
-
-def _test_wrapper_get_status(_my_predbat):
-    """get_status reports the live system state including a derived SoC percentage."""
-    print("Test: the get_status tool")
-    wrapper, base = make_wrapper()
-    base.ha_config = {"mode": "Control charge", "num_cars": 1, "debug_enable": False, "set_read_only": True}
-    base.states["predbat.status"] = {"state": "Idle", "attributes": {"last_updated": "2026-01-15T10:00:00+00:00"}}
-
-    result = run_async(wrapper._execute_get_status({}))
-
-    if not result["success"]:
-        print("ERROR: get_status failed: {}".format(result))
-        return 1
-    data = result["data"]
-    if data["status"] != "Idle":
-        print("ERROR: expected the status entity state, got {}".format(data["status"]))
-        return 1
-    # 5.0 kWh of a 10.0 kWh battery
-    if data["soc_percent"] != 50:
-        print("ERROR: expected 50%, got {}".format(data["soc_percent"]))
-        return 1
-    if data["mode"] != "Control charge" or data["num_cars"] != 1:
-        print("ERROR: the Home Assistant config was not reported, got {}".format(data))
-        return 1
-    if data["read_only"] is not True:
-        print("ERROR: read-only mode must be reported, got {}".format(data["read_only"]))
-        return 1
-    for key in ("grid_power", "battery_power", "pv_power", "load_power", "is_running", "reserve", "forecast_minutes"):
-        if key not in data:
-            print("ERROR: status is missing {}".format(key))
-            return 1
-
-    # A base that raises is reported as a tool failure rather than propagating
-    base.states = None
-    result = run_async(wrapper._execute_get_status({}))
-    if result["success"]:
-        print("ERROR: expected a failure to be reported")
-        return 1
-    return 0
-
-
-def _test_wrapper_set_config(_my_predbat):
-    """set_config writes through to Home Assistant and validates its arguments."""
-    print("Test: the set_config tool")
-    wrapper, base = make_wrapper()
-    # set_config refuses a name it cannot find in CONFIG_ITEMS (v8.54.0), so the setting under
-    # test has to exist - writing into the void used to be reported as success.
-    base.CONFIG_ITEMS = [{"name": "mode", "entity": "select.predbat_mode", "value": "Control charge"}]
-
-    result = run_async(wrapper._execute_set_config({"entity_id": "select.predbat_mode", "value": "Monitor"}))
-    if not result["success"]:
-        print("ERROR: the write failed: {}".format(result))
-        return 1
-    if base.ha_interface.writes != [("select.predbat_mode", "Monitor")]:
-        print("ERROR: the configuration write did not reach Home Assistant, got {}".format(base.ha_interface.writes))
-        return 1
-
-    # Both arguments are required, and nothing is written when one is missing
-    for arguments in ({"entity_id": "select.predbat_mode"}, {"value": "Monitor"}, {}):
-        result = run_async(wrapper._execute_set_config(arguments))
-        if result["success"]:
-            print("ERROR: expected a failure for arguments {}".format(arguments))
-            return 1
-    if len(base.ha_interface.writes) != 1:
-        print("ERROR: an incomplete request performed a write")
-        return 1
-
-    # A backend failure is reported rather than raised
-    base.ha_interface.fail = True
-    result = run_async(wrapper._execute_set_config({"entity_id": "select.predbat_mode", "value": "Monitor"}))
-    if result["success"] or "home assistant unavailable" not in result["error"]:
-        print("ERROR: expected the backend failure to be reported, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_set_plan_override(_my_predbat):
-    """set_plan_override maps each action onto the matching manual selection."""
-    print("Test: the set_plan_override tool")
-
-    actions = {
-        "demand": "manual_demand",
-        "charge": "manual_charge",
-        "export": "manual_export",
-        "freeze_charge": "manual_freeze_charge",
-        "freeze_export": "manual_freeze_export",
+    args = {
+        "ha_key": "ha-key-value",
+        "octopus_api_key": "octopus-key-value",
+        "deye_password": "deye-password-value",
+        "sigenergy_app_secret": "sigenergy-secret-value",
+        "solis_api_secret": "solis-secret-value",
+        "solis_access_token": "solis-token-value",
+        "gateway_mqtt_token": "mqtt-token-value",
+        "mcp_secret": "mcp-secret-value",
+        "solis_token_expires_at": "2026-08-27T09:00:00",
+        "fox_token_expires_at": "2026-08-27T09:00:00",
+        "partner_token_expiry": "2026-08-27T09:00:00",
+        "session_token_expires": "2026-08-27T09:00:00",
+        "auth_token_expiration": "2026-08-27T09:00:00",
+        "client_token_birth": 1756280000.0,
+        "battery_rate_max_charge": 3.0,
+        "inverter_type": "GE",
+        "keyword_notes": "not a credential",
     }
-    for action, config_item in actions.items():
-        wrapper, base = make_wrapper()
-        result = run_async(wrapper._execute_set_plan_override({"action": action, "time": "12:00"}))
-        if not result["success"]:
-            print("ERROR: action {} failed: {}".format(action, result))
-            return 1
-        if len(base.manual_selects) != 1 or base.manual_selects[0][0] != config_item:
-            print("ERROR: action {} selected {}".format(action, base.manual_selects))
-            return 1
-        if base.manual_selects[0][1] != "12:00:00":
-            print("ERROR: expected a 12:00:00 slot, got {}".format(base.manual_selects[0][1]))
-            return 1
-        # Applying an override must invalidate the plan so it gets recomputed
-        if not base.update_pending or base.plan_valid:
-            print("ERROR: action {} did not request a plan refresh".format(action))
-            return 1
+    masked = mask_secret_args(args)
 
-    # An action with spaces and mixed case is normalised
-    wrapper, base = make_wrapper()
-    result = run_async(wrapper._execute_set_plan_override({"action": "Freeze Charge", "time": "12:00"}))
-    if not result["success"] or base.manual_selects[0][0] != "manual_freeze_charge":
-        print("ERROR: the action was not normalised, got {}".format(base.manual_selects))
-        return 1
+    for key in ["ha_key", "octopus_api_key", "deye_password", "sigenergy_app_secret", "solis_api_secret", "solis_access_token", "gateway_mqtt_token", "mcp_secret"]:
+        if masked.get(key) != "xxx":
+            print("  ERROR: expected {} to be masked, got {!r}".format(key, masked.get(key)))
+            failed = True
 
-    # Clear selects and then deselects the slot
-    wrapper, base = make_wrapper()
-    result = run_async(wrapper._execute_set_plan_override({"action": "clear", "time": "12:00"}))
-    if not result["success"]:
-        print("ERROR: the clear action failed: {}".format(result))
-        return 1
-    if base.manual_selects != [("manual_demand", "12:00:00"), ("manual_demand", "[12:00:00]")]:
-        print("ERROR: unexpected clear sequence {}".format(base.manual_selects))
-        return 1
-    return 0
+    # Timing metadata about a token is not itself a secret, and is what you want to see when a
+    # cloud integration stops working - Copilot review of PR #4775
+    for key in ["solis_token_expires_at", "fox_token_expires_at", "partner_token_expiry", "session_token_expires", "auth_token_expiration", "client_token_birth", "battery_rate_max_charge", "inverter_type", "keyword_notes"]:
+        if masked.get(key) != args[key]:
+            print("  ERROR: expected {} to be left alone, got {!r}".format(key, masked.get(key)))
+            failed = True
+
+    # The original dict must not be touched - it is the live self.args
+    if args["ha_key"] != "ha-key-value":
+        print("  ERROR: mask_secret_args mutated the caller's dict")
+        failed = True
+
+    if is_secret_key("SOLIS_API_SECRET") is not True:
+        print("  ERROR: is_secret_key should be case-insensitive")
+        failed = True
+    if is_secret_key("forecast_hours") is not False:
+        print("  ERROR: is_secret_key matched a non-credential key")
+        failed = True
+
+    return failed
 
 
-def _test_wrapper_set_plan_override_rejections(_my_predbat):
-    """set_plan_override refuses missing, unparseable, distant and unknown requests."""
-    print("Test: the set_plan_override tool refuses invalid requests")
+def test_read_predbat_log(my_predbat):
+    """read_predbat_log() concatenates the rotated log ahead of the live one, and copes with
+    either or both files being absent.
+    """
+    failed = False
+    print("**** Testing read_predbat_log ****")
+
+    tmpdir = tempfile.mkdtemp(prefix="predbat_test_mcp_log_")
+    live = os.path.join(tmpdir, "predbat.log")
+    prev = os.path.join(tmpdir, "predbat.1.log")
+
+    if read_predbat_log(logfile=live, logfile_prev=prev) != "":
+        print("  ERROR: expected an empty string when neither log file exists")
+        failed = True
+
+    with open(live, "w") as f:
+        f.write("newer\n")
+    if read_predbat_log(logfile=live, logfile_prev=prev) != "newer\n":
+        print("  ERROR: expected only the live log when no rotated log exists")
+        failed = True
+
+    with open(prev, "w") as f:
+        f.write("older\n")
+    data = read_predbat_log(logfile=live, logfile_prev=prev)
+    if data != "older\n\nnewer\n":
+        print("  ERROR: expected the rotated log first, got {!r}".format(data))
+        failed = True
+
+    return failed
+
+
+def test_log_filter_helpers(my_predbat):
+    """The severity classifier and per-view include rules keep the semantics the web log view
+    had inline before they were shared with the MCP get_log tool.
+    """
+    failed = False
+    print("**** Testing log filter helpers ****")
 
     cases = [
-        ({}, "missing arguments"),
-        ({"action": "charge"}, "missing time"),
-        ({"time": "12:00"}, "missing action"),
-        ({"action": "charge", "time": "not a time"}, "unparseable time"),
-        ({"action": "charge", "time": "09:00"}, "more than 17 hours ahead"),
-        ({"action": "explode", "time": "12:00"}, "unknown action"),
+        ("2026-08-27 09:00:00.000000: Error: something broke", "error"),
+        ("2026-08-27 09:00:00.000000: Warn: something odd", "warning"),
+        ("2026-08-27 09:00:00.000000: Info: something happened", "info"),
+        ("2026-08-27 09:00:00.000000: just a line", "log"),
     ]
+    for line, expected in cases:
+        line_type = classify_log_line(line)
+        if line_type != expected:
+            print("  ERROR: expected {!r} to classify as {}, got {}".format(line, expected, line_type))
+            failed = True
 
-    for arguments, description in cases:
-        wrapper, base = make_wrapper()
-        result = run_async(wrapper._execute_set_plan_override(arguments))
-        if result["success"]:
-            print("ERROR: {} should have been refused, got {}".format(description, result))
-            return 1
-        if base.manual_selects:
-            print("ERROR: {} still applied an override: {}".format(description, base.manual_selects))
-            return 1
-        if base.update_pending:
-            print("ERROR: {} still requested a plan refresh".format(description))
-            return 1
-    return 0
+    # Errors show everywhere; warnings on all/warnings; info on all/info; plain lines on all only
+    expected_matrix = {
+        ("error", "all"): True,
+        ("error", "info"): True,
+        ("error", "warnings"): True,
+        ("error", "errors"): True,
+        ("warning", "all"): True,
+        ("warning", "warnings"): True,
+        ("warning", "info"): False,
+        ("warning", "errors"): False,
+        ("info", "all"): True,
+        ("info", "info"): True,
+        ("info", "warnings"): False,
+        ("info", "errors"): False,
+        ("log", "all"): True,
+        ("log", "info"): False,
+        ("log", "warnings"): False,
+        ("log", "errors"): False,
+    }
+    for (line_type, filter_type), expected in expected_matrix.items():
+        got = log_line_included(line_type, filter_type)
+        if got != expected:
+            print("  ERROR: log_line_included({}, {}) expected {}, got {}".format(line_type, filter_type, expected, got))
+            failed = True
 
+    stamped = parse_log_timestamp("2026-08-27 09:15:30.123456: Info: hello")
+    if stamped != datetime(2026, 8, 27, 9, 15, 30, 123456):
+        print("  ERROR: failed to parse a microsecond timestamp, got {!r}".format(stamped))
+        failed = True
 
-def _test_wrapper_tools_call_dispatch(_my_predbat):
-    """tools/call routes to each tool and wraps the result in MCP content."""
-    print("Test: tools/call dispatches to every tool")
-    wrapper, base = make_wrapper()
-    base.args = {"battery_size": 9.5}
-    base.CONFIG_ITEMS = [{"name": "mode", "entity": "select.predbat_mode"}]
-    base.states["predbat.plan_html"] = {"state": "on", "attributes": {"raw": [{"minute": 0}]}}
+    # str(datetime) drops ".000000", so whole-second lines are 19 characters not 26
+    stamped = parse_log_timestamp("2026-08-27 09:15:30: Info: hello")
+    if stamped != datetime(2026, 8, 27, 9, 15, 30):
+        print("  ERROR: failed to parse a whole-second timestamp, got {!r}".format(stamped))
+        failed = True
 
-    for tool_name, arguments in (
-        ("get_plan", {}),
-        ("get_status", {}),
-        ("get_apps", {}),
-        ("get_config", {}),
-        ("get_entities", {}),
-        ("set_config", {"entity_id": "select.predbat_mode", "value": "Monitor"}),
-        ("set_plan_override", {"action": "charge", "time": "12:00"}),
-    ):
-        response = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool_name, "arguments": arguments}}), wrapper))
-        result = response["result"]
-        if result.get("isError"):
-            print("ERROR: tool {} reported an error: {}".format(tool_name, result))
-            return 1
-        payload = json.loads(result["content"][0]["text"])
-        if not payload.get("success"):
-            print("ERROR: tool {} was not successful: {}".format(tool_name, payload))
-            return 1
+    if parse_log_timestamp("Traceback (most recent call last):") is not None:
+        print("  ERROR: expected None for a line with no timestamp")
+        failed = True
+    if parse_log_timestamp("") is not None:
+        print("  ERROR: expected None for an empty line")
+        failed = True
 
-    # An unknown tool is refused rather than silently ignored
-    response = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "drop_tables"}}), wrapper))
-    result = response["result"]
-    if not result.get("isError"):
-        print("ERROR: an unknown tool was accepted, got {}".format(result))
-        return 1
-    if "Unknown tool" not in result["content"][0]["text"]:
-        print("ERROR: expected an unknown tool message, got {}".format(result))
-        return 1
-    return 0
+    return failed
 
 
-def _test_wrapper_tools_call_error(_my_predbat):
-    """A tool that raises is reported as an MCP error rather than crashing the request."""
-    print("Test: tools/call wraps a failing tool")
-    wrapper, _base = make_wrapper()
+def test_mcp_get_apps(my_predbat):
+    """get_apps redacts credentials by default, honours an explicit masked=false opt-out, still
+    filters by regex, and never mutates the live args (#4768).
+    """
+    failed = False
+    print("**** Testing MCP get_apps redaction ****")
 
-    async def exploding_tool(arguments):
-        """Raise as a broken tool implementation would."""
-        raise RuntimeError("tool exploded")
+    mcp = _make_mcp(my_predbat)
+    saved_args = my_predbat.args
+    try:
+        my_predbat.args = {"ha_key": "supersecret", "mcp_secret": "mcp-secret-value", "battery_rate_max_charge": 3.0, "inverter_type": "GE"}
 
-    wrapper._execute_get_plan = exploding_tool
+        result, _ = _call_tool(mcp, "get_apps")
+        if not result.get("success"):
+            print("  ERROR: get_apps failed: {}".format(result.get("error")))
+            failed = True
+        data = result.get("data") or {}
+        if data.get("ha_key") != "xxx" or data.get("mcp_secret") != "xxx":
+            print("  ERROR: expected credentials to be masked by default, got {!r}".format(data))
+            failed = True
+        if data.get("battery_rate_max_charge") != 3.0:
+            print("  ERROR: masking should leave ordinary settings alone, got {!r}".format(data.get("battery_rate_max_charge")))
+            failed = True
+        if result.get("masked") is not True:
+            print("  ERROR: expected the response to report masked=True")
+            failed = True
+        if my_predbat.args["ha_key"] != "supersecret":
+            print("  ERROR: get_apps mutated the live args")
+            failed = True
 
-    result = run_async(wrapper._handle_tools_call({"name": "get_plan", "arguments": {}}))
+        print("Test: masked=false returns the raw values")
+        result, _ = _call_tool(mcp, "get_apps", {"masked": False})
+        if (result.get("data") or {}).get("ha_key") != "supersecret":
+            print("  ERROR: expected the unmasked key with masked=false, got {!r}".format(result.get("data")))
+            failed = True
+        if result.get("masked") is not False:
+            print("  ERROR: expected the response to report masked=False")
+            failed = True
 
-    if not result.get("isError"):
-        print("ERROR: expected an error result, got {}".format(result))
-        return 1
-    if "tool exploded" not in result["content"][0]["text"]:
-        print("ERROR: the underlying failure was not reported, got {}".format(result))
-        return 1
-    return 0
+        print("Test: a string 'false' from a client that can't send booleans is honoured")
+        result, _ = _call_tool(mcp, "get_apps", {"masked": "false"})
+        if (result.get("data") or {}).get("ha_key") != "supersecret":
+            print("  ERROR: expected string 'false' to disable masking")
+            failed = True
 
+        print("Test: the filter regex still applies, and its results are masked too")
+        result, _ = _call_tool(mcp, "get_apps", {"filter": "^ha_key$"})
+        data = result.get("data") or {}
+        if list(data.keys()) != ["ha_key"] or data.get("ha_key") != "xxx":
+            print("  ERROR: expected only a masked ha_key, got {!r}".format(data))
+            failed = True
+    finally:
+        my_predbat.args = saved_args
 
-def _test_wrapper_handle_request_alias(_my_predbat):
-    """handle_request forwards to the JSON-RPC handler with the wrapper as the server."""
-    print("Test: the wrapper's handle_request alias")
-    wrapper, _base = make_wrapper()
+    if parse_bool_argument(None, default=True) is not True:
+        print("  ERROR: parse_bool_argument should fall back to its default for None")
+        failed = True
+    for value in [False, "false", "False", "0", "no", "off", ""]:
+        if parse_bool_argument(value, default=True) is not False:
+            print("  ERROR: parse_bool_argument({!r}) should be False".format(value))
+            failed = True
+    for value in [True, "true", "1", 1, "yes"]:
+        if parse_bool_argument(value, default=False) is not True:
+            print("  ERROR: parse_bool_argument({!r}) should be True".format(value))
+            failed = True
 
-    result = run_async(wrapper.handle_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 7, "method": "initialize"})))
-
-    if result["id"] != 7 or "result" not in result:
-        print("ERROR: handle_request did not forward the call, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_internal_error(_my_predbat):
-    """A failure inside the JSON-RPC dispatcher becomes an internal error response."""
-    print("Test: the wrapper reports an internal dispatch error")
-    wrapper, _base = make_wrapper()
-
-    async def exploding_initialize(params):
-        """Raise from a protocol handler."""
-        raise RuntimeError("handler exploded")
-
-    wrapper._handle_initialize = exploding_initialize
-
-    result = run_async(wrapper.handle_mcp_request(MockRequest(method="POST", json_data={"jsonrpc": "2.0", "id": 9, "method": "initialize"}), wrapper))
-
-    if result["error"]["code"] != -32603:
-        print("ERROR: expected an internal error, got {}".format(result))
-        return 1
-    if result["id"] != 9:
-        print("ERROR: the request id should be preserved in the error, got {}".format(result))
-        return 1
-    return 0
-
-
-def _test_wrapper_get_plan_error(_my_predbat):
-    """A failure reading the plan state is reported rather than raised."""
-    print("Test: the get_plan tool reports a state lookup failure")
-    wrapper, base = make_wrapper()
-
-    def exploding_state(entity_id, attribute=None, default=None):
-        """Raise as an unavailable state backend would."""
-        raise RuntimeError("state backend down")
-
-    base.get_state_wrapper = exploding_state
-
-    result = run_async(wrapper._execute_get_plan({}))
-
-    if result["success"] or "state backend down" not in result["error"]:
-        print("ERROR: expected the failure to be reported, got {}".format(result))
-        return 1
-    return 0
+    return failed
 
 
-def _test_wrapper_get_entities_metadata(_my_predbat):
-    """Optional entity metadata is passed through when present."""
-    print("Test: the get_entities tool carries optional metadata")
-    wrapper, base = make_wrapper()
-    base.dashboard_values = [
-        {
-            "entity_id": "predbat.soc_kw",
-            "state": "5.0",
-            "friendly_name": "SOC",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "state_class": "measurement",
-            "icon": "mdi:battery",
-        }
-    ]
+def test_mcp_get_apps_config(my_predbat):
+    """get_apps_config reads one apps.yaml key at a time, redacting a credential-like value with
+    no way to opt out, reporting a clean error for a key that is not present, and never mutating
+    the live args (#4768 follow-up: apps.yaml read/write tools).
 
-    result = run_async(wrapper._execute_get_entities({}))
+    Unlike get_apps there is deliberately no 'masked' argument to bypass here at all - see
+    PredbatTools._execute_get_apps_config's docstring in agent_tools.py for why a single-key read
+    has no legitimate use for an unmasked credential the way a full-configuration review does.
+    """
+    failed = False
+    print("**** Testing MCP get_apps_config ****")
 
-    entity = result["data"][0]
-    for key, value in (("device_class", "energy"), ("state_class", "measurement"), ("icon", "mdi:battery")):
-        if entity.get(key) != value:
-            print("ERROR: expected {}={}, got {}".format(key, value, entity.get(key)))
-            return 1
-    return 0
+    mcp = _make_mcp(my_predbat)
+    saved_args = my_predbat.args
+    try:
+        my_predbat.args = {"ha_key": "supersecret", "battery_rate_max_charge": 3.0, "inverter_type": "GE"}
 
+        result, _ = _call_tool(mcp, "get_apps_config", {"key": "ha_key"})
+        if not result.get("success"):
+            print("  ERROR: get_apps_config failed for an existing credential key: {}".format(result.get("error")))
+            failed = True
+        data = result.get("data") or {}
+        if data.get("value") != "xxx":
+            print("  ERROR: expected the credential value to be redacted, got {!r}".format(data))
+            failed = True
+        if result.get("masked") is not True:
+            print("  ERROR: expected the response to report masked=True for a credential key")
+            failed = True
+        if my_predbat.args["ha_key"] != "supersecret":
+            print("  ERROR: get_apps_config mutated the live args")
+            failed = True
 
-def _test_wrapper_plan_override_backend_error(_my_predbat):
-    """A failure applying the override is reported and the plan is left alone."""
-    print("Test: the set_plan_override tool reports a backend failure")
-    wrapper, base = make_wrapper()
+        print("Test: an ordinary key is returned unmasked")
+        result, _ = _call_tool(mcp, "get_apps_config", {"key": "battery_rate_max_charge"})
+        data = result.get("data") or {}
+        if data.get("value") != 3.0 or result.get("masked") is not False:
+            print("  ERROR: expected the ordinary value unmasked, got {!r} masked={}".format(data, result.get("masked")))
+            failed = True
 
-    async def exploding_select(config_item, value):
-        """Raise as a failing manual selection would."""
-        raise RuntimeError("selection rejected")
+        print("Test: an unknown key is a clean failure, not an exception")
+        result, _ = _call_tool(mcp, "get_apps_config", {"key": "not_a_real_apps_yaml_config_item"})
+        if result.get("success"):
+            print("  ERROR: an unknown key was reported as found: {}".format(result))
+            failed = True
 
-    base.async_manual_select = exploding_select
+        print("Test: a missing key argument is a clean failure")
+        result, is_error = _call_tool(mcp, "get_apps_config", {})
+        if result.get("success"):
+            print("  ERROR: a missing 'key' argument was accepted")
+            failed = True
+    finally:
+        my_predbat.args = saved_args
 
-    result = run_async(wrapper._execute_set_plan_override({"action": "charge", "time": "12:00"}))
-
-    if result["success"] or "selection rejected" not in result["error"]:
-        print("ERROR: expected the failure to be reported, got {}".format(result))
-        return 1
-    if base.update_pending:
-        print("ERROR: a failed override should not request a plan refresh")
-        return 1
-    return 0
-
-
-def _test_create_mcp_server_factory(_my_predbat):
-    """The factory returns a wrapper bound to the supplied base."""
-    print("Test: create_mcp_server builds a wrapper")
-    from web_mcp import create_mcp_server
-
-    base = MockMCPBase()
-    wrapper = create_mcp_server(base, base.log)
-
-    if not isinstance(wrapper, MCPServerWrapper):
-        print("ERROR: expected an MCPServerWrapper, got {}".format(type(wrapper)))
-        return 1
-    if wrapper.base is not base or wrapper.prefix != base.prefix:
-        print("ERROR: the wrapper is not bound to the supplied base")
-        return 1
-    if not base.log_messages:
-        print("ERROR: expected the factory to log its creation")
-        return 1
-
-    # Without a log function the wrapper falls back to print rather than failing
-    quiet = create_mcp_server(MockMCPBase())
-    if quiet.log is not print:
-        print("ERROR: expected print as the default logger")
-        return 1
-    return 0
+    return failed
 
 
-def test_web_mcp(my_predbat=None):
-    """Run the MCP server test suite, returning non-zero if any sub-test failed."""
-    sub_tests = [
-        ("jwt_secret", _test_jwt_secret_derivation, "JWT signing key derivation"),
-        ("token_claims", _test_generate_access_token_claims, "Access token claims"),
-        ("token_valid", _test_verify_access_token_valid, "Valid token accepted"),
-        ("token_foreign_sig", _test_verify_access_token_rejects_foreign_signature, "Foreign signature rejected"),
-        ("token_audience", _test_verify_access_token_rejects_wrong_audience, "Wrong audience rejected"),
-        ("token_expired", _test_verify_access_token_rejects_expired, "Expired token rejected"),
-        ("token_type", _test_verify_access_token_rejects_wrong_type, "Non-access token rejected"),
-        ("token_garbage", _test_verify_access_token_rejects_garbage, "Malformed token rejected"),
-        ("client_verify", _test_verify_oauth_client, "Client secret verification"),
-        ("canonical_uri", _test_canonical_server_uri, "Canonical server URI"),
-        ("authorize_params", _test_authorize_get_requires_parameters, "Authorize parameter validation"),
-        ("authorize_pkce", _test_authorize_get_requires_pkce, "PKCE required"),
-        ("authorize_s256", _test_authorize_get_requires_s256, "S256 required"),
-        ("authorize_login", _test_authorize_get_shows_login, "Sign-in page"),
-        ("authorize_bad_secret", _test_authorize_post_wrong_secret, "Bad secret refused"),
-        ("authorize_issue_code", _test_authorize_post_issues_code, "Authorization code issued"),
-        ("authorize_post_params", _test_authorize_post_missing_parameters, "POST parameter validation"),
-        ("token_grant_type", _test_token_unsupported_grant, "Unsupported grant type"),
-        ("token_cc_success", _test_token_client_credentials_success, "Client credentials success"),
-        ("token_cc_bad", _test_token_client_credentials_bad_secret, "Client credentials refused"),
-        ("token_cc_missing", _test_token_client_credentials_missing, "Client credentials required"),
-        ("token_form_body", _test_token_form_encoded_body, "Form-encoded token request"),
-        ("token_ac_success", _test_token_authorization_code_success, "Code exchange success"),
-        ("token_ac_replay", _test_token_authorization_code_replay, "Code replay refused"),
-        ("token_ac_expired", _test_token_authorization_code_expired, "Expired code refused"),
-        ("token_ac_binding", _test_token_authorization_code_binding, "Code client/redirect binding"),
-        ("token_ac_pkce", _test_token_authorization_code_pkce_enforced, "PKCE enforcement"),
-        ("token_ac_unknown", _test_token_authorization_code_unknown, "Unknown code refused"),
-        ("token_ac_params", _test_token_authorization_code_missing_params, "Code exchange parameters"),
-        ("token_ac_scope", _test_token_authorization_code_scope, "Code exchange scope"),
-        ("endpoint_errors", _test_endpoint_error_handling, "Broken request bodies"),
-        ("register_json", _test_register_requires_json, "Registration content type"),
-        ("register_creds", _test_register_returns_credentials, "Registration credentials"),
-        ("metadata", _test_metadata_endpoints, "OAuth discovery metadata"),
-        ("static_routes", _test_options_and_static_routes, "Preflight, favicon and 404"),
-        ("mcp_needs_bearer", _test_mcp_endpoints_require_bearer, "MCP endpoints require a token"),
-        ("mcp_bad_token", _test_mcp_endpoints_reject_bad_token, "MCP endpoints refuse bad tokens"),
-        ("mcp_oauth_token", _test_mcp_endpoints_accept_oauth_token, "MCP endpoints accept OAuth tokens"),
-        ("mcp_legacy_secret", _test_mcp_endpoints_accept_legacy_secret, "MCP endpoints accept the shared secret"),
-        ("mcp_unavailable", _test_mcp_endpoints_unavailable, "MCP server unavailable"),
-        ("mcp_handler_error", _test_mcp_endpoints_handler_error, "MCP handler failure"),
-        ("mcp_get_oauth", _test_mcp_get_oauth_and_errors, "MCP GET OAuth and failures"),
-        ("server_start", _test_server_start_registers_routes, "Server start route registration"),
-        ("server_disabled", _test_server_start_disabled, "Disabled server does not start"),
-        ("wrapper_lifecycle", _test_wrapper_lifecycle, "Wrapper start/stop"),
-        ("wrapper_non_post", _test_wrapper_rejects_non_post, "Wrapper refuses non-POST"),
-        ("wrapper_parse_error", _test_wrapper_parse_error, "Wrapper parse error"),
-        ("wrapper_routing", _test_wrapper_method_routing, "Wrapper JSON-RPC routing"),
-        ("wrapper_get_plan", _test_wrapper_get_plan, "get_plan tool"),
-        ("wrapper_get_entities", _test_wrapper_get_entities_filter, "get_entities tool"),
-        ("wrapper_get_apps", _test_wrapper_get_apps, "get_apps tool"),
-        ("wrapper_get_config", _test_wrapper_get_config, "get_config tool"),
-        ("wrapper_get_status", _test_wrapper_get_status, "get_status tool"),
-        ("wrapper_set_config", _test_wrapper_set_config, "set_config tool"),
-        ("wrapper_plan_override", _test_wrapper_set_plan_override, "set_plan_override actions"),
-        ("wrapper_plan_override_bad", _test_wrapper_set_plan_override_rejections, "set_plan_override validation"),
-        ("wrapper_tools_call", _test_wrapper_tools_call_dispatch, "tools/call dispatch"),
-        ("wrapper_tools_error", _test_wrapper_tools_call_error, "tools/call failure handling"),
-        ("wrapper_handle_request", _test_wrapper_handle_request_alias, "Wrapper handle_request alias"),
-        ("wrapper_internal_error", _test_wrapper_internal_error, "Wrapper dispatch failure"),
-        ("wrapper_plan_error", _test_wrapper_get_plan_error, "get_plan failure handling"),
-        ("wrapper_entity_metadata", _test_wrapper_get_entities_metadata, "get_entities metadata"),
-        ("wrapper_override_error", _test_wrapper_plan_override_backend_error, "set_plan_override failure"),
-        ("factory", _test_create_mcp_server_factory, "create_mcp_server factory"),
-    ]
+def test_mcp_get_log(my_predbat):
+    """get_log filters by level, search term and age, caps the number of lines returned, and
+    reports the log oldest-first (#4768).
+    """
+    failed = False
+    print("**** Testing MCP get_log ****")
 
-    print("\n" + "=" * 70)
-    print("MCP SERVER TEST SUITE")
-    print("=" * 70)
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    try:
+        agent_tools.read_predbat_log = lambda: _sample_log()
 
-    failed = 0
-    passed = 0
+        print("Test: the default warnings view returns warnings and errors only")
+        result, _ = _call_tool(mcp, "get_log")
+        if not result.get("success"):
+            print("  ERROR: get_log failed: {}".format(result.get("error")))
+            return True
+        data = result["data"]
+        types = [line["type"] for line in data["lines"]]
+        if sorted(set(types)) != ["error", "warning"]:
+            print("  ERROR: expected only warnings and errors by default, got {}".format(sorted(set(types))))
+            failed = True
+        if data["filter"] != "warnings":
+            print("  ERROR: expected the default filter to be warnings, got {}".format(data["filter"]))
+            failed = True
 
-    for test_name, test_func, test_desc in sub_tests:
-        print("\n[{}] {}".format(test_name, test_desc))
-        print("-" * 70)
+        print("Test: lines come back oldest-first")
+        stamps = [parse_log_timestamp(line["line"]) for line in data["lines"]]
+        if stamps != sorted(stamps):
+            print("  ERROR: expected oldest-first ordering, got {}".format(stamps))
+            failed = True
+
+        print("Test: the errors view drops warnings")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "errors"})
+        types = [line["type"] for line in result["data"]["lines"]]
+        if types != ["error"]:
+            print("  ERROR: expected a single error line, got {}".format(types))
+            failed = True
+
+        print("Test: the all view includes untyped lines such as tracebacks")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all"})
+        if not any(line["type"] == "log" for line in result["data"]["lines"]):
+            print("  ERROR: expected plain log lines in the all view")
+            failed = True
+        if result["data"]["returned_lines"] != 8:
+            print("  ERROR: expected all 8 sample lines, got {}".format(result["data"]["returned_lines"]))
+            failed = True
+
+        print("Test: search narrows to matching lines, case-insensitively")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "search": "IBOOST"})
+        lines = result["data"]["lines"]
+        if len(lines) != 1 or "iboost" not in lines[0]["line"]:
+            print("  ERROR: expected one iboost line, got {}".format(lines))
+            failed = True
+
+        print("Test: hours drops entries older than the window")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "hours": 4})
+        lines = result["data"]["lines"]
+        if any("two days ago" in line["line"] or "before the window" in line["line"] for line in lines):
+            print("  ERROR: expected the two-day-old lines to be excluded, got {}".format([line["line"] for line in lines]))
+            failed = True
+        if len(lines) != 6:
+            print("  ERROR: expected 6 lines within 4 hours, got {}".format(len(lines)))
+            failed = True
+
+        print("Test: a traceback line with no timestamp of its own is kept with the entry above it")
+        if not any("Traceback" in line["line"] for line in lines):
+            print("  ERROR: expected the traceback continuation line to be retained")
+            failed = True
+
+        print("Test: max_lines keeps the most recent lines and flags the truncation")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "max_lines": 2})
+        data = result["data"]
+        if data["returned_lines"] != 2 or not data["truncated"]:
+            print("  ERROR: expected 2 truncated lines, got {}".format(data))
+            failed = True
+        if data["matched_lines"] != 8:
+            print("  ERROR: expected matched_lines to count all 8 matches, got {}".format(data["matched_lines"]))
+            failed = True
+        if "iboost" not in data["lines"][-1]["line"]:
+            print("  ERROR: expected the newest line to survive truncation, got {}".format(data["lines"][-1]["line"]))
+            failed = True
+
+        print("Test: max_lines is clamped to the protocol cap and to at least one line")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "max_lines": MCP_LOG_MAX_LINES * 100})
+        if result["data"]["truncated"]:
+            print("  ERROR: an oversized max_lines should still return the whole sample log")
+            failed = True
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "max_lines": 0})
+        if result["data"]["returned_lines"] != 1:
+            print("  ERROR: expected max_lines=0 to be clamped up to 1, got {}".format(result["data"]["returned_lines"]))
+            failed = True
+
+        print("Test: an unknown filter is rejected rather than silently returning everything")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "everything"})
+        if result.get("success") or "everything" not in (result.get("error") or ""):
+            print("  ERROR: expected an error naming the bad filter, got {}".format(result))
+            failed = True
+
+        print("Test: an empty log is reported as success with no lines")
+        agent_tools.read_predbat_log = lambda: ""
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all"})
+        if not result.get("success") or result["data"]["returned_lines"] != 0:
+            print("  ERROR: expected an empty but successful result, got {}".format(result))
+            failed = True
+
+        print("Test: a reader failure is reported rather than raised")
+
+        def _boom():
+            """Stand-in reader that fails the way an unreadable log file would."""
+            raise IOError("log file unreadable")
+
+        agent_tools.read_predbat_log = _boom
+        result, _ = _call_tool(mcp, "get_log")
+        if result.get("success") or "unreadable" not in (result.get("error") or ""):
+            print("  ERROR: expected a failure result naming the error, got {}".format(result))
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    return failed
+
+
+class FakeBase:
+    """A stand-in for the PredBat instance, carrying only the attributes get_state walks."""
+
+    def __init__(self, log_func):
+        """Populate a mix of small, large, excluded and awkward state variables."""
+        self.log = log_func
+        self.prefix = "predbat"
+        self.plan_interval_minutes = 30
+
+        # Small scalars - the bulk of a real dump, and what get_state exists to return
+        self.current_status = "Charging"
+        self.soc_max = 9.52
+        self.num_cars = 1
+        self.carbon_enable = False
+        self.charge_limit_best = [9.52, 4.0]
+
+        # A per-minute series - too long to serialise, must be described instead
+        self.load_minutes = {minute: minute * 0.01 for minute in range(2880)}
+
+        # Short but bulky - rejected on byte size rather than entry count
+        self.html_plan = "x" * (MCP_STATE_DEFAULT_MAX_BYTES + 500)
+
+        # Values a plain json.dumps would choke on
+        self.now_utc = datetime(2026, 8, 27, 12, 0, 0)
+        self.midnight_utc = self.now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.inverter_object = object()
+
+        # Legitimately-None state - a great deal of Predbat's is, so None must not double as
+        # the "too large to return" sentinel
+        self.plan_last_updated = None
+        self.previous_status = None
+        self.empty_dict = {}
+
+        # Must never be returned: credentials and live object graphs
+        self.ha_key = "ha-key-value"
+        self.mcp_secret = "mcp-secret-value"
+        self.solis_access_token = "solis-token-value"
+        self.ha_interface = object()
+        self.components = object()
+        self.octopus_url_cache = {"https://example.invalid": "cached"}
+        self.db_connection = object()
+        self.args = {"ha_key": "ha-key-value", "battery_rate_max_charge": 3.0}
+
+    def is_running(self):
+        """Callables are skipped by get_state - present so that path is exercised."""
+        return True
+
+
+def test_state_value_helpers(my_predbat):
+    """json_safe_value coerces anything json.dumps would reject, and summarise_state_value
+    describes a value's shape well enough to decide whether to ask for it.
+    """
+    failed = False
+    print("**** Testing get_state value helpers ****")
+
+    safe = json_safe_value({"when": datetime(2026, 8, 27, 9, 0, 0), "nested": [1, {"deep": object()}], "ok": 2.5, "flag": True})
+    try:
+        json.dumps(safe)
+    except TypeError as error:
+        print("  ERROR: json_safe_value left a value json.dumps cannot encode: {}".format(error))
+        failed = True
+    if safe["when"] != "2026-08-27T09:00:00":
+        print("  ERROR: expected a datetime to become an ISO string, got {!r}".format(safe["when"]))
+        failed = True
+    if safe["ok"] != 2.5 or safe["flag"] is not True:
+        print("  ERROR: plain values should pass through untouched, got {!r}".format(safe))
+        failed = True
+
+    print("Test: deeply nested values stop recursing rather than blowing the stack")
+    deep = {}
+    node = deep
+    for _ in range(40):
+        node["next"] = {}
+        node = node["next"]
+    try:
+        json.dumps(json_safe_value(deep))
+    except (TypeError, ValueError, RecursionError) as error:
+        print("  ERROR: deep nesting was not handled: {}".format(error))
+        failed = True
+
+    print("Test: a numeric series is summarised with its range")
+    summary = summarise_state_value({minute: float(minute) for minute in range(1000)})
+    if summary.get("type") != "dict" or summary.get("length") != 1000:
+        print("  ERROR: expected a dict of 1000 entries, got {}".format(summary))
+        failed = True
+    if summary.get("min") != 0.0 or summary.get("max") != 999.0:
+        print("  ERROR: expected min/max over the values, got {}".format(summary))
+        failed = True
+    if len(summary.get("sample_keys", [])) != 3:
+        print("  ERROR: expected three sample keys, got {}".format(summary.get("sample_keys")))
+        failed = True
+
+    print("Test: measure_state_value reports fit separately from the value itself")
+    fits, safe, size = measure_state_value(None, MCP_STATE_DEFAULT_MAX_BYTES)
+    if not fits or safe is not None or size != len("null"):
+        print("  ERROR: None should fit and come back as None, got fits={} safe={!r} size={}".format(fits, safe, size))
+        failed = True
+    fits, safe, _ = measure_state_value({minute: minute for minute in range(MCP_STATE_LARGE_COLLECTION + 1)}, MCP_STATE_DEFAULT_MAX_BYTES)
+    if fits or safe is not None:
+        print("  ERROR: a long collection should not fit, got fits={}".format(fits))
+        failed = True
+    fits, _, _ = measure_state_value("z" * (MCP_STATE_DEFAULT_MAX_BYTES + 1), MCP_STATE_DEFAULT_MAX_BYTES)
+    if fits:
+        print("  ERROR: an oversized string should not fit")
+        failed = True
+
+    print("Test: a long string is summarised with a preview, not its full contents")
+    summary = summarise_state_value("y" * 5000)
+    if summary.get("length") != 5000 or len(summary.get("preview", "")) != 200:
+        print("  ERROR: expected a 200 character preview of a 5000 character string, got {}".format({k: v for k, v in summary.items() if k != "preview"}))
+        failed = True
+
+    return failed
+
+
+def test_debug_excluded_keys(my_predbat):
+    """The state query and the debug yaml share one exclusion filter, so a variable that never
+    reaches a debug dump can't be read over MCP either.
+    """
+    failed = False
+    print("**** Testing is_debug_excluded_key ****")
+
+    for key in ["ha_interface", "components", "coordinator", "secrets", "octopus_url_cache", "github_url_cache", "inverters", "CONFIG_ITEMS", "logfile"]:
+        if not is_debug_excluded_key(key):
+            print("  ERROR: expected {} to be excluded".format(key))
+            failed = True
+
+    print("Test: credentials are excluded via the shared secret matcher, including secrets and tokens")
+    for key in ["ha_key", "octopus_api_key", "mcp_secret", "solis_access_token", "deye_password"]:
+        if not is_debug_excluded_key(key):
+            print("  ERROR: expected the credential {} to be excluded".format(key))
+            failed = True
+
+    print("Test: database internals and double-underscore names are excluded by prefix")
+    for key in ["db_connection", "db_manage", "__class__"]:
+        if not is_debug_excluded_key(key):
+            print("  ERROR: expected {} to be excluded by prefix".format(key))
+            failed = True
+
+    print("Test: ordinary diagnostic state is not excluded, token timing metadata included")
+    for key in ["soc_max", "charge_limit_best", "load_minutes", "current_status", "dashboard_values", "solis_token_expires_at", "partner_token_expiry", "client_token_birth"]:
+        if is_debug_excluded_key(key):
+            print("  ERROR: expected {} to be readable".format(key))
+            failed = True
+
+    return failed
+
+
+def test_mcp_get_state(my_predbat):
+    """get_state returns the small variables, describes the large ones instead of returning them,
+    honours keys/filter/max_bytes, and never leaks a credential or a live object graph (#4768).
+    """
+    failed = False
+    print("**** Testing MCP get_state ****")
+
+    mcp = _make_mcp(my_predbat)
+    mcp.base = FakeBase(my_predbat.log)
+
+    print("Test: with no arguments the small variables come back and the big ones are described")
+    result, _ = _call_tool(mcp, "get_state")
+    if not result.get("success"):
+        print("  ERROR: get_state failed: {}".format(result.get("error")))
+        return True
+    data = result["data"]
+    state, omitted = data["state"], data["omitted"]
+
+    for key in ["current_status", "soc_max", "num_cars", "carbon_enable", "charge_limit_best"]:
+        if key not in state:
+            print("  ERROR: expected the small variable {} to be returned".format(key))
+            failed = True
+    if state.get("soc_max") != 9.52 or state.get("carbon_enable") is not False:
+        print("  ERROR: small values came back altered: {!r}".format({k: state.get(k) for k in ["soc_max", "carbon_enable"]}))
+        failed = True
+
+    print("Test: None-valued state is returned as null, not reported as omitted")
+    for key in ["plan_last_updated", "previous_status"]:
+        if key in omitted:
+            print("  ERROR: {} is None, not too large - it must not be listed as omitted".format(key))
+            failed = True
+        if key not in state or state[key] is not None:
+            print("  ERROR: expected {} to come back as null, got {!r}".format(key, state.get(key)))
+            failed = True
+    if "empty_dict" not in state or state["empty_dict"] != {}:
+        print("  ERROR: expected an empty collection to be returned, got {!r}".format(state.get("empty_dict")))
+        failed = True
+
+    print("Test: a per-minute series is described, not returned")
+    if "load_minutes" in state:
+        print("  ERROR: the 2880 entry series should not have been returned in full")
+        failed = True
+    if omitted.get("load_minutes", {}).get("length") != 2880:
+        print("  ERROR: expected load_minutes to be described with its length, got {}".format(omitted.get("load_minutes")))
+        failed = True
+    if "max" not in omitted.get("load_minutes", {}):
+        print("  ERROR: expected a numeric summary for load_minutes, got {}".format(omitted.get("load_minutes")))
+        failed = True
+
+    print("Test: a bulky string is rejected on size even though it is a single value")
+    if "html_plan" in state or "html_plan" not in omitted:
+        print("  ERROR: expected html_plan to be described rather than returned")
+        failed = True
+
+    print("Test: credentials and live object graphs never appear, in state or in omitted")
+    for key in ["ha_key", "mcp_secret", "solis_access_token", "ha_interface", "components", "octopus_url_cache", "db_connection"]:
+        if key in state or key in omitted:
+            print("  ERROR: excluded key {} was exposed".format(key))
+            failed = True
+    blob = json.dumps(data)
+    for secret in ["ha-key-value", "mcp-secret-value", "solis-token-value"]:
+        if secret in blob:
+            print("  ERROR: the secret {!r} leaked into the response".format(secret))
+            failed = True
+
+    print("Test: args is masked if it is returned at all")
+    if "args" in state and state["args"].get("ha_key") != "xxx":
+        print("  ERROR: expected args to be masked, got {!r}".format(state.get("args")))
+        failed = True
+
+    print("Test: values json.dumps could not encode are coerced rather than failing the call")
+    if state.get("midnight_utc") != "2026-08-27T00:00:00":
+        print("  ERROR: expected the datetime to be returned as an ISO string, got {!r}".format(state.get("midnight_utc")))
+        failed = True
+    if not isinstance(state.get("inverter_object"), str):
+        print("  ERROR: expected an opaque object to become a string, got {!r}".format(state.get("inverter_object")))
+        failed = True
+
+    print("Test: methods are skipped")
+    if "is_running" in state or "is_running" in omitted:
+        print("  ERROR: callables should not be reported as state")
+        failed = True
+
+    print("Test: keys= returns just those variables, and reports the ones that don't exist")
+    result, _ = _call_tool(mcp, "get_state", {"keys": ["soc_max", "num_cars", "not_a_real_key"]})
+    data = result["data"]
+    if sorted(data["state"].keys()) != ["num_cars", "soc_max"]:
+        print("  ERROR: expected only the two named keys, got {}".format(sorted(data["state"].keys())))
+        failed = True
+    if data.get("unknown_keys") != ["not_a_real_key"]:
+        print("  ERROR: expected the unknown key to be reported back, got {}".format(data.get("unknown_keys")))
+        failed = True
+
+    print("Test: a single key may be given as a bare string")
+    result, _ = _call_tool(mcp, "get_state", {"keys": "soc_max"})
+    if list(result["data"]["state"].keys()) != ["soc_max"]:
+        print("  ERROR: expected a bare string key to work, got {}".format(result["data"]["state"]))
+        failed = True
+
+    print("Test: asking for an excluded key by name still refuses it")
+    result, _ = _call_tool(mcp, "get_state", {"keys": ["ha_key", "mcp_secret", "ha_interface"]})
+    data = result["data"]
+    if data["state"] or data["omitted"]:
+        print("  ERROR: naming an excluded key explicitly must not return it, got {}".format(data))
+        failed = True
+
+    print("Test: filter narrows by variable name")
+    result, _ = _call_tool(mcp, "get_state", {"filter": "^charge_"})
+    if list(result["data"]["state"].keys()) != ["charge_limit_best"]:
+        print("  ERROR: expected only charge_ variables, got {}".format(list(result["data"]["state"].keys())))
+        failed = True
+
+    print("Test: raising max_bytes lets a previously omitted value through")
+    result, _ = _call_tool(mcp, "get_state", {"keys": ["html_plan"], "max_bytes": MCP_STATE_DEFAULT_MAX_BYTES + 2000})
+    if "html_plan" not in result["data"]["state"]:
+        print("  ERROR: expected html_plan to fit once max_bytes was raised")
+        failed = True
+
+    print("Test: max_bytes cannot be raised past the protocol cap, and a long series still won't fit")
+    result, _ = _call_tool(mcp, "get_state", {"keys": ["load_minutes"], "max_bytes": MCP_STATE_MAX_BYTES_LIMIT * 100})
+    if result["data"]["max_bytes"] != MCP_STATE_MAX_BYTES_LIMIT:
+        print("  ERROR: expected max_bytes to be clamped to the cap, got {}".format(result["data"]["max_bytes"]))
+        failed = True
+    if "load_minutes" in result["data"]["state"]:
+        print("  ERROR: a {} entry collection should be refused on entry count regardless of max_bytes".format(MCP_STATE_LARGE_COLLECTION))
+        failed = True
+
+    print("Test: a non-list keys argument is rejected with a clear error")
+    result, _ = _call_tool(mcp, "get_state", {"keys": {"soc_max": True}})
+    if result.get("success") or "keys" not in (result.get("error") or ""):
+        print("  ERROR: expected an error naming the bad argument, got {}".format(result))
+        failed = True
+
+    return failed
+
+
+def test_mcp_argument_validation(my_predbat):
+    """Bad tool arguments come back as a named argument error rather than a raw Python exception,
+    across every tool that takes one - Copilot review of PR #4775.
+    """
+    failed = False
+    print("**** Testing MCP argument validation ****")
+
+    print("Test: parse_number_argument clamps in range but rejects non-numbers")
+    if parse_number_argument(None, "max_lines", 500, minimum=1, maximum=5000) != 500:
+        print("  ERROR: expected the default to be used when the argument is absent")
+        failed = True
+    if parse_number_argument(99999, "max_lines", 500, minimum=1, maximum=5000) != 5000:
+        print("  ERROR: expected an oversized value to be clamped to the maximum")
+        failed = True
+    if parse_number_argument(0, "max_lines", 500, minimum=1, maximum=5000) != 1:
+        print("  ERROR: expected an undersized value to be clamped to the minimum")
+        failed = True
+    if parse_number_argument("250", "max_lines", 500, minimum=1, maximum=5000) != 250:
+        print("  ERROR: expected a numeric string to be accepted")
+        failed = True
+    if parse_number_argument(None, "hours", None) is not None:
+        print("  ERROR: expected an absent optional argument with no default to stay None")
+        failed = True
+    if parse_number_argument("1.5", "hours", None, as_float=True) != 1.5:
+        print("  ERROR: expected a float argument to be parsed")
+        failed = True
+    for bad in ["abc", "", [1], {"a": 1}, True]:
         try:
-            test_result = test_func(my_predbat)
-        except Exception as e:
-            import traceback
+            parse_number_argument(bad, "max_lines", 500)
+            print("  ERROR: expected {!r} to be rejected as a number".format(bad))
+            failed = True
+        except MCPArgumentError as error:
+            if "max_lines" not in str(error):
+                print("  ERROR: the error should name the argument, got {}".format(error))
+                failed = True
 
-            traceback.print_exc()
-            print("✗ FAILED: {} raised {}".format(test_name, e))
-            failed += 1
-            continue
+    print("Test: compile_filter_argument returns a usable pattern or a named error")
+    if compile_filter_argument(None) is not None or compile_filter_argument("") is not None:
+        print("  ERROR: an absent filter should compile to None")
+        failed = True
+    pattern = compile_filter_argument("^soc_")
+    if not pattern.search("soc_max") or pattern.search("battery_soc"):
+        print("  ERROR: the compiled pattern did not anchor as written")
+        failed = True
+    for bad in ["[unclosed", "*", 42]:
+        try:
+            compile_filter_argument(bad, "filter")
+            print("  ERROR: expected {!r} to be rejected as a regex".format(bad))
+            failed = True
+        except MCPArgumentError as error:
+            if "filter" not in str(error):
+                print("  ERROR: the error should name the argument, got {}".format(error))
+                failed = True
 
-        if test_result:
-            print("✗ FAILED: {}".format(test_name))
-            failed += 1
-        else:
-            print("✓ PASSED: {}".format(test_name))
-            passed += 1
+    print("Test: every filtering tool reports a bad regex the same way")
+    mcp = _make_mcp(my_predbat)
+    saved_args = my_predbat.args
+    saved_reader = agent_tools.read_predbat_log
+    try:
+        my_predbat.args = {"battery_rate_max_charge": 3.0}
+        agent_tools.read_predbat_log = lambda: _sample_log()
+        for tool in ["get_apps", "get_config", "get_entities", "get_state"]:
+            result, _ = _call_tool(mcp, tool, {"filter": "[unclosed"})
+            if result.get("success"):
+                print("  ERROR: {} accepted an invalid regex".format(tool))
+                failed = True
+            elif "not a valid regular expression" not in (result.get("error") or ""):
+                print("  ERROR: {} gave an unhelpful error: {}".format(tool, result.get("error")))
+                failed = True
 
-    print("\n" + "=" * 70)
-    print("MCP RESULTS: {} passed, {} failed".format(passed, failed))
-    print("=" * 70)
+        print("Test: get_log reports bad max_lines and hours by name")
+        for argument, value in [("max_lines", "lots"), ("hours", "yesterday")]:
+            result, _ = _call_tool(mcp, "get_log", {argument: value})
+            if result.get("success") or argument not in (result.get("error") or ""):
+                print("  ERROR: expected get_log to name the bad {} argument, got {}".format(argument, result.get("error")))
+                failed = True
+
+        print("Test: get_state reports a bad max_bytes by name")
+        result, _ = _call_tool(mcp, "get_state", {"max_bytes": "plenty"})
+        if result.get("success") or "max_bytes" not in (result.get("error") or ""):
+            print("  ERROR: expected get_state to name the bad max_bytes argument, got {}".format(result.get("error")))
+            failed = True
+
+        print("Test: a valid filter still works everywhere after the change")
+        result, _ = _call_tool(mcp, "get_apps", {"filter": "^battery_"})
+        if not result.get("success") or list((result.get("data") or {}).keys()) != ["battery_rate_max_charge"]:
+            print("  ERROR: a valid regex filter stopped working, got {}".format(result.get("data")))
+            failed = True
+    finally:
+        my_predbat.args = saved_args
+        agent_tools.read_predbat_log = saved_reader
+
+    return failed
+
+
+def test_log_encoding(my_predbat):
+    """A non-UTF-8 byte in the log is replaced rather than raising UnicodeDecodeError and taking
+    out both /api/log and get_log - Copilot review of PR #4775.
+    """
+    failed = False
+    print("**** Testing log decoding robustness ****")
+
+    tmpdir = tempfile.mkdtemp(prefix="predbat_test_mcp_encoding_")
+    live = os.path.join(tmpdir, "predbat.log")
+    prev = os.path.join(tmpdir, "predbat.1.log")
+
+    # A latin-1 encoded degree sign is not valid UTF-8 - exactly what an inverter API error
+    # message can carry into the log
+    with open(live, "wb") as f:
+        f.write("2026-08-27 09:00:00.000000: Warn: inverter reported 21".encode("utf-8") + b"\xb0" + "C\n".encode("utf-8"))
+
+    try:
+        data = read_predbat_log(logfile=live, logfile_prev=prev)
+    except UnicodeDecodeError as error:
+        print("  ERROR: a non-UTF-8 byte raised instead of being replaced: {}".format(error))
+        return True
+
+    if "inverter reported 21" not in data:
+        print("  ERROR: the readable part of the line was lost, got {!r}".format(data))
+        failed = True
+    if chr(0xFFFD) not in data:
+        print("  ERROR: expected the undecodable byte to become a replacement character, got {!r}".format(data))
+        failed = True
+
+    return failed
+
+
+def test_mcp_tools_list(my_predbat):
+    """get_log is advertised by tools/list with a usable schema, and tools/call routes to it."""
+    failed = False
+    print("**** Testing MCP tools/list registration ****")
+
+    mcp = _make_mcp(my_predbat)
+    tools = asyncio.run(mcp._handle_tools_list({}))["tools"]
+    by_name = {tool["name"]: tool for tool in tools}
+
+    if "get_log" not in by_name:
+        print("  ERROR: get_log is missing from tools/list")
+        return True
+    if "get_state" not in by_name:
+        print("  ERROR: get_state is missing from tools/list")
+        return True
+
+    state_schema = by_name["get_state"]["inputSchema"]
+    for prop in ["keys", "filter", "max_bytes"]:
+        if prop not in state_schema["properties"]:
+            print("  ERROR: get_state schema is missing the {} property".format(prop))
+            failed = True
+    if state_schema["properties"]["keys"].get("type") != "array":
+        print("  ERROR: get_state keys should be declared as an array")
+        failed = True
+    if state_schema.get("required"):
+        print("  ERROR: get_state should have no required arguments")
+        failed = True
+
+    schema = by_name["get_log"]["inputSchema"]
+    for prop in ["filter", "search", "hours", "max_lines"]:
+        if prop not in schema["properties"]:
+            print("  ERROR: get_log schema is missing the {} property".format(prop))
+            failed = True
+    if schema.get("required"):
+        print("  ERROR: get_log should have no required arguments")
+        failed = True
+    if schema["properties"]["filter"].get("enum") != list(LOG_FILTER_TYPES):
+        print("  ERROR: get_log filter enum should list every supported view, got {}".format(schema["properties"]["filter"].get("enum")))
+        failed = True
+    if str(MCP_LOG_DEFAULT_LINES) not in schema["properties"]["max_lines"]["description"]:
+        print("  ERROR: the max_lines description should name the default")
+        failed = True
+    # The tool keeps the most recent matches but returns them oldest-first; the schema said
+    # "most recent first", which misdescribed the output - Copilot review of PR #4775
+    if "oldest-first" not in schema["properties"]["max_lines"]["description"]:
+        print("  ERROR: the max_lines description must say which order lines come back in, got {!r}".format(schema["properties"]["max_lines"]["description"]))
+        failed = True
+    if "oldest-first" not in by_name["get_log"]["description"]:
+        print("  ERROR: the get_log description should state the return order")
+        failed = True
+
+    if "masked" not in by_name["get_apps"]["inputSchema"]["properties"]:
+        print("  ERROR: get_apps schema is missing the masked property")
+        failed = True
+
+    print("Test: an unknown tool is still rejected")
+    result = asyncio.run(mcp._handle_tools_call({"name": "get_logs", "arguments": {}}))
+    if not result.get("isError"):
+        print("  ERROR: expected an error for an unknown tool name")
+        failed = True
+
+    return failed
+
+
+def test_web_api_log_unchanged(my_predbat):
+    """The web log API still filters exactly as it did before it moved onto the shared helpers,
+    including its HTML escaping and search highlighting.
+    """
+    failed = False
+    print("**** Testing /api/log after the shared-helper refactor ****")
+
+    w = _make_web(my_predbat)
+    saved_reader = web.read_predbat_log
+    try:
+        web.read_predbat_log = lambda: _sample_log() + _stamp(5) + "Info: <b>escape me</b>\n"
+
+        response = asyncio.run(w.html_api_get_log(FakeRequest({"filter": "errors"})))
+        data = json.loads(response.text)
+        if data["status"] != "success":
+            print("  ERROR: expected a successful response, got {}".format(data))
+            return True
+        if [line["type"] for line in data["lines"]] != ["error"]:
+            print("  ERROR: expected only the error line on the errors tab, got {}".format([line["type"] for line in data["lines"]]))
+            failed = True
+
+        response = asyncio.run(w.html_api_get_log(FakeRequest({"filter": "warnings"})))
+        types = sorted(set(line["type"] for line in json.loads(response.text)["lines"]))
+        if types != ["error", "warning"]:
+            print("  ERROR: expected warnings and errors on the warnings tab, got {}".format(types))
+            failed = True
+
+        response = asyncio.run(w.html_api_get_log(FakeRequest({"filter": "all"})))
+        data = json.loads(response.text)
+        if not any(line["type"] == "log" for line in data["lines"]):
+            print("  ERROR: expected untyped lines on the all tab")
+            failed = True
+        if not any("&lt;b&gt;escape me&lt;/b&gt;" in line["full_line"] for line in data["lines"]):
+            print("  ERROR: expected HTML in log lines to still be escaped")
+            failed = True
+
+        response = asyncio.run(w.html_api_get_log(FakeRequest({"filter": "all", "search": "iboost"})))
+        data = json.loads(response.text)
+        if data.get("search_matches") != 1:
+            print("  ERROR: expected a single search match, got {}".format(data.get("search_matches")))
+            failed = True
+        if not any("search-highlight" in line["full_line"] for line in data["lines"]):
+            print("  ERROR: expected the search term to be highlighted")
+            failed = True
+    finally:
+        web.read_predbat_log = saved_reader
+
+    return failed
+
+
+def test_mcp_oauth_routes(my_predbat):
+    """The OAuth route table answers the RFC 9728 /mcp-scoped metadata probe and the CORS
+    preflight requests on the token/register endpoints, rather than letting them fall through to the
+    404 default route and failing claude.ai's handshake (#3807).
+    """
+    failed = False
+    print("**** Testing MCP OAuth route table ****")
+
+    server = PredbatMCPServer.__new__(PredbatMCPServer)
+    server.log = my_predbat.log
+    app = aiohttp_web.Application()
+    server.add_routes(app)
+
+    def resolve(method, path):
+        """Return the handler the router picks for method and path."""
+        request = make_mocked_request(method, path, headers={"Host": "predbat.example:8199"}, app=app)
+        return asyncio.run(app.router.resolve(request)).handler, request
+
+    expected = [
+        ("GET", "/.well-known/oauth-protected-resource/mcp", server.oauth_protected_resource_metadata),
+        ("OPTIONS", "/.well-known/oauth-protected-resource/mcp", server.handle_options),
+        ("GET", "/.well-known/oauth-protected-resource", server.oauth_protected_resource_metadata),
+        ("GET", "/.well-known/oauth-authorization-server/mcp", server.oauth_metadata_mcp),
+        ("OPTIONS", "/oauth/token", server.handle_options),
+        ("OPTIONS", "/token", server.handle_options),
+        ("OPTIONS", "/oauth/register", server.handle_options),
+        ("OPTIONS", "/register", server.handle_options),
+        ("POST", "/oauth/token", server.oauth_token),
+        ("POST", "/oauth/register", server.oauth_register),
+        ("POST", "/mcp", server.html_mcp_post),
+        ("GET", "/no-such-path", server.default_route),
+    ]
+    for method, path, handler in expected:
+        got, _ = resolve(method, path)
+        if got != handler:
+            print("  ERROR: {} {} routed to {}, expected {}".format(method, path, getattr(got, "__name__", got), handler.__name__))
+            failed = True
+
+    print("Test: the /mcp-scoped metadata probe returns the protected resource metadata")
+    handler, request = resolve("GET", "/.well-known/oauth-protected-resource/mcp")
+    if handler == server.oauth_protected_resource_metadata:
+        response = asyncio.run(handler(request))
+        data = json.loads(response.text)
+        if response.status != 200 or data.get("authorization_servers") != ["http://predbat.example:8199"]:
+            print("  ERROR: unexpected metadata response {} {}".format(response.status, data))
+            failed = True
+
+    print("Test: the token endpoint preflight carries CORS headers")
+    handler, request = resolve("OPTIONS", "/oauth/token")
+    response = asyncio.run(handler(request))
+    if response.status != 200 or response.headers.get("Access-Control-Allow-Origin") != "*" or "POST" not in response.headers.get("Access-Control-Allow-Methods", ""):
+        print("  ERROR: token preflight returned {} with headers {}".format(response.status, dict(response.headers)))
+        failed = True
+
+    return failed
+
+
+def run_web_mcp_tests(my_predbat):
+    """Run every MCP log/apps.yaml test, returning True if any of them failed."""
+    failed = False
+    failed |= test_mask_secret_args(my_predbat)
+    failed |= test_read_predbat_log(my_predbat)
+    failed |= test_log_filter_helpers(my_predbat)
+    failed |= test_mcp_get_apps(my_predbat)
+    failed |= test_mcp_get_apps_config(my_predbat)
+    failed |= test_mcp_get_log(my_predbat)
+    failed |= test_mcp_get_log_pattern(my_predbat)
+    failed |= test_mcp_get_log_time_bounds(my_predbat)
+    failed |= test_mcp_get_log_truncates_long_lines(my_predbat)
+    failed |= test_mcp_get_log_line_number_read_back(my_predbat)
+    failed |= test_mcp_get_log_byte_budget(my_predbat)
+    failed |= test_mcp_get_log_ignores_the_trailing_newline(my_predbat)
+    failed |= test_state_value_helpers(my_predbat)
+    failed |= test_debug_excluded_keys(my_predbat)
+    failed |= test_mcp_get_state(my_predbat)
+    failed |= test_mcp_argument_validation(my_predbat)
+    failed |= test_log_encoding(my_predbat)
+    failed |= test_mcp_tools_list(my_predbat)
+    failed |= test_web_api_log_unchanged(my_predbat)
+    failed |= test_mcp_oauth_routes(my_predbat)
+    return failed
+
+
+def _dated_log(now):
+    """Return a synthetic predbat.log with absolute stamps, for exercising the start/end bounds.
+
+    Takes `now` from the caller rather than reading the clock itself: the test builds its bound
+    strings from the same instant, and a run crossing midnight between the two calls would leave
+    the log's idea of "today" and the bounds' idea disagreeing by a day.
+    """
+    today = now.replace(microsecond=0)
+    yesterday = today - timedelta(days=1)
+    lines = [
+        "{}: Warn: yesterday early".format(yesterday.replace(hour=1, minute=0, second=0)),
+        "{}: Warn: yesterday late".format(yesterday.replace(hour=23, minute=30, second=0)),
+        "{}: Error: today midday failure".format(today.replace(hour=12, minute=0, second=0)),
+        "Traceback (most recent call last):",  # continuation of the line above, no stamp of its own
+        "{}: Warn: today afternoon".format(today.replace(hour=14, minute=0, second=0)),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_mcp_get_log_pattern(my_predbat):
+    """get_log's pattern argument filters by regex, ANDs with the other filters, and rejects bad patterns."""
+    failed = False
+    print("**** Testing MCP get_log pattern ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    try:
+        agent_tools.read_predbat_log = lambda: _sample_log()
+
+        print("Test: a regex with alternation matches across lines that no single substring would")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "pattern": "(iboost|Octopus) "})
+        if not result.get("success"):
+            print("  ERROR: get_log with a pattern failed: {}".format(result.get("error")))
+            return True
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if len(lines) != 2:
+            print("  ERROR: expected 2 lines matching the alternation, got {}".format(lines))
+            failed = True
+
+        print("Test: pattern is case-insensitive, like search")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "pattern": "IBOOST"})
+        if result["data"]["returned_lines"] != 1:
+            print("  ERROR: expected a case-insensitive match, got {}".format(result["data"]["returned_lines"]))
+            failed = True
+
+        print("Test: pattern ANDs with filter and search rather than replacing them")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "errors", "pattern": "iboost"})
+        if result["data"]["returned_lines"] != 0:
+            print("  ERROR: an errors-only view should not return the iboost warning, got {}".format(result["data"]["lines"]))
+            failed = True
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "search": "iboost", "pattern": "Octopus"})
+        if result["data"]["returned_lines"] != 0:
+            print("  ERROR: search and pattern should AND, got {}".format(result["data"]["lines"]))
+            failed = True
+
+        print("Test: the pattern is echoed back so the caller can see what was applied")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "pattern": "iboost"})
+        if result["data"].get("pattern") != "iboost":
+            print("  ERROR: expected the pattern echoed in data, got {}".format(result["data"].get("pattern")))
+            failed = True
+
+        print("Test: an invalid regex is reported as a named argument error, not a traceback")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "pattern": "Warn(["})
+        if result.get("success") or "pattern" not in (result.get("error") or ""):
+            print("  ERROR: expected an error naming the pattern argument, got {}".format(result))
+            failed = True
+
+        print("Test: a pathological pattern is rejected before it can be compiled")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "pattern": "(a+)+$"})
+        if result.get("success"):
+            print("  ERROR: expected a nested-quantifier pattern to be rejected")
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log pattern")
+    return failed
+
+
+def test_mcp_get_log_time_bounds(my_predbat):
+    """get_log's start/end bounds accept a date, a time or both, and combine with hours."""
+    failed = False
+    print("**** Testing MCP get_log start/end bounds ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    today = datetime.now()
+    yesterday = today - timedelta(days=1)
+    try:
+        agent_tools.read_predbat_log = lambda: _dated_log(today)
+
+        print("Test: a bare date as end covers the whole of that day, not midnight")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "end": yesterday.strftime("%Y-%m-%d")})
+        if not result.get("success"):
+            print("  ERROR: get_log with an end bound failed: {}".format(result.get("error")))
+            return True
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if len(lines) != 2 or not any("yesterday late" in line for line in lines):
+            print("  ERROR: expected both of yesterday's lines including the 23:30 one, got {}".format(lines))
+            failed = True
+
+        print("Test: a bare date as start begins at the start of that day")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "start": today.strftime("%Y-%m-%d")})
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if any("yesterday" in line for line in lines):
+            print("  ERROR: expected yesterday's lines excluded, got {}".format(lines))
+            failed = True
+
+        print("Test: a bare time means that time today")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "start": "13:00"})
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if len(lines) != 1 or "afternoon" not in lines[0]:
+            print("  ERROR: expected only the 14:00 line, got {}".format(lines))
+            failed = True
+
+        print("Test: date and time together bound both ends")
+        result, _ = _call_tool(
+            mcp,
+            "get_log",
+            {"filter": "all", "start": today.strftime("%Y-%m-%d") + " 11:00", "end": today.strftime("%Y-%m-%d") + " 13:00"},
+        )
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if not any("midday failure" in line for line in lines) or any("afternoon" in line for line in lines):
+            print("  ERROR: expected only the midday entry inside the window, got {}".format(lines))
+            failed = True
+
+        print("Test: a continuation line is kept with the stamped entry above it inside a window")
+        if not any("Traceback" in line for line in lines):
+            print("  ERROR: expected the traceback to travel with its parent entry, got {}".format(lines))
+            failed = True
+
+        print("Test: start and hours combine, with the narrower lower bound winning")
+        # _sample_log()'s stamps are relative to now, so this exercises the intersection without
+        # depending on what time of day the suite happens to run. The start bound is deliberately
+        # wide (two days back); hours=4 is the narrower of the two and should win.
+        agent_tools.read_predbat_log = lambda: _sample_log()
+        two_days_back = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "start": two_days_back, "hours": 4})
+        lines = [line["line"] for line in result["data"]["lines"]]
+        if any("two days ago" in line or "before the window" in line for line in lines):
+            print("  ERROR: hours should narrow the wider start bound, got {}".format(lines))
+            failed = True
+        if len(lines) != 6:
+            print("  ERROR: expected the same 6 lines the hours filter alone returns, got {}".format(len(lines)))
+            failed = True
+        agent_tools.read_predbat_log = lambda: _dated_log(today)
+
+        print("Test: the bounds are echoed back so the caller can see what was applied")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "start": "13:00"})
+        if not result["data"].get("start"):
+            print("  ERROR: expected start echoed in data, got {}".format(result["data"]))
+            failed = True
+
+        print("Test: an unparseable bound is a named argument error")
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "start": "last tuesday"})
+        if result.get("success") or "start" not in (result.get("error") or ""):
+            print("  ERROR: expected an error naming the start argument, got {}".format(result))
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log start/end bounds")
+    return failed
+
+
+def _fat_log(now):
+    """Return a log whose entries include one very long line, as a GraphQL dump produces.
+
+    Takes `now` from the caller for the same reason as _dated_log().
+    """
+    stamp = now.replace(microsecond=0)
+    lines = [
+        "{}: Info: short line before".format(stamp - timedelta(minutes=3)),
+        "{}: OctopusAPI: GraphQL response for get-saving-sessions (status 200): {}".format(stamp - timedelta(minutes=2), "x" * 20000),
+        "{}: Info: short line after".format(stamp - timedelta(minutes=1)),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_mcp_get_log_truncates_long_lines(my_predbat):
+    """A single huge log line is cut to a budget and says how much was left off (#4840)."""
+    failed = False
+    print("**** Testing MCP get_log long-line truncation ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    now = datetime.now()
+    try:
+        agent_tools.read_predbat_log = lambda: _fat_log(now)
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all"})
+        if not result.get("success"):
+            print("  ERROR: get_log failed: {}".format(result.get("error")))
+            return True
+        lines = result["data"]["lines"]
+
+        print("Test: the whole response is bounded, not just the line count")
+        size = len(json.dumps(result["data"]))
+        if size > MCP_LOG_DEFAULT_MAX_BYTES + 4096:
+            print("  ERROR: expected the response under the byte budget, got {} bytes".format(size))
+            failed = True
+
+        fat = [line for line in lines if "GraphQL" in line["line"]]
+        if len(fat) != 1:
+            print("  ERROR: expected the long line to still be present, got {}".format(len(fat)))
+            return True
+        fat = fat[0]
+
+        print("Test: the long line is cut to the per-line budget")
+        if len(fat["line"]) > MCP_LOG_MAX_LINE_CHARS + 200:
+            print("  ERROR: expected the line cut to ~{} chars, got {}".format(MCP_LOG_MAX_LINE_CHARS, len(fat["line"])))
+            failed = True
+
+        print("Test: it says how many characters were left off, and how to get them")
+        if fat.get("truncated_chars", 0) <= 0:
+            print("  ERROR: expected truncated_chars to be set, got {}".format(fat.get("truncated_chars")))
+            failed = True
+        if "line_number" not in fat["line"]:
+            print("  ERROR: expected the marker to name the read-back argument, got {!r}".format(fat["line"][-120:]))
+            failed = True
+
+        print("Test: a short line is untouched and carries no truncation field")
+        short = [line for line in lines if "short line before" in line["line"]][0]
+        if "truncated_chars" in short:
+            print("  ERROR: an intact line should carry no truncated_chars, got {}".format(short))
+            failed = True
+        if not short["line"].endswith("short line before"):
+            print("  ERROR: expected the short line intact, got {!r}".format(short["line"]))
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log long-line truncation")
+    return failed
+
+
+def test_mcp_get_log_line_number_read_back(my_predbat):
+    """A truncated line can be fetched in full afterwards by its line number (#4840)."""
+    failed = False
+    print("**** Testing MCP get_log line_number read-back ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    now = datetime.now()
+    try:
+        agent_tools.read_predbat_log = lambda: _fat_log(now)
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all"})
+        fat = [line for line in result["data"]["lines"] if "GraphQL" in line["line"]][0]
+        target = fat["line_number"]
+
+        print("Test: reading that line number back returns it in full")
+        result, _ = _call_tool(mcp, "get_log", {"line_number": target})
+        if not result.get("success"):
+            print("  ERROR: read-back failed: {}".format(result.get("error")))
+            return True
+        lines = result["data"]["lines"]
+        if len(lines) != 1:
+            print("  ERROR: expected exactly the one line, got {}".format(len(lines)))
+            failed = True
+        elif len(lines[0]["line"]) < 20000:
+            print("  ERROR: expected the untruncated line, got {} chars".format(len(lines[0]["line"])))
+            failed = True
+        elif lines[0].get("truncated_chars"):
+            print("  ERROR: a read-back line should not be marked truncated, got {}".format(lines[0].get("truncated_chars")))
+            failed = True
+
+        print("Test: context returns the neighbouring lines too")
+        result, _ = _call_tool(mcp, "get_log", {"line_number": target, "context": 1})
+        lines = result["data"]["lines"]
+        if len(lines) != 3:
+            print("  ERROR: expected 3 lines with context=1, got {}".format(len(lines)))
+            failed = True
+        elif not any("short line before" in line["line"] for line in lines) or not any("short line after" in line["line"] for line in lines):
+            print("  ERROR: expected both neighbours, got {}".format([line["line"][:40] for line in lines]))
+            failed = True
+
+        print("Test: the filters are ignored on a read-back, so the line always comes back")
+        result, _ = _call_tool(mcp, "get_log", {"line_number": target, "filter": "errors", "search": "nothing-matches-this"})
+        if result["data"]["returned_lines"] != 1:
+            print("  ERROR: expected the read-back to ignore the filters, got {}".format(result["data"]["returned_lines"]))
+            failed = True
+
+        print("Test: an out-of-range line number is a named argument error")
+        result, _ = _call_tool(mcp, "get_log", {"line_number": 999999})
+        if result.get("success") or "line_number" not in (result.get("error") or ""):
+            print("  ERROR: expected an error naming line_number, got {}".format(result))
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log line_number read-back")
+    return failed
+
+
+def test_mcp_get_log_byte_budget(my_predbat):
+    """The response stops at a total byte budget even when max_lines would allow more (#4840)."""
+    failed = False
+    print("**** Testing MCP get_log byte budget ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    try:
+        # Every line sits just under the per-line cap, so only the total budget can stop this.
+        stamp = datetime.now().replace(microsecond=0)
+        many = ["{}: Info: {}".format(stamp - timedelta(minutes=i), "y" * (MCP_LOG_MAX_LINE_CHARS - 100)) for i in range(400, 0, -1)]
+        agent_tools.read_predbat_log = lambda: "\n".join(many) + "\n"
+
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all", "max_lines": 400})
+        data = result["data"]
+        size = len(json.dumps(data))
+        if size > MCP_LOG_DEFAULT_MAX_BYTES + 8192:
+            print("  ERROR: expected the response bounded by the byte budget, got {} bytes".format(size))
+            failed = True
+        if data["returned_lines"] >= 400:
+            print("  ERROR: expected the budget to stop accumulation before max_lines, got {}".format(data["returned_lines"]))
+            failed = True
+        if not data.get("truncated"):
+            print("  ERROR: expected truncated to be flagged when the budget stops it")
+            failed = True
+        if data.get("truncated_reason") != "max_bytes":
+            print("  ERROR: expected truncated_reason max_bytes, got {}".format(data.get("truncated_reason")))
+            failed = True
+
+        print("Test: matched_lines still counts every match, not just the ones that fitted")
+        # The description says "the most recent X of Y matching lines". Stopping the count at the
+        # budget makes Y a tally of what fitted rather than what matched, which understates how
+        # much was left out - the opposite of what that sentence is for. max_lines already keeps
+        # counting past its cap, so the two truncation paths must agree.
+        if data["matched_lines"] != 400:
+            print("  ERROR: expected all 400 matches counted, got {}".format(data["matched_lines"]))
+            failed = True
+
+        print("Test: the newest lines are the ones kept")
+        if "Info:" not in data["lines"][-1]["line"]:
+            print("  ERROR: unexpected last line {!r}".format(data["lines"][-1]["line"][:60]))
+            failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log byte budget")
+    return failed
+
+
+def test_mcp_get_log_ignores_the_trailing_newline(my_predbat):
+    """The two log-reading paths agree on line numbering, and neither invents a final blank line.
+
+    predbat.log ends with a newline. A plain split leaves a trailing empty string, so total_lines
+    counted a line that does not exist and the last line number read back as "". More importantly
+    the scan and the line_number read-back must split the log the SAME way: they briefly did not
+    (#4855 review), which would hand back a different line than the one the marker pointed at.
+    """
+    failed = False
+    print("**** Testing get_log ignores the trailing newline ****")
+
+    mcp = _make_mcp(my_predbat)
+    saved_reader = agent_tools.read_predbat_log
+    try:
+        stamp = datetime.now().replace(microsecond=0)
+        agent_tools.read_predbat_log = lambda: "{}: Info: first\n{}: Info: second\n".format(stamp - timedelta(minutes=2), stamp - timedelta(minutes=1))
+
+        result, _ = _call_tool(mcp, "get_log", {"filter": "all"})
+        if result["data"]["total_lines"] != 2:
+            print("  ERROR: expected total_lines to count 2 real lines, got {}".format(result["data"]["total_lines"]))
+            failed = True
+
+        print("Test: the last line number is a real line, not the trailing empty string")
+        last = result["data"]["total_lines"] - 1
+        back, _ = _call_tool(mcp, "get_log", {"line_number": last})
+        if not back.get("success"):
+            print("  ERROR: reading the last line back failed: {}".format(back.get("error")))
+            failed = True
+        elif "second" not in back["data"]["lines"][0]["line"]:
+            print("  ERROR: expected the last real line, got {!r}".format(back["data"]["lines"][0]["line"]))
+            failed = True
+
+        print("Test: every line the scan returns reads back as the same line by its own number")
+        for entry in result["data"]["lines"]:
+            back, _ = _call_tool(mcp, "get_log", {"line_number": entry["line_number"]})
+            if not back.get("success"):
+                print("  ERROR: line {} did not read back: {}".format(entry["line_number"], back.get("error")))
+                failed = True
+            elif back["data"]["lines"][0]["line"] != entry["line"]:
+                print("  ERROR: line {} scanned as {!r} but read back as {!r}".format(entry["line_number"], entry["line"], back["data"]["lines"][0]["line"]))
+                failed = True
+    finally:
+        agent_tools.read_predbat_log = saved_reader
+
+    if not failed:
+        print("✓ Test passed: get_log ignores the trailing newline")
     return failed
