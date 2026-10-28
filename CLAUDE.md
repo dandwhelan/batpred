@@ -78,7 +78,8 @@ It lists every config item that differs from its default, recalculates the plan,
 
 ### Finding test order dependencies
 
-All tests share one `PredBat`/HA fixture, so a test that mutates shared state without fully restoring it can make an unrelated _later_ test fail depending on run order (see issue [#5079](https://github.com/springfall2008/batpred/issues/5079)). `./run_shuffle --hunt --quick` (from `coverage/`) fuzzes the test order, bisects any failure down to the minimal (culprit, victim) pair, and records it so the next run looks for a different one. See "Finding test order dependencies" in [docs/developing.md](docs/developing.md) for the full set of modes (`--bisect`, `--campaign`).
+Each test gets its own `PredBat` from `create_predbat()`, so instance attributes can't leak between tests. Module-level or class-level state that it doesn't rebuild (for example `PLOT_ENABLED` in `tests/test_infra.py`) can, and a test that changes it without restoring it can make an unrelated _later_ test fail depending on run order (see issue [#5079](https://github.com/springfall2008/batpred/issues/5079)).
+`./run_shuffle --hunt --quick` (from `coverage/`) fuzzes the test order, bisects any failure down to the minimal (culprit, victim) pair, and records it so the next run looks for a different one. See "Finding test order dependencies" in [docs/developing.md](docs/developing.md) for the full set of modes (`--bisect`, `--campaign`).
 
 ### Debugging notes
 
@@ -115,7 +116,7 @@ The main loop (`update_pred()`) runs every 5 minutes: fetch data → run optimiz
 ### Core Modules
 
 | Module | Role |
-|--------|------|
+| ------ | ---- |
 | `plan.py` | Optimization engine — multi-threaded search across thousands of charge/discharge window scenarios |
 | `predict.py` / `prediction.py` | Battery SOC prediction models, PV generation, load forecasting |
 | `fetch.py` | Pulls PV forecasts, historical load, rate data, and inverter state |
@@ -130,7 +131,7 @@ The main loop (`update_pred()`) runs every 5 minutes: fetch data → run optimiz
 
 ### Component/Plugin System
 
-`components.py` defines a registry of 31 pluggable components (DB, HA, Web, MCP, GECloud, Octopus, Fox, Solax, Solis, Axle, Ohme, Wallbox, Kraken, etc.). Each component:
+`components.py` defines a registry of 33 pluggable components (DB, HA, Web, MCP, GECloud, Octopus, Fox, Solax, Solis, Axle, Ohme, Wallbox, Hypervolt, Kraken, etc.). Each component:
 
 - Inherits from `ComponentBase`
 - Has `api_start()` / `api_stop()` lifecycle methods
@@ -174,7 +175,7 @@ Any behavioural change to `prediction.py`'s hot loop must still be mirrored in `
 
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.3.0). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.5.3). Fork changes on top of upstream:
 
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
 - **DB history fix** — `db_manager`/HA history returns correct results for entities with no state change inside the query window
@@ -183,9 +184,9 @@ This repository is a personal fork of `springfall2008/batpred` (currently based 
 
 ### Release Process (fork)
 
-Releases are versioned `v712.xx` (kept deliberately above upstream's `v8.x` scheme so the built-in updater treats fork releases as newest). To cut a release:
+Releases were versioned `v712.xx` up to v712.40, and `v713.x.y` from the upstream v9.5.3 merge - kept deliberately above upstream's `v9.x` scheme so nothing reads a fork release as older. To cut a release:
 
-1. Bump `THIS_VERSION` in `apps/predbat/predbat.py` (e.g. `v712.05`)
+1. Bump `THIS_VERSION` in `apps/predbat/predbat.py` (e.g. `v713.0.1`)
 2. Merge to `main` — `.github/workflows/release.yml` derives the tag from `THIS_VERSION` on push to `main` and creates the GitHub release automatically (skips if the tag already exists)
 
 Installations tracking this fork self-update from these releases via Predbat's built-in updater (`github.py` points at `dandwhelan/batpred`).
@@ -220,7 +221,7 @@ This project is indexed by GitNexus as **batpred** (13494 symbols, 38059 relatio
 ## Resources
 
 | Resource | Use for |
-|----------|---------|
+| -------- | ------- |
 | `gitnexus://repo/batpred/context` | Codebase overview, check index freshness |
 | `gitnexus://repo/batpred/clusters` | All functional areas |
 | `gitnexus://repo/batpred/processes` | All execution flows |
@@ -229,7 +230,7 @@ This project is indexed by GitNexus as **batpred** (13494 symbols, 38059 relatio
 ## CLI
 
 | Task | Read this skill file |
-|------|---------------------|
+| ---- | -------------------- |
 | Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
 | Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
 | Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
