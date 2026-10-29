@@ -77,6 +77,14 @@ _INTELLI_FLUX = "{}/INTELLI-FLUX-IMPORT-23-07-14/electricity-tariffs/E-1R-INTELL
 # EDF Kraken API base URL for EDF tariffs
 _EDF = "https://api.edfgb-kraken.energy/v1/products"
 
+# E.ON Next Kraken API base URL for E.ON Next tariffs
+_EON = "https://api.eonnext-kraken.energy/v1/products"
+
+# Intelligent Octopus Go 12M Fixed, October 2026 v3, inc VAT. These are region G (North West)
+# figures; other regions differ by a penny or two.
+IOG_FIXED_NIGHT_P = 7.9
+IOG_FIXED_DAY_P = 39.05
+
 
 # Import and export are chosen independently, so they are listed independently. They used
 # to be one list of pre-paired combinations, which could not express a pairing nobody had
@@ -91,13 +99,22 @@ IMPORT_TARIFFS = [
         "rates_import": [{"rate": 6.7, "start": "00:00:00", "end": "07:00:00"}, {"rate": PRICE_CAP_IMPORT_P, "start": "07:00:00", "end": "00:00:00"}],
     },
     {"id": "agile", "name": "Octopus Agile", "import_octopus_url": "{}/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
-    {"id": "intelligent_go", "name": "Octopus Intelligent GO", "import_octopus_url": "{}/INTELLI-VAR-24-10-29/electricity-tariffs/E-1R-INTELLI-VAR-24-10-29-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
-    {"id": "go", "name": "Octopus GO", "import_octopus_url": "{}/GO-VAR-22-10-14/electricity-tariffs/E-1R-GO-VAR-22-10-14-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
-    {"id": "cosy", "name": "Octopus Cosy", "import_octopus_url": "{}/COSY-22-12-08/electricity-tariffs/E-1R-COSY-22-12-08-{{dno_region}}/standard-unit-rates".format(_OCTOPUS)},
-    {"id": "snug", "name": "Octopus Snug", "import_octopus_url": "{}/SNUG-24-11-07/electricity-tariffs/E-1R-SNUG-24-11-07-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
-    {"id": "flux", "name": "Octopus Flux", "import_octopus_url": "{}/FLUX-IMPORT-23-02-14/electricity-tariffs/E-1R-FLUX-IMPORT-23-02-14-{{dno_region}}/standard-unit-rates".format(_OCTOPUS)},
+    {"id": "intelligent_go", "name": "Octopus Intelligent GO (variable)", "import_octopus_url": "{}/INTELLI-VAR-24-10-29/electricity-tariffs/E-1R-INTELLI-VAR-24-10-29-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
+    # The 12M Fixed product only publishes day/night endpoints, which the URL downloader cannot read,
+    # so its October 2026 v3 rates are entered by hand. Update them when the product is re-priced.
+    {
+        "id": "intelligent_go_fixed",
+        "name": "Octopus Intelligent GO 12M Fixed",
+        "rates_import": [{"rate": IOG_FIXED_NIGHT_P, "start": "23:30:00", "end": "05:30:00"}, {"rate": IOG_FIXED_DAY_P, "start": "05:30:00", "end": "23:30:00"}],
+    },
     {"id": "intelligent_flux", "name": "Octopus Intelligent Flux", "import_octopus_url": _INTELLI_FLUX},
-    {"id": "edf_go", "name": "EDF Go Electric", "import_octopus_url": "{}/EDF_EV_FIX_GOELEC_12M_HH/electricity-tariffs/E-1R-EDF_EV_FIX_GOELEC_12M_HH-{{dno_region}}/standard-unit-rates/".format(_EDF)},
+    # EDF and E.ON Next product codes carry a version that is replaced every few weeks; a newly
+    # launched version has no history for the replayed year, so AnnualTariff's current-rates
+    # fallback prices it from today's rates.
+    {"id": "edf_go", "name": "EDF Go Electric", "import_octopus_url": "{}/EDF_EV_FIX_GOELEC_12M_V3_HH/electricity-tariffs/E-1R-EDF_EV_FIX_GOELEC_12M_V3_HH-{{dno_region}}/standard-unit-rates/".format(_EDF)},
+    {"id": "edf_freephase_dynamic", "name": "EDF FreePhase Dynamic", "import_octopus_url": "{}/EDF_FREEPHASE_DYNAMIC_12M_V2_HH/electricity-tariffs/E-1R-EDF_FREEPHASE_DYNAMIC_12M_V2_HH-{{dno_region}}/standard-unit-rates/".format(_EDF)},
+    # E.ON Next Drive tariffs use E-TOU- tariff codes rather than E-1R-
+    {"id": "eon_next_drive_smart", "name": "Eon Next Drive Smart", "import_octopus_url": "{}/NEXT_DRIVE_SMART_V7_9/electricity-tariffs/E-TOU-NEXT_DRIVE_SMART_V7_9-{{dno_region}}/standard-unit-rates/".format(_EON)},
     {
         "id": "edf_empower_fixed",
         "name": "EDF Empower Fixed",
@@ -116,9 +133,10 @@ EXPORT_TARIFFS = [
     {"id": "outgoing_fixed", "name": "Octopus Outgoing Fixed", "export_octopus_url": _OUTGOING_FIXED},
     {"id": "outgoing_prime", "name": "Octopus Outgoing Prime", "export_octopus_url": _OUTGOING_PRIME},
     {"id": "agile_outgoing", "name": "Octopus Agile Outgoing", "export_octopus_url": "{}/AGILE-OUTGOING-19-05-13/electricity-tariffs/E-1R-AGILE-OUTGOING-19-05-13-{{dno_region}}/standard-unit-rates/".format(_OCTOPUS)},
-    {"id": "flux_export", "name": "Octopus Flux export", "export_octopus_url": "{}/FLUX-EXPORT-23-02-14/electricity-tariffs/E-1R-FLUX-EXPORT-23-02-14-{{dno_region}}/standard-unit-rates".format(_OCTOPUS)},
     {"id": "intelligent_flux_export", "name": "Octopus Intelligent Flux export", "export_octopus_url": _INTELLI_FLUX},
-    {"id": "eon_next_export", "name": "Eon Next export (16.5p)", "rates_export": [{"rate": 16.5}]},
+    # Next Export Exclusive v3 is a flat 13p. Its API rows carry no valid_from/valid_to dates, which the
+    # URL downloader cannot read, so the rate is entered by hand.
+    {"id": "eon_next_export", "name": "Eon Next Export Exclusive (13p)", "rates_export": [{"rate": 13.0}]},
     {"id": "edf_export_12m_v1", "name": "EDF Export 12m v1 (15p)", "rates_export": [{"rate": 15.0}]},
     {"id": "edf_export_12m_v2", "name": "EDF Export 12m v2 (13p)", "rates_export": [{"rate": 13.0}]},
     {"id": "edf_export_exclusive_12m_v3", "name": "EDF Export Exclusive 12m v3 (18p)", "rates_export": [{"rate": 18.0}]},

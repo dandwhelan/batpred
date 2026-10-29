@@ -2114,7 +2114,7 @@ def test_web_annual_pages(my_predbat):
         return [entry for entry in entries if entry["id"] == entry_id][0]
 
     agile = catalogue_entry(IMPORT_TARIFFS, "agile")
-    cosy = catalogue_entry(IMPORT_TARIFFS, "cosy")
+    edf_go = catalogue_entry(IMPORT_TARIFFS, "edf_go")
     price_cap = catalogue_entry(IMPORT_TARIFFS, "price_cap")
     outgoing_fixed = catalogue_entry(EXPORT_TARIFFS, "outgoing_fixed")
     no_export = catalogue_entry(EXPORT_TARIFFS, NO_EXPORT_ID)
@@ -2149,7 +2149,7 @@ def test_web_annual_pages(my_predbat):
                 "battery_kwh": 20.0,
                 "total_gbp": 25400.0,
                 "quoted": True,
-                "tariff": {"import_octopus_url": cosy["import_octopus_url"], "rates_export": no_export["rates_export"]},
+                "tariff": {"import_octopus_url": edf_go["import_octopus_url"], "rates_export": no_export["rates_export"]},
                 "baseline_tariff": {"rates_import": price_cap["rates_import"]},
                 "cost_with_predbat_p": 40000.0,
                 "saving_vs_none_p": 140000.0,
@@ -2160,7 +2160,7 @@ def test_web_annual_pages(my_predbat):
         },
     ]
     table = page.render_compare(runs, "20260728-0900")
-    for expected in ["5.6 kWp", "9.5 kWh", "Octopus Agile", "13.6", "12 kWp", "20 kWh", "Octopus Cosy", "8.2"]:
+    for expected in ["5.6 kWp", "9.5 kWh", "Octopus Agile", "13.6", "12 kWp", "20 kWh", "EDF Go Electric", "8.2"]:
         if expected not in table:
             print("  ERROR: the compare table should show {}, got {}".format(expected, table))
             failed = True
@@ -2181,8 +2181,8 @@ def test_web_annual_pages(my_predbat):
     print("Test: the tariff cells show the catalogue's own names, on the run that used them")
     alpha_row, beta_row = [row for row in re.findall(r"<tr[^>]*>.*?</tr>", table, re.S) if "<th>" not in row]
     for row, label, expected_names, unexpected_names in [
-        (alpha_row, "System Alpha", ["Price cap", "Octopus Agile", "Octopus Outgoing Fixed"], ["Octopus Cosy", "No export payment"]),
-        (beta_row, "System Beta", ["Price cap", "Octopus Cosy", "No export payment"], ["Octopus Agile", "Octopus Outgoing Fixed"]),
+        (alpha_row, "System Alpha", ["Price cap", "Octopus Agile", "Octopus Outgoing Fixed"], ["EDF Go Electric", "No export payment"]),
+        (beta_row, "System Beta", ["Price cap", "EDF Go Electric", "No export payment"], ["Octopus Agile", "Octopus Outgoing Fixed"]),
     ]:
         for name in expected_names:
             if name not in row:
@@ -2264,8 +2264,8 @@ def test_web_annual_pages(my_predbat):
         failed = True
     else:
         row_expectations = [
-            ("System Alpha", ["5.6 kWp", "9.5 kWh", "Octopus Agile", "13.6"], ["Octopus Cosy", "8.2", "12 kWp", "20 kWh"]),
-            ("System Beta", ["12 kWp", "20 kWh", "Octopus Cosy", "8.2"], ["Octopus Agile", "13.6", "5.6 kWp", "9.5 kWh"]),
+            ("System Alpha", ["5.6 kWp", "9.5 kWh", "Octopus Agile", "13.6"], ["EDF Go Electric", "8.2", "12 kWp", "20 kWh"]),
+            ("System Beta", ["12 kWp", "20 kWh", "EDF Go Electric", "8.2"], ["Octopus Agile", "13.6", "5.6 kWp", "9.5 kWh"]),
         ]
         for row, (label_fragment, must_contain, must_not_contain) in zip(data_rows, row_expectations):
             if label_fragment not in row:
@@ -2287,7 +2287,7 @@ def test_web_annual_pages(my_predbat):
             print("  ERROR: the Agile row should show its £12,250 system cost, got {}".format(data_rows[0]))
             failed = True
         if "£25,400" not in data_rows[1] or "quoted" not in data_rows[1]:
-            print("  ERROR: the Cosy row should show £25,400 marked as quoted, got {}".format(data_rows[1]))
+            print("  ERROR: the EDF Go Electric row should show £25,400 marked as quoted, got {}".format(data_rows[1]))
             failed = True
         if "quoted" in data_rows[0]:
             print("  ERROR: a modelled cost must not be labelled as a quote, got {}".format(data_rows[0]))
@@ -2301,10 +2301,10 @@ def test_web_annual_pages(my_predbat):
             print("  ERROR: saving_vs_none_p=114000.0p should render as £1140.00 on the Agile row, got {}".format(data_rows[0]))
             failed = True
         if "£400.00" not in data_rows[1]:
-            print("  ERROR: cost_with_predbat_p=40000.0p should render as £400.00 on the Cosy row, got {}".format(data_rows[1]))
+            print("  ERROR: cost_with_predbat_p=40000.0p should render as £400.00 on the EDF Go Electric row, got {}".format(data_rows[1]))
             failed = True
         if "£1400.00" not in data_rows[1]:
-            print("  ERROR: saving_vs_none_p=140000.0p should render as £1400.00 on the Cosy row, got {}".format(data_rows[1]))
+            print("  ERROR: saving_vs_none_p=140000.0p should render as £1400.00 on the EDF Go Electric row, got {}".format(data_rows[1]))
             failed = True
 
     print("Test: unknown Solar/Battery/Cost/Saving figures render as a dash, never as 0 or n/a")
