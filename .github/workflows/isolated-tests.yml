@@ -12,7 +12,9 @@ jobs:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v4
       with:
-        python-version: 3.x
+        # Match the Predbat add-on image (3.14). "3.x" picked up Python 3.15, which numpy==2.3.5 has no
+        # wheel for, so pip built it from source without an optimised BLAS and the ML tests ran ~6x slower.
+        python-version: "3.14"
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
