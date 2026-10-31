@@ -1828,6 +1828,7 @@ CONFIG_API_OVERRIDE = {
     "inverter_limit_charge": True,
     "inverter_limit_charge_dc": True,
     "inverter_limit_discharge": True,
+    "inverter_limit_export": True,
     "rates_import_override": True,
     "rates_export_override": True,
 }
@@ -2306,6 +2307,8 @@ INVERTER_DEF = {
         "can_span_midnight": False,
         "charge_discharge_with_rate": False,
         "target_soc_used_for_discharge": True,
+        # A Powerwall charges from the grid to reach a backup reserve above its SoC, even with grid charging disallowed
+        "reserve_above_soc_charges_from_grid": True,
     },
     "EnphaseCloud": {
         "name": "EnphaseCloud",
@@ -2334,6 +2337,8 @@ INVERTER_DEF = {
         "can_span_midnight": False,
         "charge_discharge_with_rate": False,
         "target_soc_used_for_discharge": True,
+        # Holds on the reserve like a Powerwall, so treated the same: a reserve above the SoC may be met from the grid
+        "reserve_above_soc_charges_from_grid": True,
     },
     "DeyeCloud": {
         "name": "DeyeCloud",
@@ -2781,6 +2786,7 @@ APPS_SCHEMA = {
     "battery_discharge_power_curve_default": {"type": "int_float_dict"},
     "clock_skew": {"type": "integer"},
     "predbat_repository": {"type": "string", "empty": True},
+    "predbat_branch": {"type": "string|string_list", "empty": False},
     "solcast_api_key": {"type": "string", "empty": False},
     "solcast_host": {"type": "string", "empty": False},
     "solcast_poll_hours": {"type": "float", "zero": False},
