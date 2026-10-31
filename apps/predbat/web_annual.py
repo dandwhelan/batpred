@@ -50,7 +50,7 @@ from annual_heat import (
     DEFAULT_WATER_GAS_KWH,
 )
 from annual_job import AnnualJob
-from annual_store import backfill_summaries, delete_run, list_runs, load_plan, load_run, save_run
+from annual_store import backfill_summaries, delete_run, list_runs, load_plan, load_run, save_run, solar_array_kwp
 from tariff_catalogue import (
     BASELINE_DEFAULT_EXPORT_ID,
     BASELINE_DEFAULT_IMPORT_ID,
@@ -1559,7 +1559,7 @@ class AnnualPage:
         if isinstance(solar, dict):
             solar = [solar]
         if isinstance(solar, list) and solar:
-            total_kwp = sum(float(array.get("kwp", 0) or 0) for array in solar if isinstance(array, dict))
+            total_kwp = sum(solar_array_kwp(array) for array in solar)
             panels = [int(array.get("panels", 0) or 0) for array in solar if isinstance(array, dict)]
             # Only show a panel count when EVERY array was given as panels; a partial
             # count would read as the whole system's.

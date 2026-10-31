@@ -79,7 +79,7 @@ class Stages:
         """Append a stage name to the call log."""
         self.calls.append(name)
 
-    def update_time(self):
+    def update_time(self, print=True, now=None):
         """Stand in for the clock update so a test can pin minutes_now."""
         self._note("update_time")
 

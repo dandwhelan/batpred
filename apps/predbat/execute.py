@@ -53,6 +53,21 @@ CHARGE_SIDE_STATES = set(CHARGE_STATE_PRECEDENCE)
 EXPORT_SIDE_STATES = set(EXPORT_STATE_PRECEDENCE)
 
 
+def hold_reserve_percent(inverter, target_percent):
+    """Reserve percent that holds an inverter's battery at target_percent.
+
+    Most inverters only stop discharging at the reserve, so one above the target keeps the SoC from
+    drifting down. An inverter that charges from the grid to reach a reserve above its SoC (a Tesla
+    Powerwall does, even with grid charging disallowed) would turn that into a grid import, and each
+    cycle's rounded-up SoC would ratchet the reserve higher again, so it never gets a reserve above
+    the SoC rounded down.
+    """
+    if inverter.inv_reserve_above_soc_charges_from_grid:
+        live_percent = int(inverter.soc_kw / inverter.soc_max * 100.0) if inverter.soc_max > 0 else 0
+        return min(target_percent, live_percent, 100)
+    return min(target_percent + 1, 100)
+
+
 def resolve_multi_inverter_status(status_per_inverter, current_status):
     """Resolve one headline status across a multi-inverter fleet.
 
@@ -175,7 +190,7 @@ class Execute:
             snapshot.append(
                 {
                     "soc_percent": inverter.soc_percent,
-                    "reserve_percent": inverter.reserve_current,
+                    "reserve_percent": inverter.reserve_percent_current,
                     "battery_power": inverter.battery_power,
                     "pv_power": inverter.pv_power,
                     "grid_power": inverter.grid_power,
@@ -466,6 +481,13 @@ class Execute:
         # is a global flag, so this is decided once rather than re-decided per inverter.
         if self.set_read_only:
             self.clear_control_ledger("read-only mode is enabled, so Predbat is not setting anything")
+            solis = self.solis_read_only_component()
+            if solis and solis.read_only_reset_error:
+                # Publish Idle as a clean Demo cycle does at the end of this function, so only the warning differs
+                self.set_charge_export_status(False, False, True)
+                self.isCharging = False
+                self.isExporting = False
+                return "Warn: Solis handover unconfirmed", solis.read_only_reset_error
 
         isCharging = False
         isExporting = False
@@ -651,7 +673,7 @@ class Execute:
                                 inverter.disable_charge_window()
                                 disabled_charge_window = True
                                 if self.set_reserve_enable and (not inverter.inv_has_timed_pause):
-                                    inverter.adjust_reserve(min(inverter.soc_percent + 1, 100))
+                                    inverter.adjust_reserve(hold_reserve_percent(inverter, inverter.soc_percent))
                                     resetReserve = False
                             else:
                                 inverter.adjust_charge_window(charge_start_time, charge_end_time, self.minutes_now)
@@ -689,7 +711,7 @@ class Execute:
 
                                         # Hold on reserve if we can't pause or won't pause the discharge (due to higher battery level)
                                         if self.set_reserve_enable and (not inverter.inv_has_timed_pause or (inverter.soc_percent > inv_target_soc_percent)):
-                                            inverter.adjust_reserve(min(inv_target_soc_percent + 1, 100, inverter.reserve_max))
+                                            inverter.adjust_reserve(min(hold_reserve_percent(inverter, inv_target_soc_percent), inverter.reserve_max))
                                             resetReserve = False
                                     else:
                                         inverter.adjust_charge_window(charge_start_time, charge_end_time, self.minutes_now)
@@ -977,7 +999,7 @@ class Execute:
                                     if discharge_rate is None:
                                         discharge_rate = 0
                                     if self.set_reserve_enable:
-                                        inverter.adjust_reserve(min(inverter.soc_percent + 1, 100))
+                                        inverter.adjust_reserve(hold_reserve_percent(inverter, inverter.soc_percent))
                                         resetReserve = False
                                 if hold_applied:
                                     self.log("Disabling battery discharge whilst car {} is charging".format(car_n))
@@ -1009,7 +1031,7 @@ class Execute:
                         if discharge_rate is None:
                             discharge_rate = 0
                         if self.set_reserve_enable:
-                            inverter.adjust_reserve(min(inverter.soc_percent + 1, 100))
+                            inverter.adjust_reserve(hold_reserve_percent(inverter, inverter.soc_percent))
                             resetReserve = False
                     boostHolding = True
                     self.log("Disabling battery discharge whilst iBoost is running")
@@ -1261,14 +1283,29 @@ class Execute:
         """
         return calc_percent_limit(charge_limit_kwh, self.soc_max) == self.reserve_percent
 
+    def solis_read_only_component(self):
+        """Find the native Solis controller only when it serves this executor's inverters and has control enabled.
+
+        A monitor-only component (solis_control_enable: false) never wrote a schedule, so there is
+        nothing to hand over and the inverters take the ordinary local reset instead.
+        """
+        if self.components and any(inverter.inverter_type == "SolisCloud" for inverter in self.inverters):
+            solis = self.components.get_component("solis")
+            if solis and solis.control_enable:
+                return solis
+        return None
+
     def reset_inverter(self):
         """
         Reset inverter to safe mode
         """
+        solis = self.solis_read_only_component() if self.set_read_only and self.inverter_needs_reset_force == "set_read_only" else None
         if not self.set_read_only or (self.inverter_needs_reset_force in ["set_read_only"]):
             self.last_service_hash = {}
             # Don't reset in read only mode unless forced
             for inverter in self.inverters:
+                if solis and inverter.inverter_type == "SolisCloud":
+                    continue  # Local slot entities cannot confirm this asynchronous controller's cleanup.
                 self.log("Reset inverter settings to safe mode (set_charge_window={} set_export_window={} force={})".format(self.set_charge_window, self.set_export_window, self.inverter_needs_reset_force))
                 if self.set_charge_window or (self.inverter_needs_reset_force in ["set_read_only", "mode"]):
                     inverter.adjust_charge_rate(inverter.battery_rate_max_charge * MINUTE_WATT)
@@ -1285,6 +1322,8 @@ class Execute:
                     inverter.adjust_export_immediate(int(EXPORT_LIMIT_IDLE))
                     self.isExporting = False
 
+        if solis and not solis.request_read_only_reset():
+            self.record_status("Warn: Solis handover unconfirmed", solis.read_only_reset_error, had_errors=True)
         self.inverter_needs_reset = False
         self.inverter_needs_reset_force = ""
 

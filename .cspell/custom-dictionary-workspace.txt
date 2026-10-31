@@ -281,6 +281,7 @@ geseriale
 getaffinity
 getall
 getattr
+getmembers
 getrusage
 Ginlong
 githubusercontent
@@ -424,6 +425,7 @@ maxrss
 maxsoc
 mbat
 mbuhansen
+mdi
 mdlrc
 measurand
 measurands
@@ -615,6 +617,7 @@ remainings
 remotecontrol
 renderable
 replayer
+repr
 representable
 resetmidnight
 resultid
@@ -763,6 +766,7 @@ tunables
 twinx
 typecode
 typecodes
+tzdata
 tzfile
 tzpath
 tzset
@@ -818,6 +822,8 @@ WEXITSTATUS
 WIFEXITED
 WNOHANG
 workmode
+workstream
+workstreams
 worktree
 writeonly
 wrongsha
