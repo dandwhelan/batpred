@@ -11,7 +11,7 @@
 from datetime import datetime, timedelta, timezone
 import requests
 from ha import run_async
-from download import DEFAULT_PREDBAT_REPOSITORY, MAX_PREDBAT_BRANCH_OPTIONS, resolve_predbat_repository, is_valid_predbat_branch, predbat_branch_option
+from download import MAX_PREDBAT_BRANCH_OPTIONS, resolve_predbat_repository, is_valid_predbat_branch, predbat_branch_option
 from utils import dp1
 from predbat import THIS_VERSION, THIS_VERSION_DISPLAY
 
