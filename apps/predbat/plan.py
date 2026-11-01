@@ -1693,10 +1693,32 @@ class Plan:
     def record_length(self, charge_window, charge_limit, best_price):
         """
         Limit the forecast length to either the total forecast duration or the start of the last window that falls outside the forecast
+
+        The plan is anchored to the first charge window at best_price. With calculate_horizon_ignore_sessions on,
+        a window touching a one-off free/saving/Axle import session (rate_import_saving_minutes) cannot be the
+        anchor, and if one was skipped best_price is raised to the cheapest remaining charging window. Otherwise a
+        free hour tomorrow afternoon ends the plan 24 hours after it, before the next regular cheap window that
+        would refill the battery, and the planner sees no value in charging overnight beyond that point.
         """
+        session_windows = set()
+        if self.calculate_horizon_ignore_sessions and self.rate_import_saving_minutes and charge_window:
+            session_minutes = self.rate_import_saving_minutes
+            regular_price = None
+            for window_n in range(len(charge_window)):
+                window = charge_window[window_n]
+                if any(minute in session_minutes for minute in range(window["start"], window["end"])):
+                    session_windows.add(window_n)
+                elif charge_limit[window_n] > 0:
+                    regular_price = window["average"] if regular_price is None else min(regular_price, window["average"])
+            if session_windows and regular_price is not None and regular_price > best_price:
+                self.log("Plan horizon ignoring {} charge window(s) in one-off sessions, best_price {}{} raised to {}{}".format(len(session_windows), best_price, self.currency_symbols[1], regular_price, self.currency_symbols[1]))
+                best_price = regular_price
+
         next_charge_start = self.forecast_minutes + self.minutes_now
         if charge_window:
             for window_n in range(len(charge_window)):
+                if window_n in session_windows:
+                    continue
                 if charge_limit[window_n] > 0 and charge_window[window_n]["average"] <= best_price:
                     next_charge_start = charge_window[window_n]["start"]
                     if next_charge_start < self.minutes_now:

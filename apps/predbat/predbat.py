@@ -422,6 +422,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.soc_max = 10.0
         self.battery_temperature = 20
         self.end_record = 24 * 60 * 2
+        self.calculate_horizon_ignore_sessions = False
         self.predict_soc = {}
         self.predict_soc_best = {}
         self.predict_iboost_best = {}

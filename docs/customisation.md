@@ -338,6 +338,10 @@ See the Predbat mode setting above for basic calculation options
 **input_number.predbat_forecast_plan_hours** is the minimum length of the Predbat charge plan, and is the number of hours _after_ the first charge slot to include in the plan.
 The default of 24 hours is the recommended value (to match energy rate cycles). Note that the actual length of the Predbat plan will vary depending upon when the first charge slot is.
 
+**switch.predbat_calculate_horizon_ignore_sessions** (_expert mode_) When turned On, a charge slot inside a one-off session (an Octopus free electricity session, an import saving session or an Axle event) is not used as the first charge slot that sets the plan length above.
+The plan is instead measured from the first regular cheap charge slot, so a free hour tomorrow afternoon does not end the plan 24 hours later, before the next overnight slot that would refill the battery.
+This stops Predbat from undercharging overnight on the assumption that the free session repeats. Default is Off, which keeps the existing behaviour.
+
 **switch.predbat_calculate_export_oncharge** (_expert mode_) When turned On, calculated export slots will disable or move charge slots, allowing them to intermix in the plan. When Off (the default) export slots will never be placed into charge slots.
 
 **switch.predbat_calculate_export_on_pv** (_expert mode_) When turned On (the default), Predbat will consider forced battery export slots even during periods of predicted solar production.
