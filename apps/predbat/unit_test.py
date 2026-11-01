@@ -25,6 +25,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from predbat import PredBat
 from tests.test_infra import FIXTURE_MINUTES_NOW, TestHAInterface, set_plot_enabled
 from tests.test_compute_metric import run_compute_metric_tests
+from tests.test_record_length import run_record_length_tests
 from tests.test_pv90 import run_pv90_tests
 from tests.test_performance_tweaks import run_performance_tweaks_tests
 from tests.test_perf import run_perf_test
@@ -556,6 +557,7 @@ def main():
         ("new_install_detection", test_new_install_detection, "New-install misdetection tests (Bug B, #4397/#4396, #3259, #3306)", False),
         ("config_json_format", test_config_json_format, "predbat_config.json written one setting per line and loads back", False),
         ("compute_metric", run_compute_metric_tests, "Compute metric tests", False),
+        ("record_length", run_record_length_tests, "Plan horizon (end_record) anchoring tests", False),
         ("pv90", run_pv90_tests, "pv90 upside scenario tests", False),
         ("performance_tweaks", run_performance_tweaks_tests, "performance_tweaks toggle tests", False),
         ("minute_array", test_minute_array, "MinuteArray class tests", False),

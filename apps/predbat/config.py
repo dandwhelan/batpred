@@ -1019,6 +1019,13 @@ CONFIG_ITEMS = [
         "default": True,
     },
     {
+        "name": "calculate_horizon_ignore_sessions",
+        "friendly_name": "Plan horizon ignores one-off free/saving sessions",
+        "type": "switch",
+        "enable": "expert_mode",
+        "default": False,
+    },
+    {
         "name": "calculate_inday_adjustment",
         "friendly_name": "Calculate in-day adjustment",
         "type": "switch",
