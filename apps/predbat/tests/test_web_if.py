@@ -90,6 +90,7 @@ def run_test_web_if(my_predbat):
             ("POST", "/dash"),
             ("GET", "/components"),
             ("GET", "/discovery"),
+            ("GET", "/component_discovery"),
             ("GET", "/apps_value"),
             ("GET", "/component_entities"),
             ("POST", "/component_restart"),
@@ -170,6 +171,9 @@ def run_test_web_if(my_predbat):
             # Upstream's Kraken API key generator (v9.4.1): the page itself is swept above, but the
             # API acts on a Kraken token a bare request cannot supply - test_kraken_key.py drives it.
             ("POST", "/api/kraken_key"),
+            # Upstream's History day picker (v9.7.0): 404 without a ?date= of a recorded day, which a bare
+            # request cannot supply - test_billing_client_js.py drives it with a stored day.
+            ("GET", "/api/plan_history"),
             # Upstream's chat routes (v8.54.0), covered instead by test_web_chat.py, which
             # drives them with a real conversation. The page itself is swept above; these
             # cannot be: /chat/stream is a long-lived SSE response that never completes,
