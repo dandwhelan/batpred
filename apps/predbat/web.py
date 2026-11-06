@@ -2926,6 +2926,7 @@ pbRegisterChart(chart, pbChartSize);
         if day is not None:
             text += "</optgroup>"
         return text, len(ids)
+
     def history_day_names(self):
         """The dates (YYYY-MM-DD, oldest first) the History view's day picker can show, from predbat.plan_history."""
         days = self.get_state_wrapper(entity_id=self.prefix + ".plan_history", attribute="days", default=None)
