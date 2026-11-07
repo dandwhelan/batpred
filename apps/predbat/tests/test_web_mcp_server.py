@@ -192,23 +192,23 @@ def store_auth_code(server, code="test-auth-code", client_id="client-a", redirec
 
 
 def _test_jwt_secret_derivation(_my_predbat):
-    """The JWT signing key is derived from the MCP secret, never equal to it."""
-    print("Test: the JWT signing key is derived from, not equal to, the MCP secret")
+    """The JWT signing key is a random key of its own, never the MCP secret or derived from it (#5847)."""
+    print("Test: the JWT signing key is random, not the MCP secret or derived from it")
     server = make_mcp_server()
 
     if server.jwt_secret == MCP_SECRET:
         print("ERROR: the signing key must not be the client secret itself")
         return 1
-    expected = hashlib.sha256("jwt_signing_key_{}".format(MCP_SECRET).encode()).hexdigest()
-    if server.jwt_secret != expected:
-        print("ERROR: unexpected signing key derivation")
+    # A key derived from the secret could be recomputed by anyone who knows it, so tokens could be forged
+    derived = hashlib.sha256("jwt_signing_key_{}".format(MCP_SECRET).encode()).hexdigest()
+    if server.jwt_secret == derived:
+        print("ERROR: the signing key is still derived from the MCP secret")
         return 1
 
-    # A different configured secret must produce a different signing key, otherwise tokens
-    # would remain valid across a secret rotation
-    other = make_mcp_server(secret="a-different-secret")
+    # Two servers with the same secret must not share a signing key
+    other = make_mcp_server()
     if other.jwt_secret == server.jwt_secret:
-        print("ERROR: rotating the MCP secret did not change the signing key")
+        print("ERROR: two servers produced the same signing key")
         return 1
     return 0
 
@@ -850,8 +850,8 @@ def _test_register_returns_credentials(_my_predbat):
     if not body["client_id"].startswith("mcp-client-"):
         print("ERROR: unexpected client_id {}".format(body["client_id"]))
         return 1
-    if body["client_secret"] != MCP_SECRET:
-        print("ERROR: registration should hand back the shared secret")
+    if "client_secret" in body:
+        print("ERROR: registration must not hand back the shared secret (#5847)")
         return 1
     if body["client_name"] != "Test Client":
         print("ERROR: the client name was not echoed back")
@@ -932,7 +932,7 @@ def _install_mcp_server_stub(server):
     class StubMCPServer:
         """Records handled requests in place of the real MCP protocol handler."""
 
-        async def handle_mcp_request(self, request, mcp_server):
+        async def handle_mcp_request(self, request, mcp_server, scopes=None):
             """Record the request and return a fixed JSON-RPC result."""
             handled.append(request)
             return {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
@@ -1046,7 +1046,7 @@ def _test_mcp_endpoints_handler_error(_my_predbat):
     class FailingMCPServer:
         """Raises from the request handler to exercise the error path."""
 
-        async def handle_mcp_request(self, request, mcp_server):
+        async def handle_mcp_request(self, request, mcp_server, scopes=None):
             """Fail as a broken tool implementation would."""
             raise RuntimeError("tool exploded")
 
@@ -1141,7 +1141,7 @@ def _test_mcp_get_oauth_and_errors(_my_predbat):
     class FailingMCPServer:
         """Raises from the request handler to exercise the GET error path."""
 
-        async def handle_mcp_request(self, request, mcp_server):
+        async def handle_mcp_request(self, request, mcp_server, scopes=None):
             """Fail as a broken tool implementation would."""
             raise RuntimeError("tool exploded")
 
@@ -1817,7 +1817,7 @@ def _test_create_mcp_server_factory(_my_predbat):
 def test_web_mcp_server(my_predbat=None):
     """Run the MCP server test suite, returning non-zero if any sub-test failed."""
     sub_tests = [
-        ("jwt_secret", _test_jwt_secret_derivation, "JWT signing key derivation"),
+        ("jwt_secret", _test_jwt_secret_derivation, "JWT signing key is random, not derived from the secret"),
         ("token_claims", _test_generate_access_token_claims, "Access token claims"),
         ("token_valid", _test_verify_access_token_valid, "Valid token accepted"),
         ("token_foreign_sig", _test_verify_access_token_rejects_foreign_signature, "Foreign signature rejected"),

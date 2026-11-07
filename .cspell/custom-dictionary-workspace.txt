@@ -192,6 +192,7 @@ ecosmart
 Eddi
 eddis
 edfenergy
+edfgb
 efgh
 elif
 elinter
@@ -222,6 +223,7 @@ Enpower
 entityfilter
 entrez
 entrypoint
+eonnext
 epod
 epvtoday
 errno
@@ -438,6 +440,7 @@ metricmid
 microinverters
 middlebox
 middleboxes
+middot
 milli
 minb
 minmax
@@ -461,6 +464,7 @@ monokai
 Mosquitto
 mousedown
 mpan
+mpans
 mppt
 mprn
 mpxn
@@ -504,6 +508,7 @@ OCPP
 octo
 octoplus
 octopoints
+oegb
 OFFPEAK
 Ofgem
 Ohme
@@ -605,6 +610,7 @@ reactivepower
 readback
 readbacks
 reasoncodes
+rebooked
 recp
 redownload
 Referer

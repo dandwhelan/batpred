@@ -175,7 +175,7 @@ Any behavioural change to `prediction.py`'s hot loop must still be mirrored in `
 
 ## Fork-Specific Notes
 
-This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.5.3). Fork changes on top of upstream:
+This repository is a personal fork of `springfall2008/batpred` (currently based on upstream v9.7.0). Fork changes on top of upstream:
 
 - **Custom web dashboard** — the port-5052 web UI has a `/dash_entities` page and a redesigned power flow diagram (`web.py`, `web_helper.py`)
 - **DB history fix** — `db_manager`/HA history returns correct results for entities with no state change inside the query window
