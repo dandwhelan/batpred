@@ -1145,7 +1145,20 @@ class HAInterface(ComponentBase):
             data_frame = {"domain": domain, "service": service, "service_data": data}
             return run_async(self.base.trigger_callback(data_frame))
 
-    def api_call(self, endpoint, data_in=None, post=False, core=True, silent=False):
+    def remove_state(self, entity_id):
+        """
+        Remove an entity that Predbat published but no longer owns, from the local cache, the
+        database and Home Assistant, so it stops showing a frozen last value.
+        """
+        entity_id = entity_id.lower()
+        self.state_data.pop(entity_id, None)
+        self.db_mirror_list.pop(entity_id, None)
+        if self.db_enable and (self.db_mirror_ha or self.db_primary):
+            self.db_manager.remove_entity_db(entity_id)
+        if self.ha_key:
+            self.api_call("/api/states/{}".format(entity_id), delete=True, silent=True)
+
+    def api_call(self, endpoint, data_in=None, post=False, core=True, silent=False, delete=False):
         """
         Make an API call to Home Assistant.
 
@@ -1173,7 +1186,9 @@ class HAInterface(ComponentBase):
             "Accept": "application/json",
         }
         try:
-            if post:
+            if delete:
+                response = requests.delete(url, headers=headers, timeout=TIMEOUT)
+            elif post:
                 if data_in:
                     response = requests.post(url, headers=headers, json=data_in, timeout=TIMEOUT)
                 else:

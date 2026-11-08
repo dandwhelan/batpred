@@ -99,6 +99,8 @@ CATALOGUE_AMBIGUOUS_VEHICLE = (
     "Octopus's catalogue lists vehicle {device} with more than one battery size ({values} {unit}) and Predbat can't tell which yours is,"
     " so it plans with the largest, {value} {unit}. A battery size from Octopus is used in place of car_charging_battery_size, so that setting can't change it"
 )
+# (domain, name) of every entity published per Intelligent device, suffixed with the device index
+INTELLIGENT_DEVICE_ENTITIES = [("binary_sensor", "intelligent_dispatch"), ("select", "intelligent_target_time"), ("number", "intelligent_target_soc")]
 OCTOPUS_SLOT_MAX_DEFAULT = 48  # 24 hours with 30-minute slots
 OCTOPUS_SLOT_MAX_CAPPED = 12  # 6 hours with 30-minute slots
 OCTOPUS_SLOT_MAX_MINUTES = 30  # octopus_slot_max is set in 30-minute slots, the cap itself is counted in dispatch minutes (#5510)
@@ -792,6 +794,10 @@ class OctopusAPI(ComponentBase):
         # The slot entities automatic_config() last wired the car slots to, so it only ever clears wiring
         # that is still its own - None until it has wired any
         self.intelligent_config_slots = None
+        # The car slot a lone Intelligent device's dispatches were last wired to (see intelligent_dispatch_car())
+        self.intelligent_config_car = None
+        # Per device: did the last dispatch poll fail, so the planned dispatches are the last known ones
+        self.dispatch_fetch_failed = {}
         self.tariff_fetched_at = None
         self.device_fetched_at = None
         self.session_fetched_at = None
@@ -962,6 +968,13 @@ class OctopusAPI(ComponentBase):
                 # favour of another. Left alone, the car slots keep watching the old device's
                 # dispatch sensor and Predbat never sees the live IOG window (issue #4648).
                 self.log("OctopusAPI: Live intelligent devices changed from {} to {}, reconfiguring car slots".format(self.intelligent_config_devices, active_devices))
+                self.automatic_config(self.tariffs)
+                self.refresh_discovery()
+            elif len(active_devices) == 1 and getattr(self.base, "car_slot_owner", None) in (None, "octopus") and self.intelligent_dispatch_car() != self.intelligent_config_car:
+                # The lone device's charger has moved to the other car. Not gated on sensor_due: the plug
+                # sensor is Predbat's own read, not part of the device poll, and the old car would be
+                # planned without the dispatches until the next one
+                self.log("OctopusAPI: Car on the Intelligent charger changed from {} to {}, reconfiguring car slots".format(self.intelligent_config_car, self.intelligent_dispatch_car()))
                 self.automatic_config(self.tariffs)
                 self.refresh_discovery()
             elif sensor_due and getattr(self.base, "car_slot_owner", None) != self.intelligent_config_owner:
@@ -1282,7 +1295,29 @@ class OctopusAPI(ComponentBase):
                 for device_id in removed:
                     self.log("OctopusAPI: Intelligent device {} no longer live, removing".format(device_id))
                     del self.intelligent_devices[device_id]
+                if not self.intelligent_device_list_failed:
+                    self.remove_stale_intelligent_entities()
         return self.intelligent_devices
+
+    def remove_stale_intelligent_entities(self):
+        """
+        Remove the per-device entities of Intelligent devices we no longer have.
+
+        A deregistered device is dropped from self.intelligent_devices, but its dispatch, target
+        time and target SOC entities were already published and would sit in the database and Home
+        Assistant frozen on their last value forever. This also clears ones left behind by an earlier
+        run, so it works from the entities that exist rather than only the devices just pruned.
+        """
+        live = {self.device_id_to_index_suffix(device_id) for device_id in self.intelligent_devices}
+        stale = []
+        for root, suffix in INTELLIGENT_DEVICE_ENTITIES:
+            prefix = self.get_entity_name(root, suffix) + "_"
+            for entity_id in self.list_entity_ids():
+                if entity_id.startswith(prefix) and entity_id[len(prefix) :] not in live:
+                    stale.append(entity_id)
+        for entity_id in stale:
+            self.log("OctopusAPI: Removing entity {} for an Intelligent device that is no longer registered".format(entity_id))
+            self.remove_state_wrapper(entity_id)
 
     def suffix_to_device_id(self, suffix):
         """
@@ -1720,6 +1755,80 @@ class OctopusAPI(ComponentBase):
 
         return return_available_events, return_joined_events
 
+    def dispatch_status(self):
+        """
+        What the Octopus Intelligent dispatches are doing, for the Plan page banner.
+
+        Says whether Predbat is waiting on Octopus (nothing planned), a dispatch is running or due, or the
+        last poll failed and what is shown is the last known. Times are left as the dispatches carry them,
+        for the browser to show in its own clock.
+        """
+        devices = self.get_intelligent_devices()
+        if not devices or not self.is_intelligent_go_tariff(self.tariffs.get("import", {}).get("tariffCode", "")):
+            return {"enabled": False}
+        now = self.now_utc_exact
+        status_devices = []
+        for device_id in sorted(devices):
+            device = devices[device_id]
+            planned = []
+            for dispatch in device.get("planned_dispatches", []):
+                start = dispatch.get("start")
+                end = dispatch.get("end")
+                if not start or not end or parse_date_time(end) <= now:
+                    continue
+                planned.append({"start": start, "end": end, "kwh": abs(dispatch.get("charge_in_kwh") or 0), "source": dispatch.get("source")})
+            status_devices.append(
+                {
+                    "device_id": device_id,
+                    "provider": device.get("provider"),
+                    "model": device.get("model"),
+                    "suspended": bool(device.get("suspended")),
+                    "current_state": device.get("current_state"),
+                    "fetch_failed": bool(self.dispatch_fetch_failed.get(device_id)),
+                    "planned": planned,
+                }
+            )
+        return {
+            "enabled": True,
+            "car": self.intelligent_config_car,
+            "refresh_minutes": self.device_refresh_minutes,
+            "age_minutes": None if self.device_fetched_at is None else round(self._data_age_minutes(self.device_fetched_at), 1),
+            "devices": status_devices,
+        }
+
+    def intelligent_dispatch_car(self):
+        """
+        The car slot a lone Intelligent device's dispatches belong in: the car that is plugged in.
+
+        Octopus reports the charger, not the car on it, so its dispatches used to land on car 0 whichever
+        car was plugged in. With two cars sharing one charger the other car was then planned by Predbat
+        itself, at times that had nothing to do with Octopus's, while car 0's unplugged state made Predbat
+        drop the dispatches. So wire them to the plugged-in car, using the same plug sensor
+        (car_charging_plugged, else car_charging_planned) fetch_sensor_data_cars() reads.
+
+        Held where it is when no car reports plugged in, or when the car it is on still does - two plugged
+        cars say nothing about which is on the charger, and moving on every plug flicker would re-plan
+        for nothing. Cars are only ever told apart from car 0: a single car, or no plug sensors, is car 0.
+        """
+        current = self.intelligent_config_car or 0
+        num_cars = self.get_arg("num_cars", 0)
+        plug_arg_for = getattr(self.base, "car_plug_arg", None)
+        plugged_now = getattr(self.base, "car_plugged_in_now", None)
+        if not plug_arg_for or not plugged_now or num_cars < 2:
+            return 0
+        # The first wiring runs before Predbat has read its car settings, so there is nothing to match the
+        # plug sensors against yet: stay where we are and let run() move it once they are loaded
+        if getattr(self.base, "car_charging_planned_response", None) is None:
+            return current if current < num_cars else 0
+        plugged = []
+        for car_n in range(num_cars):
+            plug_arg = plug_arg_for(car_n, planned=True)
+            if plug_arg and plugged_now(car_n, plug_arg) is True:
+                plugged.append(car_n)
+        if not plugged or current in plugged:
+            return current if current < num_cars else 0
+        return plugged[0]
+
     def automatic_config(self, tariffs):
         """
         Automatic configuration of entities
@@ -1766,6 +1875,16 @@ class OctopusAPI(ComponentBase):
                 slot_list.append(self.get_entity_name("binary_sensor", "intelligent_dispatch", index=index_suffix))
                 ready_list.append(self.get_entity_name("select", "intelligent_target_time", index=index_suffix))
                 limit_list.append(self.get_entity_name("number", "intelligent_target_soc", index=index_suffix))
+            # A lone device goes to the car on the charger. Cars before it get an empty entry, which the
+            # fetch skips, so they are left to plan for themselves. With several devices each takes the slot
+            # its sorted position gives it, as the per-car settings are keyed on that.
+            dispatch_car = self.intelligent_dispatch_car() if len(active_devices) == 1 else 0
+            if dispatch_car:
+                slot_list = [""] * dispatch_car + slot_list
+                ready_list = [""] * dispatch_car + ready_list
+                limit_list = [""] * dispatch_car + limit_list
+                self.log("OctopusAPI: Intelligent device dispatches wired to car {}, the car that is plugged in".format(dispatch_car))
+            self.intelligent_config_car = dispatch_car
             # With no active device left the wiring is cleared - but only wiring that is still what
             # was put there from here. The slots are not claimed while nothing owns them, so another
             # component may have wired them to something of its own since: the Ohme component does,
@@ -1783,8 +1902,8 @@ class OctopusAPI(ComponentBase):
                 self.intelligent_config_slots = slot_list
                 # Increase number of cars if we have more active devices than the current limit to ensure all devices can be configured
                 num_cars = self.get_arg("num_cars", 0)
-                if num_cars < len(active_devices):
-                    self.set_arg("num_cars", len(active_devices))
+                if num_cars < len(slot_list):
+                    self.set_arg("num_cars", len(slot_list))
                 if active_devices:
                     self.log("OctopusAPI: Car slots wired to intelligent devices {}".format(sorted(active_devices)))
                 else:
@@ -3076,9 +3195,11 @@ class OctopusAPI(ComponentBase):
                     # Planned dispatches are never pruned, so drop any that have ended since, and re-trim the one
                     # in progress so the energy delivered since the last poll is not counted again.
                     planned = self.cached_planned_dispatches(IntelligentdeviceID)
+                    self.dispatch_fetch_failed[IntelligentdeviceID] = True
                     if planned:
                         self.log("Warn: OctopusAPI: Dispatch fetch failed for intelligent device {}, reusing the last known planned dispatches".format(IntelligentdeviceID))
                 else:
+                    self.dispatch_fetch_failed[IntelligentdeviceID] = False
                     planned = self.planned_dispatches_for_state(IntelligentdeviceID, planned, current_state)
 
                 # Sort by start time

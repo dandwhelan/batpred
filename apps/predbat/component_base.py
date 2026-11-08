@@ -512,6 +512,14 @@ class ComponentBase(ABC):
             attributes = {}
         return self.base.set_state_wrapper(entity_id, state, attributes=attributes, required_unit=required_unit)
 
+    def list_entity_ids(self):
+        """Every entity id Predbat currently holds a state for (empty where the interface keeps none)."""
+        return list(getattr(self.base.ha_interface, "state_data", {}))
+
+    def remove_state_wrapper(self, entity_id):
+        """Remove one of the component's own entities that no longer has an owner (e.g. a deregistered device)."""
+        return self.base.ha_interface.remove_state(entity_id)
+
     async def set_state_external(self, entity_id, state, attributes=None):
         """Change one of Predbat's OWN entities as if a user had, updating its CONFIG_ITEMS value.
 
