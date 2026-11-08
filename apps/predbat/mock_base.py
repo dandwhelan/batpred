@@ -96,6 +96,10 @@ class MockBase:
         """
         self.entities[entity_id] = {"state": state, "attributes": attributes or {}}
 
+    def remove_state_wrapper(self, entity_id):
+        """Drop an entity from the in-memory store."""
+        self.entities.pop(entity_id, None)
+
     def dashboard_item(self, entity_id, state=None, attributes=None, app=None):
         """Print a published entity and store it.
 

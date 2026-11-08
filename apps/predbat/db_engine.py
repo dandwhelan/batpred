@@ -347,6 +347,19 @@ class DatabaseEngine:
         rows = self.db_cursor.fetchall()
         return [row[0] for row in rows]
 
+    def _remove_entity_db(self, entity_id):
+        """
+        Remove an entity and all of its history from the SQLLite database
+        """
+        entity_index = self._get_entity_index_db(entity_id)
+        if entity_index is None:
+            return False
+        self.db_cursor.execute("DELETE FROM states WHERE entity_index = ?", (entity_index,))
+        self.db_cursor.execute("DELETE FROM latest WHERE entity_index = ?", (entity_index,))
+        self.db_cursor.execute("DELETE FROM entities WHERE entity_index = ?", (entity_index,))
+        self.entity_id_cache.pop(entity_id, None)
+        return True
+
     def _commit_db(self):
         """
         Commit changes to the database

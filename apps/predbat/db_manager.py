@@ -127,6 +127,8 @@ class DatabaseManager(ComponentBase):
                     self.return_event.set()  # Notify that the result is ready
                 elif command == "set_state":
                     self.db_engine._set_state_db(info["entity_id"], info["state"], info["attributes"], timestamp=info["timestamp"])
+                elif command == "remove_entity":
+                    self.db_engine._remove_entity_db(info["entity_id"])
                 elif command == "get_all_entities":
                     entities = self.db_engine._get_all_entities_db()
                     self.queue_results[queue_id] = entities
@@ -277,6 +279,12 @@ class DatabaseManager(ComponentBase):
 
         item = {"last_changed": now_utc.strftime(TIME_FORMAT_DB), "state": state, "attributes": attributes}
         return item
+
+    def remove_entity_db(self, entity_id):
+        """
+        Remove an entity and its history, run from the DB thread
+        """
+        self.send_via_ipc("remove_entity", {"entity_id": entity_id})
 
     def get_history_db(self, sensor, now, days=30, from_time=None):
         """

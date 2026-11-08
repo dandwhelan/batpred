@@ -690,6 +690,7 @@ class WebInterface(ComponentBase):
         app.router.add_post("/api/state", self.html_api_post_state)
         app.router.add_post("/api/service", self.html_api_post_service)
         app.router.add_get("/api/plan_data", self.html_api_plan_data)
+        app.router.add_get("/api/dispatch_status", self.html_api_dispatch_status)
         app.router.add_get("/api/plan_archive", self.html_api_plan_archive)
         app.router.add_get("/api/plan_history", self.html_api_plan_history)
         app.router.add_get("/api/log", self.html_api_get_log)
@@ -2791,6 +2792,16 @@ pbRegisterChart(chart, pbChartSize);
         else:
             return web.Response(content_type="application/json", text='{"result": "error"}')
 
+    async def html_api_dispatch_status(self, request):
+        """
+        JSON API - what the Octopus Intelligent dispatches are doing, for the Plan page banner.
+        Polled on its own: plan_data answers "unchanged" while the plan is, which would hide a fetch that
+        found no dispatches or one that failed.
+        """
+        octopus = self.base.components.get_component("octopus") if getattr(self.base, "components", None) else None
+        status = octopus.dispatch_status() if octopus else {"enabled": False}
+        return web.json_response(status)
+
     async def html_api_plan_data(self, request):
         """
         JSON API - Return plan data for all three views
@@ -2980,6 +2991,9 @@ pbRegisterChart(chart, pbChartSize);
         text += '<label id="debugToggleLabel" style="margin-left: auto;"><input type="checkbox" id="debugToggle" onchange="onDebugToggleChange()"> Show Debug</label>'
         text += "</div>"
 
+        # Octopus Intelligent dispatch status, filled in by renderDispatchBanner()
+        text += '<div id="dispatchBanner" style="display:none; padding:8px 12px; margin-bottom:10px; border-radius:4px; border:1px solid #ddd; font-size:14px;"></div>'
+
         # Day picker for the History view, filled in by renderHistoryPicker()
         text += '<div id="historyPicker" style="display:none; margin-bottom: 10px; gap: 6px; flex-wrap: wrap;"></div>'
 
@@ -3053,6 +3067,42 @@ pbRegisterChart(chart, pbChartSize);
         text += "if (window.baselineData && window.baselineData.timestamp) initialTimestamps.push(window.baselineData.timestamp);\n"
         text += "if (initialTimestamps.length > 0) newestDataTimestamp = initialTimestamps.reduce((a, b) => a > b ? a : b);\n"
         text += "window.addEventListener('load', function() { updateTimestampDisplay(); startPlanUpdates(); });\n"
+        text += "async function updateDispatchBanner() {\n"
+        text += "  const box = document.getElementById('dispatchBanner');\n"
+        text += "  if (!box) { return; }\n"
+        text += "  try {\n"
+        text += "    const response = await fetch('./api/dispatch_status');\n"
+        text += "    if (!response.ok) { throw new Error('HTTP ' + response.status); }\n"
+        text += "    renderDispatchBanner(box, await response.json());\n"
+        text += "  } catch (error) {\n"
+        text += "    box.style.display = 'block'; box.style.background = '#fff3cd'; box.textContent = 'Octopus dispatch status unavailable: ' + error.message;\n"
+        text += "  }\n"
+        text += "}\n"
+        text += "function renderDispatchBanner(box, s) {\n"
+        text += "  if (!s.enabled) { box.style.display = 'none'; return; }\n"
+        text += "  const hm = (iso) => new Date(iso).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});\n"
+        text += "  const now = new Date();\n"
+        text += "  const planned = [];\n"
+        text += "  let failed = false, suspended = true, state = '';\n"
+        text += "  for (const d of s.devices) { planned.push(...d.planned); failed = failed || d.fetch_failed; suspended = suspended && d.suspended; state = d.current_state || state; }\n"
+        text += "  planned.sort((a, b) => new Date(a.start) - new Date(b.start));\n"
+        text += "  const running = planned.find(p => new Date(p.start) <= now && new Date(p.end) > now);\n"
+        text += "  const kwh = planned.reduce((t, p) => t + p.kwh, 0).toFixed(1);\n"
+        text += "  let colour = '#e8f5e9', head;\n"
+        text += "  if (suspended) { colour = '#f0f0f0'; head = 'Octopus Intelligent device is suspended - no dispatches'; }\n"
+        text += "  else if (running) { head = 'Octopus dispatch running now until ' + hm(running.end); }\n"
+        text += "  else if (planned.length) { head = 'Next Octopus dispatch ' + hm(planned[0].start) + '-' + hm(planned[0].end); }\n"
+        text += "  else { colour = '#fff8e1'; head = 'Waiting for Octopus - no dispatches planned yet'; }\n"
+        text += "  if (failed) { colour = '#fff3cd'; head += ' (last fetch failed, showing the last known)'; }\n"
+        text += "  let detail = '';\n"
+        text += "  if (planned.length) { detail += planned.length + ' planned (' + kwh + ' kWh): ' + planned.map(p => hm(p.start) + '-' + hm(p.end)).join(', ') + '. '; }\n"
+        text += "  if (s.car !== null && s.car !== undefined) { detail += 'Wired to car ' + s.car + '. '; }\n"
+        text += "  if (s.age_minutes !== null) { const next = Math.max(0, Math.round(s.refresh_minutes - s.age_minutes)); detail += 'Fetched ' + Math.round(s.age_minutes) + ' min ago, next in about ' + next + ' min (every ' + s.refresh_minutes + ' min).'; }\n"
+        text += "  box.style.display = 'block'; box.style.background = colour;\n"
+        text += "  box.innerHTML = '<b></b><br><span style=\"color:#555\"></span>';\n"
+        text += "  box.querySelector('b').textContent = head; box.querySelector('span').textContent = detail;\n"
+        text += "}\n"
+        text += "window.addEventListener('load', function() { updateDispatchBanner(); setInterval(updateDispatchBanner, 30000); });\n"
         text += "window.addEventListener('resize', adjustResponsiveSizes);\n"
         # Fetch one saved plan into the Saved view; switchView/refreshPlan come from the plan renderer
         text += "async function loadSavedPlan(id) {\n"

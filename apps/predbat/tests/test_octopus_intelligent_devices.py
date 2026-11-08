@@ -8,7 +8,7 @@ import copy
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from octopus import OctopusAPI, DATE_TIME_STR_FORMAT, OCTOPUS_CAR_ENTITY_SPEC, CATALOGUE_AMBIGUOUS_CHARGER
+from octopus import OctopusAPI, DATE_TIME_STR_FORMAT, OCTOPUS_CAR_ENTITY_SPEC, CATALOGUE_AMBIGUOUS_CHARGER, INTELLIGENT_DEVICE_ENTITIES
 
 
 def test_octopus_intelligent_devices_wrapper(my_predbat):
@@ -34,11 +34,89 @@ def test_octopus_intelligent_devices_wrapper(my_predbat):
     failed += test_intelligent_dispatch_change_requests_replan(my_predbat)
     failed += test_car_slots_rewired_when_owner_changes(my_predbat)
     failed += test_car_slots_not_taken_without_a_device_to_wire(my_predbat)
+    failed += test_lone_device_wired_to_the_plugged_in_car(my_predbat)
     failed += test_catalogue_value_picks_between_conflicting_entries(my_predbat)
     failed += asyncio.run(test_intelligent_devices_ambiguous_catalogue(my_predbat))
     failed += test_ambiguous_charger_plans_at_configured_rate(my_predbat)
     failed += asyncio.run(test_planned_dispatches_follow_device_state(my_predbat))
     failed += asyncio.run(test_devices_list_failure_refreshes_known_devices(my_predbat))
+    failed += asyncio.run(test_deregistered_device_entities_removed(my_predbat))
+    failed += test_dispatch_status_for_the_plan_banner(my_predbat)
+    return failed
+
+
+def test_dispatch_status_for_the_plan_banner(my_predbat):
+    """The Plan page banner's data: only dispatches still to come, and whether the last poll failed."""
+    failed = 0
+    api = OctopusAPI(my_predbat, key="test-key", account_id="test-account", automatic=False)
+    api.log = MagicMock()
+    api.tariffs = {"import": {"tariffCode": "E-1R-IOG-SMB-VAR-24-10-29-L", "deviceID": "meter-1"}}
+    now = api.now_utc_exact
+
+    def slot(start_min, end_min, kwh):
+        return {"start": (now + timedelta(minutes=start_min)).strftime(DATE_TIME_STR_FORMAT), "end": (now + timedelta(minutes=end_min)).strftime(DATE_TIME_STR_FORMAT), "charge_in_kwh": kwh, "source": "SMART"}
+
+    api.intelligent_devices = {"dev-1": {"suspended": False, "provider": "Hypervolt", "current_state": "SMART_CONTROL_CAPABLE", "planned_dispatches": [slot(-90, -60, -3.7), slot(30, 60, -3.7), slot(120, 180, -7.4)]}}
+    status = api.dispatch_status()
+    planned = status["devices"][0]["planned"] if status.get("devices") else None
+    if not status.get("enabled") or planned is None or len(planned) != 2 or abs(planned[0]["kwh"] - 3.7) > 0.001:
+        print("ERROR: expected the two dispatches still to come, with kWh as positive numbers, got {}".format(status))
+        failed += 1
+    if status["devices"][0]["fetch_failed"]:
+        print("ERROR: expected no failed fetch")
+        failed += 1
+
+    api.dispatch_fetch_failed["dev-1"] = True
+    if not api.dispatch_status()["devices"][0]["fetch_failed"]:
+        print("ERROR: expected the failed fetch to be reported")
+        failed += 1
+
+    api.intelligent_devices = {}
+    if api.dispatch_status() != {"enabled": False}:
+        print("ERROR: expected the banner off with no Intelligent device")
+        failed += 1
+    return failed
+
+
+async def test_deregistered_device_entities_removed(my_predbat):
+    """A deregistered device's published entities are removed, not left frozen on their last value."""
+    failed = 0
+    api = OctopusAPI(my_predbat, key="test-key", account_id="test-account", automatic=False)
+    api.log = MagicMock()
+    api.fetch_previous_dispatch = AsyncMock()
+    api.tariffs = {"import": {"tariffCode": "E-1R-IOG-SMB-VAR-24-10-29-L", "deviceID": "meter-1"}}
+    api.remove_state_wrapper = MagicMock()
+
+    def device(device_id):
+        return {"device_id": device_id, "completed_dispatches": [], "planned_dispatches": []}
+
+    def entities_for(suffix):
+        return [api.get_entity_name(root, name, index=suffix) for root, name in INTELLIGENT_DEVICE_ENTITIES]
+
+    # An old registration (aee21) whose entities are still published, a live one (b0b09), and an
+    # unrelated entity that must never be touched
+    unrelated = api.get_entity_name("sensor", "saving_session")
+    state_data = {entity: {} for entity in entities_for("aee21") + entities_for("b0b09")}
+    state_data[unrelated] = {}
+    api.list_entity_ids = MagicMock(return_value=list(state_data))
+
+    api.async_get_intelligent_devices = AsyncMock(return_value={"device-b0b09": device("device-b0b09")})
+    api.intelligent_devices = {"device-aee21": device("device-aee21")}
+    await api.async_update_intelligent_devices("test-account")
+
+    removed = sorted(call.args[0] for call in api.remove_state_wrapper.call_args_list)
+    if removed != sorted(entities_for("aee21")):
+        print("ERROR: Expected only the aee21 entities removed, got {}".format(removed))
+        failed += 1
+
+    # A failed devices list says nothing about which devices exist, so nothing may be removed
+    api.remove_state_wrapper.reset_mock()
+    api.intelligent_device_list_failed = True
+    api.async_get_intelligent_devices = AsyncMock(return_value={})
+    await api.async_update_intelligent_devices("test-account")
+    if api.remove_state_wrapper.called:
+        print("ERROR: Entities removed after a failed devices list: {}".format(api.remove_state_wrapper.call_args_list))
+        failed += 1
     return failed
 
 
@@ -1961,6 +2039,84 @@ def test_car_slots_rewired_when_owner_changes(my_predbat):
     my_predbat.car_slot_owner = original_owner
     if failed == 0:
         print("PASS: the car slots were re-wired when their owner changed")
+    return failed
+
+
+def test_lone_device_wired_to_the_plugged_in_car(my_predbat):
+    """
+    Octopus reports the charger, not the car on it. With two cars sharing the charger the dispatches used to
+    go to car 0 whichever car was plugged in, so a plugged-in car 1 was planned by Predbat on its own - at
+    times unrelated to Octopus's - while car 0's unplugged state made it drop the dispatches. The lone
+    device's dispatches now follow the plugged-in car, and run() re-wires them when that moves.
+    """
+    print("\n**** Running Octopus dispatch follows the plugged-in car test ****")
+    failed = 0
+    original_args = dict(my_predbat.args)
+    original_owner = getattr(my_predbat, "car_slot_owner", None)
+
+    api = _make_discovery_api(my_predbat, "plugged-car")
+    device_id = "smart-flex-vehicle-8001"
+    api.intelligent_devices = {device_id: {"suspended": False, "is_charger": True, "provider": "Hypervolt"}}
+    api.tariffs = {"import": {"tariffCode": "E-1R-IOG-SMB-FIX-12M-26-10-27-G", "productCode": "IOG-SMB-FIX-12M-26-10-27", "deviceID": "meter-1"}}
+    _publish_car_entities(my_predbat, api, device_id)
+    _stub_run_dependencies(api)
+    api.report_discovery = lambda report: None
+    own_entity = api.get_entity_name("binary_sensor", "intelligent_dispatch", index=api.device_id_to_index_suffix(device_id))
+    my_predbat.car_slot_owner = None
+    my_predbat.args["num_cars"] = 2
+
+    plugged = {0: False, 1: True}
+    with patch.object(my_predbat, "car_plug_arg", side_effect=lambda car_n, planned=False: "car_charging_planned"), patch.object(my_predbat, "car_plugged_in_now", side_effect=lambda car_n, arg="car_charging_planned": plugged[car_n]):
+        # Only car 1 is plugged in: the dispatches go to car 1, car 0 is left an empty entry
+        asyncio.run(api.run(seconds=0, first=True))
+        wired = my_predbat.args.get("octopus_intelligent_slot")
+        if wired != ["", own_entity]:
+            print(f"ERROR: expected the dispatch wired to car 1 only, got {wired}")
+            failed += 1
+        if len(my_predbat.args.get("octopus_ready_time", [])) != 2 or len(my_predbat.args.get("octopus_charge_limit", [])) != 2:
+            print(f"ERROR: expected ready time and charge limit wired to car 1 too, got {my_predbat.args.get('octopus_ready_time')} {my_predbat.args.get('octopus_charge_limit')}")
+            failed += 1
+
+        # Both plugged in says nothing about which is on the charger: held on car 1
+        plugged.update({0: True, 1: True})
+        asyncio.run(api.run(seconds=60, first=False))
+        if my_predbat.args.get("octopus_intelligent_slot") != ["", own_entity]:
+            print(f"ERROR: expected the wiring held with both cars plugged in, got {my_predbat.args.get('octopus_intelligent_slot')}")
+            failed += 1
+
+        # Neither plugged in: held too, rather than moved on a flicker
+        plugged.update({0: False, 1: False})
+        asyncio.run(api.run(seconds=120, first=False))
+        if my_predbat.args.get("octopus_intelligent_slot") != ["", own_entity]:
+            print(f"ERROR: expected the wiring held with no car plugged in, got {my_predbat.args.get('octopus_intelligent_slot')}")
+            failed += 1
+
+        # The charger moves to car 0: re-wired without waiting for a sensor refresh
+        plugged.update({0: True, 1: False})
+        asyncio.run(api.run(seconds=180, first=False))
+        if my_predbat.args.get("octopus_intelligent_slot") != [own_entity]:
+            print(f"ERROR: expected the dispatch back on car 0, got {my_predbat.args.get('octopus_intelligent_slot')}")
+            failed += 1
+
+    # The first wiring runs before Predbat has read its car settings, so car_charging_planned_response does not
+    # exist yet: that must hold the wiring on car 0, not raise and take the component down at startup
+    api.intelligent_config_car = None
+    saved_response = my_predbat.__dict__.pop("car_charging_planned_response", None)
+    try:
+        if api.intelligent_dispatch_car() != 0:
+            print("ERROR: expected car 0 before the car settings are loaded")
+            failed += 1
+    except AttributeError as err:
+        print(f"ERROR: intelligent_dispatch_car raised before the car settings were loaded: {err}")
+        failed += 1
+    finally:
+        if saved_response is not None:
+            my_predbat.car_charging_planned_response = saved_response
+
+    my_predbat.args = original_args
+    my_predbat.car_slot_owner = original_owner
+    if failed == 0:
+        print("PASS: the lone device's dispatches follow the plugged-in car")
     return failed
 
 
