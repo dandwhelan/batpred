@@ -2252,7 +2252,10 @@ var options = {
         text += "    }\n"
         text += "   ]\n"
         text += "  }\n"
-        text += "}\n"
+        # The semicolon is required: the title script below starts with '(', and without it the browser parses
+        # 'var options = {...}(function() {...})()' as one statement calling the options object, which throws
+        # 'TypeError: ... is not a function' and leaves every chart blank (#6015).
+        text += "};\n"
         # The title is an HTML heading above the chart, not an ApexCharts title: ApexCharts binds drag-to-zoom to the
         # whole chart SVG, so a drag (or a touch-scroll on mobile) anywhere in a title band inside it - including the
         # gap between the title text and the toolbar - zoomed the chart (#5979). Outside the SVG it cannot start a zoom,
@@ -6703,9 +6706,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
         action = data.get("action")
         if action == "check":
-            result = await kraken_key.check_kraken_key(base_url, token)
+            result = await kraken_key.check_kraken_key(base_url, token, session_factory=self.http_session)
         elif action == "generate":
-            result = await kraken_key.generate_kraken_key(base_url, token)
+            result = await kraken_key.generate_kraken_key(base_url, token, session_factory=self.http_session)
         else:
             return web.json_response({"status": "error", "error": "Unknown action"}, status=400, headers=headers)
 

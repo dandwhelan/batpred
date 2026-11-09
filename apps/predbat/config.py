@@ -2316,6 +2316,9 @@ INVERTER_DEF = {
         "target_soc_used_for_discharge": True,
         # A Powerwall charges from the grid to reach a backup reserve above its SoC, even with grid charging disallowed
         "reserve_above_soc_charges_from_grid": True,
+        # ...and since firmware 25.18.4 honours no backup reserve between 80 and 100, so above 80% a hold that must
+        # not discharge at all (a car hold) can only ask for 100 (GH#6046)
+        "reserve_full_only_above_80": True,
     },
     "EnphaseCloud": {
         "name": "EnphaseCloud",
@@ -2758,7 +2761,7 @@ APPS_SCHEMA = {
     "soc_max": {"type": "sensor_list", "sensor_type": "float", "entries": "num_inverters"},
     "soc_max_fallback": {"type": "sensor_list", "sensor_type": "float", "entries": "num_inverters"},
     "reserve": {"type": "sensor_list", "sensor_type": "float", "entries": "num_inverters"},
-    "inverter_mode": {"type": "sensor_list", "sensor_type": "string", "modify": True, "entries": "num_inverters"},
+    "inverter_mode": {"type": "sensor_list", "sensor_type": "string", "modify": True, "entries": "num_inverters", "blank_entries": True},
     "inverter_time": {"type": "sensor_list", "sensor_type": "string", "entries": "num_inverters"},
     "inverter_type": {"type": "string_list", "entries": "num_inverters"},
     "charge_start_time": {"type": "sensor_list", "sensor_type": "string", "modify": True, "entries": "num_inverters"},
@@ -2854,6 +2857,8 @@ APPS_SCHEMA = {
     "solis_control_enable": {"type": "boolean"},
     "solis_cloud_pv_load_ignore": {"type": "boolean"},
     "solis_nominal_voltage": {"type": "float"},
+    "solis_parallel_slaves": {"type": "dict"},
+    "solis_parallel_slot_current_max": {"type": "float"},
     "solis_auth_method": {"type": "string", "empty": False},
     "solis_access_token": {"type": "string", "empty": False},
     "solis_token_expires_at": {"type": "string", "empty": False},

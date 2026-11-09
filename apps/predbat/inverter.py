@@ -42,6 +42,7 @@ from const import (
     INVERTER_CLOCK_SKEW_RESTART_MINUTES,
     INVERTER_CLOCK_SKEW_WARN_MINUTES,
     INVERTER_CLOCK_SKEW_WARN_REPEAT_MINUTES,
+    BATTERY_SIZE_RETRY_MINUTES,
     INVERTER_LIMIT_DEFAULT_W,
     EXPORT_LIMIT_DEFAULT_W,
 )
@@ -586,6 +587,9 @@ class Inverter:
         # True when a reserve above the SoC makes the battery charge from the grid to reach it, so a
         # hold on reserve must not lead the SoC. Defaults False so an inverter type has to opt in.
         self.inv_reserve_above_soc_charges_from_grid = INVERTER_DEF[self.inverter_type].get("reserve_above_soc_charges_from_grid", False)
+        # True when no reserve between 80 and 100 is honoured (a Powerwall, GH#6046), so above 80% a hold that must not
+        # discharge at all can only ask for 100. Defaults False so an inverter type has to opt in.
+        self.inv_reserve_full_only_above_80 = INVERTER_DEF[self.inverter_type].get("reserve_full_only_above_80", False)
         self.inv_charge_time_format = INVERTER_DEF[self.inverter_type]["charge_time_format"]
         self.inv_charge_time_entity_is_option = INVERTER_DEF[self.inverter_type]["charge_time_entity_is_option"]
         self.inv_clock_time_format = INVERTER_DEF[self.inverter_type]["clock_time_format"]
@@ -946,14 +950,31 @@ class Inverter:
         # trimmed mean is recovered too; otherwise today_key is present in the recovered history (so the
         # recalculation below is skipped) while the live-only state read returns None, silently disabling
         # battery_scaling_auto for the rest of the day.
-        trimmed_mean_state = self.base.load_previous_value_from_ha(soc_max_sensor_name)
+        # With no measurement in the history the state is only the nominal capacity it was published
+        # with. That is harmless while a nominal is configured (the scaling comes out at 1.0), but with
+        # soc_max unset it is an old configured size read back as a measurement - e.g. a Sunsynk
+        # installer-entered Batt Capacity bound as soc_max before soc_max_fallback existed.
+        has_measurement = any(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in existing_history.values())
+        trimmed_mean_state = self.base.load_previous_value_from_ha(soc_max_sensor_name) if has_measurement or (self.nominal_capacity and self.nominal_capacity > 0) else None
         try:
             trimmed_mean = float(trimmed_mean_state) if trimmed_mean_state is not None else None
         except (ValueError, TypeError):
             trimmed_mean = None
 
-        if today_key not in existing_history:
-            # Only calculate once per day to save compute resources
+        # A day whose calculation found nothing is retried hourly rather than left until tomorrow: the
+        # first cycle after midnight UTC comes before an overnight charge, so a None stored then would
+        # skip that night's charge for a whole day. The attempt time is kept on the sensor, as a new
+        # Inverter is built every cycle and the history already survives a restart there.
+        retry_due = False
+        if today_key in existing_history and existing_history[today_key] is None:
+            last_attempt = self.base.load_previous_value_from_ha(soc_max_sensor_name, attribute="last_attempt")
+            try:
+                retry_due = (self.base.now_utc - datetime.fromisoformat(str(last_attempt))).total_seconds() >= BATTERY_SIZE_RETRY_MINUTES * 60
+            except (ValueError, TypeError):
+                retry_due = True
+
+        if today_key not in existing_history or retry_due:
+            # Only calculate once per day (or hourly until it succeeds) to save compute resources
             found_size = self.find_battery_size(self.nominal_capacity)
             if found_size and found_size > 0:
                 trimmed_mean = self.update_soc_max_calculated_sensor(found_size, self.nominal_capacity)
@@ -964,7 +985,7 @@ class Inverter:
             # Recorder has today's result, but a restart removed the live sensor.
             # Preserve the recorded state as the planning mean; an all-None history
             # publishes the nominal capacity but returns no newly calculated mean.
-            self.update_soc_max_calculated_sensor(existing_history[today_key], self.nominal_capacity)
+            self.update_soc_max_calculated_sensor(existing_history[today_key], self.nominal_capacity, attempted=False)
 
         if self.base.battery_scaling_auto and trimmed_mean and trimmed_mean > 0:
             if self.nominal_capacity > 0:
@@ -977,11 +998,13 @@ class Inverter:
                 self.soc_max = dp3(self.nominal_capacity * new_scaling)
                 self.log("Info: Inverter {} battery_scaling_auto set scaling {:.3f} (mean {:.2f} kWh, nominal {:.2f} kWh) resulting in soc_max {:.3f} kWh".format(self.id, new_scaling, trimmed_mean, self.nominal_capacity, self.soc_max))
             else:
-                # No nominal configured - use trimmed mean directly without clamping
+                # No nominal configured - use trimmed mean directly without clamping. It is not written
+                # back to soc_max: the next cycle would read it as configured, so the clamp and the
+                # find_battery_size plausibility band would hold every later estimate to the first one.
+                # Each cycle recovers the mean from the sensor instead.
                 self.soc_max = dp3(trimmed_mean)
                 self.nominal_capacity = self.soc_max
                 self.battery_scaling = 1.0
-                self.base.set_arg("soc_max", self.soc_max, index=self.id)
                 self.base.set_arg("soc_max_nominal", 0.0, index=self.id)
                 self.log("Info: Inverter {} battery_scaling_auto using measured mean {:.2f} kWh (no nominal configured)".format(self.id, trimmed_mean))
 
@@ -1007,13 +1030,15 @@ class Inverter:
             # soc_max to 8 kWh until restart. Leaving the args intact lets the next cycle re-read the
             # real source (or restore soc_max_nominal) and recover automatically.
 
-    def update_soc_max_calculated_sensor(self, found_size, nominal_capacity=0):
+    def update_soc_max_calculated_sensor(self, found_size, nominal_capacity=0, attempted=True):
         """
         Update the soc_max_calculated sensor with a new data point and return the trimmed mean.
 
         Stores one data point per calendar day (keyed by date string) and keeps the 7 most-recent days.
         The sensor state is the trimmed mean (min and max dropped when >= 3 samples, plain average otherwise).
         nominal_capacity is stored as a sensor attribute (0 if not configured).
+        attempted records now as the last_attempt attribute that paces retries of a day that found
+        nothing; pass False when only republishing a recorded result, which keeps the previous one.
         Returns the trimmed mean or None if no data.
         """
         if self.id > 0:
@@ -1024,6 +1049,7 @@ class Inverter:
         history = self.base.load_previous_value_from_ha(sensor_name, attribute="history") or {}
         if not isinstance(history, dict):
             history = {}
+        last_attempt = self.base.now_utc.isoformat() if attempted else self.base.load_previous_value_from_ha(sensor_name, attribute="last_attempt")
 
         today_key = str(self.base.now_utc.date())
         history[today_key] = round(found_size, 3) if found_size is not None else None
@@ -1041,6 +1067,7 @@ class Inverter:
                 state=nominal_capacity if nominal_capacity > 0 else "unknown",
                 attributes={
                     "history": history,
+                    "last_attempt": last_attempt,
                     "nominal_capacity": round(nominal_capacity, 3),
                     "degradation_percent": None,
                     "configured_degradation": round((1 - self.battery_scaling) * 100, 2),
@@ -1072,6 +1099,7 @@ class Inverter:
             state=dp2(trimmed_mean),
             attributes={
                 "history": history,
+                "last_attempt": last_attempt,
                 "nominal_capacity": round(nominal_capacity, 3),
                 "degradation_percent": round(degradation * 100, 2),
                 "configured_degradation": round((1 - self.battery_scaling) * 100, 2),
