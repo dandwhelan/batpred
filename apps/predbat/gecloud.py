@@ -23,7 +23,7 @@ import asyncio
 import math
 import json
 import random
-from component_base import ComponentBase
+from component_base import ComponentBase, writes
 from coordinator import charger_with_stub_car, inverter_record
 from mock_base import MockBase as SharedMockBase
 
@@ -368,6 +368,25 @@ def classify_ge_failure(data, endpoint=None):
     reason = known["reason"] if known else "api_error"
     retry = known["retry"] if known else True
     return {"code": code, "message": ge_code_message(data, code), "reason": reason, "retry": retry}
+
+
+def register_ids_to_int(registers):
+    """
+    A device's registers with their ids back as the integers the GE Cloud API uses.
+
+    The settings are stored as JSON, which can only hold string keys, so a restored "17" would
+    never match the API's register id 17: the control registers would never be read again, and
+    a full read would add a second entry beside each one rather than replace it.
+    """
+    if not isinstance(registers, dict):
+        return {}
+    result = {}
+    for key, register in registers.items():
+        try:
+            result[int(key)] = register
+        except (TypeError, ValueError):
+            result[key] = register
+    return result
 
 
 def format_ge_endpoint(endpoint, serial="", setting_id="", uuid="", meter_ids="", start_time="", end_time="", command=""):
@@ -799,6 +818,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
         """
         return self.shift_time_string(value, self.get_timezone_offset_minutes())
 
+    @writes
     async def switch_event(self, entity_id, service):
         """
         Switch event
@@ -874,6 +894,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
         registers = self.settings.get(device, {})
         return any(regname_to_ha(register.get("name", "")) == "enable_force_charge" and register_switch_on(register.get("value", None)) for register in registers.values())
 
+    @writes
     async def ensure_ac_charge_gate(self, device):
         """
         Turn the AC charge gate back on for a device that is force charging, if something else turned it off.
@@ -905,6 +926,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
                 self.log("GECloud: Warn: Failed to enable AC charge for {}".format(device))
         return changed
 
+    @writes
     async def number_event(self, entity_id, value):
         """
         Number event
@@ -938,6 +960,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
                     else:
                         self.log("GECloud: Warn: Failed to write setting {} {} to {}".format(device, key, new_value))
 
+    @writes
     async def select_event(self, entity_id, value):
         """
         Select event
@@ -1374,6 +1397,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
             self.base.record_status("Warn: GE Cloud: " + message, had_errors=True)
         self.ems_slot_warned.add(device)
 
+    @writes
     async def enable_default_options(self, device, registers):
         """Enable default options for the device."""
         changed = False
@@ -2340,6 +2364,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
         """A charger with no car plugged in is left alone - commanding it would achieve nothing and every command costs a retry loop."""
         return self.evc_car_connected(self.evc_device[uuid].get("status", None))
 
+    @writes
     async def charger_control_send(self, uuid, charge, car_n):
         """Start the charger inside a planned window, stop it outside one."""
         command = EVC_COMMAND_START if charge else EVC_COMMAND_STOP
@@ -2347,6 +2372,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
         if await self.async_send_evc_command(uuid, command, {}) is None:
             raise EVCCommandFailed("{} was not accepted by EV charger {}".format(command, self.evc_device[uuid]["serial_number"]))
 
+    @writes
     async def charger_control_release_one(self, uuid, charge):
         """Hand a held charger back by starting it again.
 
@@ -2727,6 +2753,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
         self.update_success_timestamp()
         return True
 
+    @writes
     async def async_send_evc_command(self, uuid, command, params):
         """
         Send a command to the EVC
@@ -2794,6 +2821,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
             self.log("GECloud: Warn: Device {} Failed to read inverter setting id {}, got {}".format(serial, setting_id, data))
         return data
 
+    @writes
     async def async_write_inverter_setting(self, serial, setting_id, value):
         """
         Write a setting to the inverter
@@ -2842,7 +2870,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
             self.log("GECloud: No valid settings found in storage cache, will read all registers")
             return
         # Only the devices found now, or departed hardware would be saved back to the cache forever
-        self.settings = {device: settings for device, settings in cached_settings.items() if device in self.device_list}
+        self.settings = {device: register_ids_to_int(settings) for device, settings in cached_settings.items() if device in self.device_list}
         self.settings_from_cache = bool(self.settings)
         stamps = await self.storage.load("gecloud", "settings_read")
         self.settings_read_stamps = {}
@@ -3579,7 +3607,7 @@ class GECloudDirect(ComponentBase, CarChargerControl):
 
         timeout = aiohttp.ClientTimeout(total=TIMEOUT)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with self.http_session(timeout=timeout) as session:
                 if post:
                     if datain:
                         async with session.post(url, headers=headers, json=datain) as response:
@@ -3746,7 +3774,7 @@ class GECloudData(ComponentBase):
         self.log("Fetching {}".format(url))
         timeout = aiohttp.ClientTimeout(total=30)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with self.http_session(timeout=timeout) as session:
                 async with session.get(url, headers=headers) as response:
                     if response.status not in [200, 201]:
                         self.log("Warn: GeCloud: Warn: Failed to get data from {} status code {}".format(url, response.status))

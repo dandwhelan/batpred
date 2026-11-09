@@ -1999,7 +1999,8 @@ class WebInterface(ComponentBase):
         midnight_str = (self.midnight_utc + timedelta(days=1)).strftime(TIME_FORMAT)
         text = get_chart_theme_js()
         text += "<script>\n"
-        text += "(function() {\n"
+        # Leading ';' so the IIFE can never be glued onto a preceding statement (#6015 guard)
+        text += ";(function() {\n"
         if daily_chart:
             text += """
 function pbChartSize() {
@@ -2252,7 +2253,10 @@ var options = {
         text += "    }\n"
         text += "   ]\n"
         text += "  }\n"
-        text += "}\n"
+        # The semicolon is required: the title script below starts with '(', and without it the browser parses
+        # 'var options = {...}(function() {...})()' as one statement calling the options object, which throws
+        # 'TypeError: ... is not a function' and leaves every chart blank (#6015).
+        text += "};\n"
         # The title is an HTML heading above the chart, not an ApexCharts title: ApexCharts binds drag-to-zoom to the
         # whole chart SVG, so a drag (or a touch-scroll on mobile) anywhere in a title band inside it - including the
         # gap between the title text and the toolbar - zoomed the chart (#5979). Outside the SVG it cannot start a zoom,
@@ -2318,7 +2322,8 @@ var options = {
 
         text = get_chart_theme_js()
         text += "<script>\n"
-        text += "(function() {\n"
+        # Leading ';' so the IIFE can never be glued onto a preceding statement (#6015 guard)
+        text += ";(function() {\n"
         text += "var height_{} = {};\n".format(js_id, height)
         text += "function pbChartSize() {\n"
         text += "    var width = window.innerWidth;\n"
@@ -2375,7 +2380,7 @@ var options = {
         text = get_chart_theme_js() + (
             """
 <script>
-(function() {
+;(function() {
 function pbChartSize() {
     // Use full width minus small margins; on mobile fit the viewport
     var width = window.innerWidth <= 700 ? window.innerWidth - 20 : Math.max(800, window.innerWidth - 100);
@@ -3097,7 +3102,9 @@ pbRegisterChart(chart, pbChartSize);
         text += "  let detail = '';\n"
         text += "  if (planned.length) { detail += planned.length + ' planned (' + kwh + ' kWh): ' + planned.map(p => hm(p.start) + '-' + hm(p.end)).join(', ') + '. '; }\n"
         text += "  if (s.car !== null && s.car !== undefined) { detail += 'Wired to car ' + s.car + '. '; }\n"
-        text += "  if (s.age_minutes !== null) { const next = Math.max(0, Math.round(s.refresh_minutes - s.age_minutes)); detail += 'Fetched ' + Math.round(s.age_minutes) + ' min ago, next in about ' + next + ' min (every ' + s.refresh_minutes + ' min).'; }\n"
+        text += (
+            "  if (s.age_minutes !== null) { const next = Math.max(0, Math.round(s.refresh_minutes - s.age_minutes)); detail += 'Fetched ' + Math.round(s.age_minutes) + ' min ago, next in about ' + next + ' min (every ' + s.refresh_minutes + ' min).'; }\n"
+        )
         text += "  box.style.display = 'block'; box.style.background = colour;\n"
         text += "  box.innerHTML = '<b></b><br><span style=\"color:#555\"></span>';\n"
         text += "  box.querySelector('b').textContent = head; box.querySelector('span').textContent = detail;\n"
@@ -3576,7 +3583,7 @@ pbRegisterChart(chart, pbChartSize);
         text += get_dashboard_collapsible_js()
         text += """
 <script>
-(function() {
+;(function() {
     var DASH_REFRESH_INTERVAL = 60000; // 60 seconds
     var dashRefreshTimer = null;
 
@@ -6703,9 +6710,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
         action = data.get("action")
         if action == "check":
-            result = await kraken_key.check_kraken_key(base_url, token)
+            result = await kraken_key.check_kraken_key(base_url, token, session_factory=self.http_session)
         elif action == "generate":
-            result = await kraken_key.generate_kraken_key(base_url, token)
+            result = await kraken_key.generate_kraken_key(base_url, token, session_factory=self.http_session)
         else:
             return web.json_response({"status": "error", "error": "Unknown action"}, status=400, headers=headers)
 
