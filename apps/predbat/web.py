@@ -1999,7 +1999,8 @@ class WebInterface(ComponentBase):
         midnight_str = (self.midnight_utc + timedelta(days=1)).strftime(TIME_FORMAT)
         text = get_chart_theme_js()
         text += "<script>\n"
-        text += "(function() {\n"
+        # Leading ';' so the IIFE can never be glued onto a preceding statement (#6015 guard)
+        text += ";(function() {\n"
         if daily_chart:
             text += """
 function pbChartSize() {
@@ -2321,7 +2322,8 @@ var options = {
 
         text = get_chart_theme_js()
         text += "<script>\n"
-        text += "(function() {\n"
+        # Leading ';' so the IIFE can never be glued onto a preceding statement (#6015 guard)
+        text += ";(function() {\n"
         text += "var height_{} = {};\n".format(js_id, height)
         text += "function pbChartSize() {\n"
         text += "    var width = window.innerWidth;\n"
@@ -2378,7 +2380,7 @@ var options = {
         text = get_chart_theme_js() + (
             """
 <script>
-(function() {
+;(function() {
 function pbChartSize() {
     // Use full width minus small margins; on mobile fit the viewport
     var width = window.innerWidth <= 700 ? window.innerWidth - 20 : Math.max(800, window.innerWidth - 100);
@@ -3579,7 +3581,7 @@ pbRegisterChart(chart, pbChartSize);
         text += get_dashboard_collapsible_js()
         text += """
 <script>
-(function() {
+;(function() {
     var DASH_REFRESH_INTERVAL = 60000; // 60 seconds
     var dashRefreshTimer = null;
 
