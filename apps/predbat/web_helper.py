@@ -7786,7 +7786,11 @@ def get_plan_renderer_js():
                     // A slot dynamic load cancelled (car not charging) still shows its kWh, with a "?"
                     const carCancelled = row.car_charging_cancelled > 0 ? `${row.car_charging_cancelled}?` : '';
                     const carVal = row.car_charging > 0 ? (carCancelled ? `${row.car_charging} +${carCancelled}` : row.car_charging) : (carCancelled || '&#9866;');
-                    html += `<td id=car bgcolor=${row.car_color || '#FFFFFF'}>${carVal}</td>`;
+                    // Octopus Intelligent dispatches are coloured apart from Predbat-planned slots
+                    // (car_color), so the tooltip naming why is carried here too, not only in the
+                    // server-rendered HTML plan
+                    const carTitle = row.car_octopus ? ` title="Requested by Octopus Intelligent"` : '';
+                    html += `<td id=car bgcolor=${row.car_color || '#FFFFFF'}${carTitle}>${carVal}</td>`;
                 }
 
                 // iBoost (conditional)

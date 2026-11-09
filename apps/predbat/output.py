@@ -1866,6 +1866,7 @@ class Output:
 
             # Car charging?
             car_rate = None
+            car_octopus = False
             car_charging_cancelled = 0.0
             if self.num_cars > 0:
                 car_charging_kwh = self.car_charge_slot_kwh(minute_start, minute_end)
@@ -1878,7 +1879,15 @@ class Output:
                     car_charging_str = str(car_charging_kwh)
                     if car_charging_cancelled > 0.0:
                         car_charging_str += " +" + str(car_charging_cancelled) + "?"
-                    car_color = "FFFF00"
+                    # A slot Octopus Intelligent dispatched is coloured apart from one Predbat planned
+                    # itself, so the IOG schedule is readable at a glance against Predbat's own plan.
+                    # The marker is the colour plus a tooltip, not added cell text, so the figures the
+                    # cell already shows (a live amount and a cancelled "+n?") are left as they are.
+                    car_octopus = self.car_charge_slot_is_octopus(minute_start, minute_end)
+                    if car_octopus:
+                        car_color = "#C9A0FF"
+                    else:
+                        car_color = "FFFF00"
                     car_rate = self.car_charge_slot_rate(minute_start, minute_end)
                 elif car_charging_cancelled > 0.0:
                     car_charging_str = str(car_charging_cancelled) + "?"
@@ -1999,7 +2008,8 @@ class Output:
             if plan_debug and self.load_forecast:
                 html += "<td id=extra bgcolor=" + extra_color + ">" + str(extra_forecast) + "</td>"
             if self.num_cars > 0:  # Don't display car charging data if there's no car
-                html += "<td id=car bgcolor=" + car_color + ">" + car_charging_str + "</td>"
+                car_title = " title='Requested by Octopus Intelligent'" if car_octopus else ""
+                html += "<td id=car bgcolor=" + car_color + car_title + ">" + car_charging_str + "</td>"
             if self.iboost_enable:
                 html += "<td bgcolor=" + iboost_color + ">" + iboost_amount_str + " </td>"
             # Only the SoC cell carries the scenario tooltip in the HTML, where it is repeated on every row; the web
@@ -2089,6 +2099,7 @@ class Output:
                 if car_charging_cancelled > 0.0:
                     json_row["car_charging_cancelled"] = car_charging_cancelled
                 json_row["car_color"] = car_color
+                json_row["car_octopus"] = car_octopus
                 json_row["car_rate"] = car_rate
                 json_row["car_rate_color"] = car_rate_color if rate_split else None
                 json_row["rate_split"] = rate_split

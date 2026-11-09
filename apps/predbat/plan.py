@@ -6535,6 +6535,22 @@ class Plan:
             car_charging_kwh = dp2(car_charging_kwh)
         return car_charging_kwh
 
+    def car_charge_slot_is_octopus(self, minute_start, minute_end):
+        """
+        True if any car charging slot overlapping this slot was requested by Octopus Intelligent.
+
+        Slots that IOG dispatched carry octopus=True (set in load_octopus_slots); slots Predbat
+        planned itself, and a live charge reconstructed from the car's own load, do not. The plan
+        table colours the two differently so a dispatch Octopus asked for is distinguishable from
+        one Predbat chose.
+        """
+        if self.num_cars > 0:
+            for car_n in range(self.num_cars):
+                for window in self.car_charging_slots[car_n]:
+                    if window["start"] < minute_end and window["end"] > minute_start and window.get("octopus", False):
+                        return True
+        return False
+
     def car_charge_slot_kwh_cancelled(self, minute_start, minute_end):
         """
         Car charging in kWh that dynamic load has cancelled for the given self.plan_interval_minutes-minute

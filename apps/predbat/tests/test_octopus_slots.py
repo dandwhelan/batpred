@@ -823,4 +823,47 @@ def run_load_octopus_slots_cases(my_predbat):
         print("ERROR: load_amount should be the same regardless of octopus flag ({} vs {})".format(load_plain[0], load_octopus[0]))
         failed = True
 
+    # --- car_charge_slot_is_octopus tests ---
+    # The plan table colours an IOG-dispatched slot apart from one Predbat planned itself,
+    # so the flag must follow the slot's octopus marker and respect slot boundaries.
+    print("**** Checking car_charge_slot_is_octopus ****")
+    saved_slots = my_predbat.car_charging_slots
+    saved_cars = my_predbat.num_cars
+    my_predbat.num_cars = 1
+    start = my_predbat.minutes_now
+    end = start + 60
+
+    for name, slot, expected in (
+        ("octopus slot", {"start": start, "end": end, "kwh": 5.0, "octopus": True}, True),
+        ("predbat-planned slot", {"start": start, "end": end, "kwh": 5.0, "octopus": False}, False),
+        ("slot with no octopus key", {"start": start, "end": end, "kwh": 5.0}, False),
+    ):
+        my_predbat.car_charging_slots = [[slot]]
+        got = my_predbat.car_charge_slot_is_octopus(start, start + 30)
+        if got != expected:
+            print("ERROR: car_charge_slot_is_octopus for {} should be {}, got {}".format(name, expected, got))
+            failed = True
+
+    # An octopus slot that does not overlap the queried slot must not colour it
+    my_predbat.car_charging_slots = [[{"start": end, "end": end + 60, "kwh": 5.0, "octopus": True}]]
+    if my_predbat.car_charge_slot_is_octopus(start, end):
+        print("ERROR: car_charge_slot_is_octopus should be False for a non-overlapping octopus slot")
+        failed = True
+
+    # A touching-but-not-overlapping slot (ends exactly where the query starts) must not count
+    my_predbat.car_charging_slots = [[{"start": start - 60, "end": start, "kwh": 5.0, "octopus": True}]]
+    if my_predbat.car_charge_slot_is_octopus(start, end):
+        print("ERROR: car_charge_slot_is_octopus should be False for a slot ending where the query starts")
+        failed = True
+
+    # With no cars configured nothing is an octopus slot
+    my_predbat.num_cars = 0
+    my_predbat.car_charging_slots = [[{"start": start, "end": end, "kwh": 5.0, "octopus": True}]]
+    if my_predbat.car_charge_slot_is_octopus(start, end):
+        print("ERROR: car_charge_slot_is_octopus should be False when num_cars is 0")
+        failed = True
+
+    my_predbat.car_charging_slots = saved_slots
+    my_predbat.num_cars = saved_cars
+
     return failed

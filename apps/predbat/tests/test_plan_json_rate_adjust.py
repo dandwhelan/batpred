@@ -239,6 +239,31 @@ def run_test_plan_json_rate_adjust(my_predbat):
     my_predbat.car_charging_slots[1] = []
     my_predbat.num_cars = saved_num_cars
 
+    # An Octopus Intelligent dispatch is coloured apart from a slot Predbat planned itself, so the
+    # IOG schedule can be read off the plan. The cell text must not change - a cancelled "+n?" and
+    # the live amount still read as before - only the colour and the tooltip.
+    print("Test plan output colours an Octopus Intelligent dispatch apart from a Predbat-planned slot")
+    saved_car_slots_iog = my_predbat.car_charging_slots[0]
+    for octopus, expect_color in ((True, "#C9A0FF"), (False, "FFFF00")):
+        my_predbat.car_charging_slots[0] = [{"start": car_minute, "end": car_minute + 30, "kwh": 2.0, "average": 10.0, "octopus": octopus}]
+        html_plan, raw_plan = my_predbat.publish_html_plan(pv_step, pv_step, load_step, load_step, my_predbat.end_record, publish=False)
+        car_row = next((row for row in raw_plan["rows"] if row.get("slot_minute") == car_minute), None)
+        if car_row is None or car_row.get("car_color") != expect_color:
+            print("ERROR: Expected car_color {} for octopus={}, got {}".format(expect_color, octopus, car_row and car_row.get("car_color")))
+            failed = True
+        if car_row is None or car_row.get("car_octopus") != octopus:
+            print("ERROR: Expected car_octopus {} in the plan JSON, got {}".format(octopus, car_row and car_row.get("car_octopus")))
+            failed = True
+        has_tooltip = "title='Requested by Octopus Intelligent'" in html_plan
+        if has_tooltip != octopus:
+            print("ERROR: Expected the IOG tooltip presence to be {} for octopus={}".format(octopus, octopus))
+            failed = True
+        # The colour must not leak into the cell text
+        if ">2.0</td>" not in html_plan and "'>2.0</td>" not in html_plan:
+            print("ERROR: Expected the car cell to still read '2.0' for octopus={}".format(octopus))
+            failed = True
+    my_predbat.car_charging_slots[0] = saved_car_slots_iog
+
     # The first row covers now to the end of its plan interval - its kWh and times already start at now, so
     # its rates must too. Reading the rate at the aligned interval start showed a price the plan no longer
     # uses, e.g. a cancelled Intelligent dispatch still at 6.90 after the minutes from now went to 30.26.
