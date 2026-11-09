@@ -3102,7 +3102,9 @@ pbRegisterChart(chart, pbChartSize);
         text += "  let detail = '';\n"
         text += "  if (planned.length) { detail += planned.length + ' planned (' + kwh + ' kWh): ' + planned.map(p => hm(p.start) + '-' + hm(p.end)).join(', ') + '. '; }\n"
         text += "  if (s.car !== null && s.car !== undefined) { detail += 'Wired to car ' + s.car + '. '; }\n"
-        text += "  if (s.age_minutes !== null) { const next = Math.max(0, Math.round(s.refresh_minutes - s.age_minutes)); detail += 'Fetched ' + Math.round(s.age_minutes) + ' min ago, next in about ' + next + ' min (every ' + s.refresh_minutes + ' min).'; }\n"
+        text += (
+            "  if (s.age_minutes !== null) { const next = Math.max(0, Math.round(s.refresh_minutes - s.age_minutes)); detail += 'Fetched ' + Math.round(s.age_minutes) + ' min ago, next in about ' + next + ' min (every ' + s.refresh_minutes + ' min).'; }\n"
+        )
         text += "  box.style.display = 'block'; box.style.background = colour;\n"
         text += "  box.innerHTML = '<b></b><br><span style=\"color:#555\"></span>';\n"
         text += "  box.querySelector('b').textContent = head; box.querySelector('span').textContent = detail;\n"
