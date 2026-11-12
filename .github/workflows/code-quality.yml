@@ -1,6 +1,10 @@
 name: code-quality
 on:
   pull_request:
+  # Runs on main as well so its pip and pre-commit caches exist: a cache saved by a PR run is visible only to that PR,
+  # while every PR can read main's, so without this the pre-commit environments were rebuilt on every run
+  push:
+    branches: [main]
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
@@ -11,18 +15,21 @@ jobs:
     timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
-        # Match the Predbat add-on image (3.14). "3.x" picked up Python 3.15, which numpy==2.3.5 has no
-        # wheel for, so pip built it from source without an optimised BLAS and the ML tests ran ~6x slower.
+        # Pinned rather than 3.x: a new Python lands on the runners before numpy (pinned in requirements.txt) ships
+        # wheels for it, and pip then builds numpy from source - 3.15 made that 4+ minutes of every run
         python-version: "3.14"
+        cache: pip
+        cache-dependency-path: requirements.txt
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    - uses: pre-commit/action@v3.0.0
+    - uses: pre-commit/action@v3.0.1
     - uses: pre-commit-ci/lite-action@v1.1.0
-      if: always()
+      # Pushes fixes back to a PR branch, so there is nothing for it to do on main
+      if: always() && github.event_name == 'pull_request'
     - name: Build prediction kernel
       run: bash apps/predbat/build_kernel.sh
     - name: Run unit tests (quick mode)
