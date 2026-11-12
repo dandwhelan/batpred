@@ -15,7 +15,6 @@ import tempfile
 from hass import Hass
 from utils import load_apps_yaml
 
-
 # Locations load_secrets falls back to outside the working directory. These belong to the installation,
 # so the tests must never write to or delete them
 INSTALL_SECRETS_FILES = ["/homeassistant/secrets.yaml", "/conf/secrets.yaml", "/config/secrets.yaml"]

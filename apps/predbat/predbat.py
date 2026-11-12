@@ -36,7 +36,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v715.1.0"
+THIS_VERSION = "v716.0.0"
 THIS_VERSION_DISPLAY = THIS_VERSION
 
 # Restart Predbat if a component stays unhealthy for this long
@@ -114,7 +114,7 @@ from components import Components, COMPONENT_LIST
 from execute import Execute
 from marginal import Marginal
 from plan import Plan
-from fetch import Fetch
+from fetch import Fetch, LoadSourceMissing
 from output import Output
 from userinterface import UserInterface
 from compare import Compare
@@ -652,6 +652,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.octopus_surplus = set()
         self.octopus_slots_planned = {}
         self.octopus_slots_held = {}
+        self.octopus_slots_held_until = {}
+        self.octopus_slots_held_charged = {}
         self.octopus_slots_held_saved = {}
         self.dispatch_billing_warned = None
         self.battery_capacity_nominal = False
@@ -1501,8 +1503,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         """
         Refresh input data and recompute the plan if required, without executing it.
 
-        Returns None when a pre-condition fails (template configuration, inverter data
-        unavailable or import rates all zero) - the error will already have been recorded.
+        Returns None when a pre-condition fails (template configuration, no load source configured
+        yet, inverter data unavailable or import rates all zero) - the error will already have been recorded.
         Otherwise returns a plan artifact summary dict with keys recomputed, plan_valid,
         plan_version and plan_last_updated. Passing scheduled=False forces a recompute.
 
@@ -1537,7 +1539,11 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
 
         self.expose_config("active", True)
         self.fetch_config_options()
-        sensor_force_replan = self.fetch_sensor_data()
+        try:
+            sensor_force_replan = self.fetch_sensor_data()
+        except LoadSourceMissing:
+            # Already logged and recorded; often a component that has not set load_today yet, so try again next cycle (#5092)
+            return None
 
         # Check if any sensor changes require a replan
         if sensor_force_replan:
@@ -2304,7 +2310,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
                                     # Allow fixed string values
                                     continue
 
-                                if sensor is None and spec.get("blank_entries", False):
+                                if (sensor is None or sensor == "") and spec.get("blank_entries", False):
                                     # A blank list entry, for an item whose runtime reads it as "not set" for that slot
                                     continue
                                 if not isinstance(sensor, str):
