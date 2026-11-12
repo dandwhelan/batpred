@@ -15,7 +15,9 @@ for storing entity states and history, with automatic pruning of old
 data and deduplication of unchanged states.
 """
 
+import os
 import sqlite3
+import time
 import json
 from datetime import datetime, timedelta, timezone
 

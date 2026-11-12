@@ -105,6 +105,9 @@ class FetchFixture:
             return self.build_history(entity_id)
 
         base.ha_interface.get_history = get_history
+        # Keep the Octopus free-session lookup off the network; the suite fails any test that reaches it
+        self.saved_download_free = base.__dict__.get("download_octopus_free")
+        base.download_octopus_free = lambda url: []
         reset_inverter(base)
         return base
 
@@ -114,6 +117,10 @@ class FetchFixture:
         self.base.ha_interface.get_history = self.saved_get_history
         self.base.manual_soc_keep = self.saved_manual_soc_keep
         self.base.alert_active_keep = self.saved_alert_active_keep
+        if self.saved_download_free is None:
+            self.base.__dict__.pop("download_octopus_free", None)
+        else:
+            self.base.download_octopus_free = self.saved_download_free
         return False
 
 
