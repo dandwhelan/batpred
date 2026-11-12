@@ -5067,6 +5067,8 @@ pbRegisterChart(chart, pbChartSize);
         for problem in compare_problems:
             text += "<p><b>Skipped:</b> {} - fix it in apps.yaml</p>\n".format(html_module.escape(problem))
 
+        text += self.html_compare_yesterday(compare_list, get_result)
+
         # Charts
         text += '<div id="chart"></div>'
         series_data = []
@@ -5119,9 +5121,66 @@ pbRegisterChart(chart, pbChartSize);
                 text += html
             else:
                 text += "<br><p>No data yet....</p>"
+            yesterday_html = (result.get("yesterday") or {}).get("html", "")
+            if yesterday_html:
+                text += "<details id='yesterday-{}'><summary>Yesterday replayed on {} (actual load and PV)</summary>\n{}\n</details>\n".format(id, html_module.escape(name), yesterday_html)
 
         text += "</body></html>\n"
         return web.Response(content_type="text/html", text=text)
+
+    def html_compare_yesterday(self, compare_list, get_result):
+        """
+        The Compare page's yesterday section: every tariff replayed on yesterday's actual load, PV and rates
+        (compare_yesterday in apps.yaml), with the daily history of those results from their compare_yesterday sensors.
+        """
+        rows = []
+        for compare in compare_list:
+            tariff_id = compare.get("id", "")
+            yesterday = get_result(tariff_id).get("yesterday") or {}
+            if yesterday:
+                rows.append((tariff_id, compare.get("name", ""), yesterday))
+        if not rows:
+            if self.get_arg("compare_yesterday", False):
+                return "<p>Yesterday (actual): no replay yet - it runs with the next comparison</p>\n"
+            return ""
+
+        first = rows[0][2]
+        text = "<h2>Yesterday {} - actual usage</h2>\n".format(html_module.escape(str(first.get("day", ""))))
+        text += "<p>Each tariff planned on what really happened yesterday: load {} kWh, PV {} kWh, starting from the battery level at midnight.</p>\n".format(first.get("load_kwh", ""), first.get("pv_kwh", ""))
+        text += "<table class='comparison-table'>\n"
+        text += "<tr><th>ID</th><th>Name</th><th>True cost</th><th>Cost</th><th>Import</th><th>Export</th><th>Start SoC</th><th>Final SoC</th><th>Result</th></tr>\n"
+        for tariff_id, name, yesterday in rows:
+            selected = '<font style="background-color:#FFaaaa;"> Best </font>' if yesterday.get("best") else ""
+            if yesterday.get("existing_tariff"):
+                selected += '<font style="background-color:#aaFFaa;"> Existing </font>'
+            text += "<tr><td><a href='#yesterday-{}'>{}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n".format(
+                tariff_id,
+                tariff_id,
+                html_module.escape(str(name)),
+                self.to_pounds(yesterday.get("metric", 0)),
+                self.to_pounds(yesterday.get("cost", 0)),
+                yesterday.get("import_kwh", ""),
+                yesterday.get("export_kwh", ""),
+                yesterday.get("soc_start", ""),
+                yesterday.get("soc", ""),
+                selected,
+            )
+        text += "</table>\n"
+
+        # Daily history: each replay is published just after midnight, so its value belongs to the day before
+        series_data = []
+        for tariff_id, name, yesterday in rows:
+            entity_id = yesterday.get("entity_id")
+            if not entity_id:
+                continue
+            hist = history_attribute(self.get_history_wrapper(entity_id, 28, required=False), state_key="metric", attributes=True, daily=True, offset_days=-1, pounds=True)
+            if yesterday.get("day"):
+                hist[str(yesterday["day"])] = dp2(yesterday.get("metric", 0) / 100.0)
+            series_data.append({"name": name, "data": hist, "chart_type": "bar"})
+        if series_data:
+            text += '<div id="chartyesterday"></div>'
+            text += self.render_chart(series_data, self.currency_symbols[0], "Tariff Comparison - yesterday's actual usage, true cost", self.now_utc.strftime(TIME_FORMAT), tagname="chartyesterday", daily_chart=False)
+        return text
 
     async def html_apps_editor(self, request):
         """
