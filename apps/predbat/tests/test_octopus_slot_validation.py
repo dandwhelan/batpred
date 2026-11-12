@@ -33,7 +33,9 @@ def run_octopus_slot_validation_tests(my_predbat):
             my_predbat.ha_interface.dummy_items = saved_states
 
     print("Test 1: blank placeholder entries for the cars before the dispatch car validate")
-    errors = errors_for({"octopus_intelligent_slot": ["", "binary_sensor.predbat_octopus_intelligent_dispatch"], "octopus_ready_time": ["", "select.predbat_octopus_intelligent_target_time"], "octopus_charge_limit": ["", "number.predbat_octopus_intelligent_target_soc"]})
+    errors = errors_for(
+        {"octopus_intelligent_slot": ["", "binary_sensor.predbat_octopus_intelligent_dispatch"], "octopus_ready_time": ["", "select.predbat_octopus_intelligent_target_time"], "octopus_charge_limit": ["", "number.predbat_octopus_intelligent_target_soc"]}
+    )
     if errors:
         print("ERROR: blank placeholder entries were rejected: {}".format(errors))
         failed = True

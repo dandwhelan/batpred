@@ -270,8 +270,8 @@ formmethod
 foxcloud
 foxess
 foxesscloud
-freelist
 frameon
+freelist
 freephase
 fromisoformat
 fronius
@@ -490,9 +490,9 @@ nanstd
 nattribute
 nbytes
 ncalls
+ncol
 ndash
 ndigits
-ncol
 nearbyint
 nearr
 nemotron
@@ -674,8 +674,8 @@ setpoints
 setstate
 SFMB
 sg05lp1
-SIGABRT
 sharex
+SIGABRT
 SIGALRM
 sigcloud
 sigen
