@@ -11,7 +11,6 @@
 
 from datetime import datetime
 
-from compare import Compare
 from fetch import Fetch
 from tests.test_compare import _make_compare
 
