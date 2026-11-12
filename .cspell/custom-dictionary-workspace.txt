@@ -98,6 +98,7 @@ chargehold
 chargelater
 chargelimit
 chargepower
+chartyesterday
 CHECKCODE
 chg
 Chrg

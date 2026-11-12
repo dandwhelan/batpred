@@ -148,6 +148,34 @@ free electricity session, Axle event or Intelligent dispatch does not stop your 
 
 ![image](images/web-interface-compare-view.png)
 
+## Replaying yesterday's actual usage
+
+The comparison above looks forward: it plans the next 24 hours on your solar and load forecasts, so it shows what each tariff
+would probably cost tomorrow. Set `compare_yesterday: True` in `apps.yaml` to also replay **yesterday** on every tariff, using what
+actually happened:
+
+- your recorded house load and solar generation for yesterday, midnight to midnight, in place of the forecasts
+- each tariff's rates for yesterday (Octopus and Kraken URLs publish past rates; a fixed `rates_import`/`rates_export` table uses the same times of day)
+- the battery level recorded at yesterday's midnight as the starting point
+
+Predbat then plans the battery for each tariff against that day, and the Compare view shows a **Yesterday - actual usage** table and
+chart under the forecast one, with each tariff's replayed plan in the **Yesterday replayed** section below its forecast plan.
+
+```yaml
+  compare_yesterday: True
+```
+
+Things to keep in mind:
+
+- The replay plans knowing the whole day in advance, so it is slightly better than real life could be - it is the fairest like-for-like
+  comparison between tariffs, not a reconstruction of your actual bill (that is the **Actual** line on the chart).
+- Car charging and iBoost are left where they happened, as part of the recorded load, rather than re-planned for each tariff's cheapest slots.
+- Saving sessions, free electricity sessions and Intelligent Octopus dispatches from yesterday are not modelled.
+- It needs two days of history for `predbat.soc_kw_h0` and your load sensor; until then the replay is skipped with a warning in the log.
+
+Each tariff's replay is published as **predbat.compare_yesterday_id**, with the cost as its value and the details in its attributes. Keep
+these in the recorder (`entity_globs: predbat.compare_yesterday_*`) for the day-by-day chart.
+
 ## Comparison sensors
 
 For each tariff a new sensor is created in Home Assistant called **predbat.compare_tariff_id** where **id** is the ID name you entered above in `apps.yaml`. This sensor will track the cost as its main value and many details about the prediction in its attributes.

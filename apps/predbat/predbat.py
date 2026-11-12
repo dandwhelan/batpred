@@ -36,7 +36,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v716.0.0"
+THIS_VERSION = "v716.1.0"
 THIS_VERSION_DISPLAY = THIS_VERSION
 
 # Restart Predbat if a component stays unhealthy for this long
@@ -736,6 +736,8 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.carbon_history = {}
         self.carbon_enable = False
         self.iboost_enable = False
+        # Set by Compare only while it replays yesterday on a tariff, see plan.py
+        self.compare_replay_steps = None
         self.iboost_gas = False
         self.iboost_solar = False
         self.iboost_solar_excess = False

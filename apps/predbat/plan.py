@@ -2394,6 +2394,13 @@ class Plan:
             pv_forecast_minute10_step = self.step_data_history(self.pv_forecast_minute10, self.minutes_now, forward=True, cloud_factor=min(self.metric_cloud_coverage + CLOUD_FACTOR_PV10, 1.0) if self.metric_cloud_coverage else None, flip=True)
             pv_forecast_minute90_step = self.step_data_history(self.pv_forecast_minute90, self.minutes_now, forward=True, cloud_factor=self.metric_cloud_coverage)
 
+        # A tariff comparison replaying yesterday (Compare.build_replay()) plans on what actually happened: the
+        # recorded load and PV stand in for every scenario, as there is no forecast uncertainty left to model
+        replay = getattr(self, "compare_replay_steps", None)
+        if replay:
+            load_minutes_step = load_minutes_step10 = load_minutes_step90 = replay["load"]
+            pv_forecast_minute_step = pv_forecast_minute10_step = pv_forecast_minute90_step = replay["pv"]
+
         # Save step data for debug
         self.load_minutes_step = load_minutes_step
         self.load_minutes_step10 = load_minutes_step10

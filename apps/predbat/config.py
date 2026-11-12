@@ -3082,6 +3082,7 @@ APPS_SCHEMA = {
     "futurerate_peak_end": {"type": "string", "empty": False},
     "octopus_region": {"type": "string", "empty": False},
     "compare_list": {"type": "dict_list"},
+    "compare_yesterday": {"type": "boolean"},
     "watch_list": {"type": "string_list"},
     "charge_start_service": {"type": "dict_list|string"},
     "charge_stop_service": {"type": "dict_list|string"},

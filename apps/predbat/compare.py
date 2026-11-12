@@ -15,8 +15,8 @@ per-tariff plan visualisations.
 
 import os
 import math
-from datetime import datetime
-from const import MINUTE_WATT
+from datetime import datetime, timedelta
+from const import MINUTE_WATT, PREDICT_STEP
 from utils import dp0, dp2
 import yaml
 import copy
@@ -25,6 +25,12 @@ import copy
 # 1. Update web UI to show a chart of historical differences
 # 2. Allow change to start/end comparison points e.g. tomorrow or today
 # 3. Consider Octopus API key to access current tariff info and switch links
+
+
+# The yesterday replay plans over one day of actual data, repeated for the second day of the fixed 48 hour plan
+REPLAY_PLAN_MINUTES = 48 * 60
+# What a tariff's yesterday replay keeps from its run_scenario() result - the plan html is kept for the page, the raw plan is not
+REPLAY_RESULT_KEYS = ("cost", "import_kwh", "export_kwh", "soc_start", "soc", "soc_min", "battery_cycle", "metric", "final_carbon_g", "battery_value_start", "battery_value_end", "html", "existing_tariff")
 
 
 # An empty 'config:' line means no overrides; any other non-mapping value can't be applied
@@ -184,9 +190,12 @@ class Compare:
                 self.log("Warn: Compare, config item {} not found".format(key))
         self.pb.fetch_config_options()
 
-    def fetch_rates(self, tariff, rate_import_base, rate_export_base, io_adjusted_base=None, rate_import_match=None, rate_export_match=None):
+    def fetch_rates(self, tariff, rate_import_base, rate_export_base, io_adjusted_base=None, rate_import_match=None, rate_export_match=None, shift=0):
         """
         Install the tariff's rates on the instance and return True if they match the user's existing tariff.
+
+        shift (minutes) moves every rate that many minutes later, so a replay of an earlier day plans on that
+        day's rates (see build_replay()); live saving sessions, dispatches and predicted future rates are dropped
 
         rate_import_match/rate_export_match are the live tariff without saving session, free electricity,
         Axle or Intelligent dispatch stamps - what a refetched rate card is checked against (#5180)
@@ -297,6 +306,19 @@ class Compare:
         else:
             self.log("Using existing rate export data")
 
+        if shift:
+            # A replay plans an earlier day on the rates that day had. Both sides count as this tariff's own
+            # rates from here on, as the live cycle's saving minutes, dispatches and futures are for today.
+            pb.rate_import = self.shift_rates(pb.rate_import, shift)
+            pb.rate_export = self.shift_rates(pb.rate_export, shift)
+            rate_import_match = self.shift_rates(rate_import_match if rate_import_match else rate_import_base, shift)
+            rate_export_match = self.shift_rates(rate_export_match if rate_export_match else rate_export_base, shift)
+            rate_import_base = rate_import_match
+            rate_export_base = rate_export_match
+            pb.io_adjusted = {}
+            import_replaced = True
+            export_replaced = True
+
         # A tariff that supplied its own rates for a side makes the live saving minutes for that side
         # stale: they are offsets into the live tables, and would map unrelated minutes of the new tariff
         # back to live "base" rates. A side left on the live rates keeps them.
@@ -309,8 +331,8 @@ class Compare:
 
         # Predicted future rates (futurerate) belong to the live tariff, so only a side that is the live
         # tariff gets them: one left on the live rates, or one whose own published rates are the live ones
-        import_future = (not import_replaced) or self.is_live_published(pb.rate_import, rate_import_match if rate_import_match else rate_import_base)
-        export_future = (not export_replaced) or self.is_live_published(pb.rate_export, rate_export_match if rate_export_match else rate_export_base)
+        import_future = (not shift) and ((not import_replaced) or self.is_live_published(pb.rate_import, rate_import_match if rate_import_match else rate_import_base))
+        export_future = (not shift) and ((not export_replaced) or self.is_live_published(pb.rate_export, rate_export_match if rate_export_match else rate_export_base))
 
         if pb.rate_import:
             pb.rate_scan(pb.rate_import, print=False)
@@ -545,9 +567,11 @@ class Compare:
 
         return result_data
 
-    def run_single(self, tariff, rate_import_base, rate_export_base, end_record, debug=False, fetch_sensor=True, car_charging_slots=None, start_soc=None, io_adjusted_base=None, rate_import_match=None, rate_export_match=None):
+    def run_single(self, tariff, rate_import_base, rate_export_base, end_record, debug=False, fetch_sensor=True, car_charging_slots=None, start_soc=None, io_adjusted_base=None, rate_import_match=None, rate_export_match=None, replay=None):
         """
         Compare a single energy tariff with the current settings and report results
+
+        replay (from build_replay()) plans yesterday instead: its actual load and PV, its rates and its midnight SoC
         """
         if car_charging_slots is None:
             car_charging_slots = []
@@ -565,6 +589,8 @@ class Compare:
 
         # Override starting SoC so each tariff comparison begins from a fair baseline
         # rather than the live (mid-run) inverter SoC
+        if replay:
+            start_soc = replay["start_soc"]
         if start_soc is not None:
             my_predbat.soc_kw = start_soc
 
@@ -573,7 +599,7 @@ class Compare:
 
         # Fetch rates
         try:
-            existing_tariff = self.fetch_rates(tariff, rate_import_base, rate_export_base, io_adjusted_base, rate_import_match, rate_export_match)
+            existing_tariff = self.fetch_rates(tariff, rate_import_base, rate_export_base, io_adjusted_base, rate_import_match, rate_export_match, replay["shift"] if replay else 0)
         except ValueError as e:
             self.log("Warn fetching rates during comparison of tariff {}: {}".format(tariff, e))
             return {}
@@ -598,11 +624,25 @@ class Compare:
         my_predbat.manual_demand_times = []
         my_predbat.octopus_intelligent_charging = False
 
-        self.recompute_iboost()
-        self.recompute_car_charging(car_charging_slots)
+        saved_iboost_enable = my_predbat.iboost_enable
+        try:
+            if replay:
+                # The actual load already holds what the car and iBoost drew yesterday, when they drew it,
+                # so neither is planned on top of it
+                my_predbat.iboost_enable = False
+                my_predbat.iboost_plan = []
+                my_predbat.car_charging_slots = [[] for car_n in range(my_predbat.num_cars)]
+                my_predbat.car_charging_now_slots = [[] for car_n in range(my_predbat.num_cars)]
+                my_predbat.compare_replay_steps = replay
+            else:
+                self.recompute_iboost()
+                self.recompute_car_charging(car_charging_slots)
 
-        self.log("Running scenario for tariff: {}".format(name))
-        result_data = self.run_scenario(end_record)
+            self.log("Running {}scenario for tariff: {}".format("yesterday replay " if replay else "", name))
+            result_data = self.run_scenario(end_record)
+        finally:
+            my_predbat.iboost_enable = saved_iboost_enable
+            my_predbat.compare_replay_steps = None
         result_data["existing_tariff"] = existing_tariff
         result_data["name"] = name
         self.log("Scenario complete for tariff: {}, cost {}{}, metric {}{}".format(name, result_data["cost"], self.currency_symbols[1], result_data["metric"], self.currency_symbols[1]))
@@ -610,6 +650,109 @@ class Compare:
             with open("compare_{}.html".format(tariff_id), "w") as f:
                 f.write(result_data["html"])
         return result_data
+
+    def shift_rates(self, rates, shift):
+        """
+        Return rates moved shift minutes later across the plan: the rate at minute m becomes the rate at minute m + shift.
+
+        A rate table with nothing that far back (a fixed rates_import table starts at today's midnight) falls back to
+        the same time of day a day later, which for a daily tariff is the same rate.
+        """
+        rates = rates or {}
+        shifted = {}
+        start = self.pb.minutes_now
+        for minute in range(start, start + REPLAY_PLAN_MINUTES + 24 * 60):
+            source = minute - shift
+            for candidate in (source, source + 24 * 60, source + 48 * 60):
+                if candidate in rates:
+                    shifted[minute] = rates[candidate]
+                    break
+        return shifted
+
+    def build_replay(self):
+        """
+        Build the inputs to replay yesterday (local midnight to midnight) on every tariff, or None without the history.
+
+        The plan's frame starts now, so everything is shifted back by shift = minutes since yesterday's midnight:
+        plan minute o is yesterday at minute o (repeated for the second day of the plan). Load and PV are the
+        recorded totals for each step, unscaled and unfiltered - the car and iBoost energy is in the load, when it
+        was drawn - and the plan starts from the recorded battery level at yesterday's midnight.
+        """
+        pb = self.pb
+        shift = 24 * 60 + pb.minutes_now
+        # History is keyed by real minutes back from now, which only differs from minutes_now on a clock-change day
+        history_ago = 24 * 60 + pb.minutes_since_day_start()
+        start_soc = pb.soc_kwh_history.get(history_ago, None) if pb.soc_kwh_history else None
+        if start_soc is None:
+            self.log("Warn: Compare yesterday replay skipped, no battery level recorded at yesterday's midnight")
+            return None
+        if not pb.load_minutes or max(pb.load_minutes.keys()) < history_ago:
+            self.log("Warn: Compare yesterday replay skipped, the load history does not reach back to yesterday's midnight")
+            return None
+
+        load_step = {}
+        pv_step = {}
+        for minute in range(0, REPLAY_PLAN_MINUTES + pb.plan_interval_minutes, PREDICT_STEP):
+            load = 0.0
+            pv = 0.0
+            for offset in range(PREDICT_STEP):
+                minutes_ago = history_ago - ((minute + offset) % (24 * 60))
+                load += pb.get_from_incrementing(pb.load_minutes, minutes_ago)
+                if pb.pv_today:
+                    pv += pb.get_from_incrementing(pb.pv_today, minutes_ago)
+            load_step[minute] = round(load, 4)
+            pv_step[minute] = round(pv, 4)
+
+        day_load = sum(load_step[minute] for minute in range(0, 24 * 60, PREDICT_STEP))
+        day_pv = sum(pv_step[minute] for minute in range(0, 24 * 60, PREDICT_STEP))
+        self.log("Compare yesterday replay: load {:.2f} kWh, PV {:.2f} kWh, starting SoC {:.2f} kWh".format(day_load, day_pv, start_soc))
+        return {"shift": shift, "start_soc": start_soc, "load": load_step, "pv": pv_step, "load_kwh": round(day_load, 2), "pv_kwh": round(day_pv, 2)}
+
+    def run_yesterday(self, compare_list, results, rate_import_base, rate_export_base, end_record, saved, config_snapshot, debug=False, fetch_sensor=True):
+        """
+        Replay yesterday's actual load and PV on every tariff and store each result under the tariff's "yesterday" key
+        """
+        replay = self.build_replay()
+        if not replay:
+            return
+        day = (self.pb.midnight_utc - timedelta(days=1)).strftime("%Y-%m-%d")
+        for tariff in compare_list:
+            tariff_id = tariff["id"]
+            self.pb.plan_valid = False
+            try:
+                result_data = self.run_single(tariff, rate_import_base, rate_export_base, end_record, debug=debug, fetch_sensor=fetch_sensor, replay=replay)
+            finally:
+                self.restore_tariff_overrides(saved, config_snapshot)
+            if result_data and tariff_id in results:
+                yesterday = {key: result_data[key] for key in REPLAY_RESULT_KEYS if key in result_data}
+                yesterday["day"] = day
+                yesterday["load_kwh"] = replay["load_kwh"]
+                yesterday["pv_kwh"] = replay["pv_kwh"]
+                results[tariff_id]["yesterday"] = yesterday
+        best_id = None
+        for tariff in compare_list:
+            yesterday = results.get(tariff["id"], {}).get("yesterday")
+            if yesterday and (best_id is None or yesterday["metric"] < results[best_id]["yesterday"]["metric"]):
+                best_id = tariff["id"]
+        for tariff in compare_list:
+            yesterday = results.get(tariff["id"], {}).get("yesterday")
+            if yesterday:
+                yesterday["best"] = tariff["id"] == best_id
+        self.log("Compare yesterday replay, best tariff: {}".format(best_id))
+
+    def restore_tariff_overrides(self, saved, config_snapshot):
+        """
+        Put back the hardware settings and config values a tariff may have overridden, ready for the next tariff
+        """
+        my_predbat = self.pb
+        for name in COMPARE_HARDWARE_STATE:
+            setattr(my_predbat, name, saved[name])
+        if config_snapshot:
+            for key, orig_value in config_snapshot.items():
+                item = my_predbat.config_index.get(key)
+                if item is not None:
+                    item["value"] = orig_value
+            my_predbat.fetch_config_options()
 
     def select_best(self, compare_list, results):
         """
@@ -688,7 +831,7 @@ class Compare:
                     "icon": "mdi::compare-horizontal",
                 }
                 for item in result:
-                    if item == "raw":  # skip writing raw compare plan data to the compare entity
+                    if item in ("raw", "yesterday"):  # skip the raw plan data, and the yesterday replay which has its own entity
                         continue
 
                     value = result[item]
@@ -702,6 +845,21 @@ class Compare:
                     attributes=attributes,
                 )
                 result["entity_id"] = entity_id
+
+                yesterday = result.get("yesterday")
+                if yesterday:
+                    yesterday_attributes = {
+                        "friendly_name": "Compare yesterday " + name,
+                        "state_class": "measurement",
+                        "unit_of_measurement": "p",
+                        "icon": "mdi::compare-horizontal",
+                    }
+                    for item, value in yesterday.items():
+                        if item != "html":
+                            yesterday_attributes[item] = value
+                    yesterday_entity_id = self.prefix + ".compare_yesterday_" + tariff_id
+                    self.dashboard_item(yesterday_entity_id, state=yesterday.get("cost", 0), attributes=yesterday_attributes)
+                    yesterday["entity_id"] = yesterday_entity_id
 
     def publish_only(self):
         """
@@ -867,6 +1025,12 @@ class Compare:
                         my_predbat.fetch_config_options()
                 # Save and update comparisons as we go so it is updated in HA
                 self.select_best(compare_list, results)
+                self.comparisons = results
+                self.save_yaml()
+                self.publish_data()
+
+            if self.pb.get_arg("compare_yesterday", False):
+                self.run_yesterday(compare_list, results, rate_import_base, rate_export_base, end_record, saved, config_snapshot, debug=debug, fetch_sensor=fetch_sensor)
                 self.comparisons = results
                 self.save_yaml()
                 self.publish_data()
