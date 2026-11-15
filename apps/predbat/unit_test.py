@@ -41,9 +41,19 @@ from tests.test_kernel_static_cache import run_kernel_static_cache_tests
 from tests.test_execute import run_execute_tests
 from tests.test_execute_multi_inverter_status import test_multi_inverter_status
 from tests.test_load_car_energy import test_load_car_energy_warns_when_configured_entity_has_no_data
-from tests.test_predheat import test_predheat, test_predheat_smart_thermostat, test_predheat_optional_energy_history, test_predheat_volume_temp
+from tests.test_predheat import (
+    test_predheat,
+    test_predheat_smart_thermostat,
+    test_predheat_pr5767_regressions,
+    test_predheat_optional_energy_history,
+    test_predheat_temperature_units,
+    test_predheat_volume_temp,
+    test_predheat_volume_temp_persistence,
+    test_predheat_heat_to_temp_off_marker,
+)
 from tests.test_predheat_physics import test_predheat_physics
 from tests.test_debug_enable_auto_scope import test_debug_enable_auto_scope
+from tests.test_temperature_units import test_temperature_unit_conversion
 from tests.test_charge_hold import run_charge_hold_tests
 from tests.test_octopus_slots import run_load_octopus_slots_tests, run_octopus_slot_max_default_tests
 from tests.test_multi_car_iog import run_multi_car_iog_tests
@@ -85,6 +95,7 @@ from tests.test_plugin_startup import test_plugin_startup_order
 from tests.test_active_flag import test_active_flag
 from tests.test_time_loop_guard import test_time_loop_guard
 from tests.test_plan_execute_split import test_plan_execute_split
+from tests.test_savings_bookkeeping import run_savings_bookkeeping_tests
 from tests.test_component_health_status import (
     test_component_health_status,
     test_record_status_state_clamped,
@@ -158,6 +169,7 @@ from tests.test_history_chunking import run_history_chunking_tests
 from tests.test_web_if import run_test_web_if
 from tests.test_web_apps_edit import run_web_apps_edit_tests, run_web_apps_filter_tests
 from tests.test_web_chart_currency import test_rates_chart_series_names_use_currency_symbol, test_pv_chart_forecast_history_is_uncalibrated
+from tests.test_currency_scale import run_currency_scale_tests
 from tests.test_web_debug_history_routes import test_web_debug_history_routes
 from tests.test_web_mcp import run_web_mcp_tests
 from tests.test_debug_history_client_js import test_debug_history_client_js
@@ -169,6 +181,9 @@ from tests.test_chat_tools import run_chat_tools_tests
 from tests.test_chat import run_chat_tests
 from tests.test_web_chat import run_web_chat_tests
 from tests.test_web_mcp_auth import run_web_mcp_auth_tests
+from tests.test_jwt_hs256 import run_jwt_hs256_tests
+from tests.test_web_auth import run_web_auth_tests
+from tests.test_debug_history_client_js import test_debug_history_client_js
 from tests.test_plan_staleness_js import test_plan_staleness_js
 from tests.test_plan_archive import test_plan_archive
 from tests.test_plan_totals_js import test_plan_totals_js
@@ -386,6 +401,8 @@ from tests.test_load_ml_rollout import run_load_ml_rollout_tests
 from tests.test_ml_memory import run_ml_memory_tests
 from tests.test_ml_training_perf import run_ml_training_perf_tests
 from tests.test_temperature import test_temperature
+from tests.test_http_sync import run_http_sync_tests
+from tests.test_battery_temperature_fetch import test_battery_temperature_fetch
 from tests.test_oauth_mixin import run_oauth_mixin_tests
 from tests.test_fox_oauth import run_fox_oauth_tests
 from tests.test_band_rate_text import test_band_rate_text
@@ -615,8 +632,13 @@ def main():
         ("load_car_energy", test_load_car_energy_warns_when_configured_entity_has_no_data, "car_charging_energy configured-but-empty warning tests (#4458 follow-up)", False),
         ("predheat", test_predheat, "Predheat scheduler and predheat_enable gate tests (#4670)", False),
         ("predheat_smart_thermostat", test_predheat_smart_thermostat, "Predheat smart thermostat pre-heat window tests", False),
+        ("predheat_pr5767_regressions", test_predheat_pr5767_regressions, "Predheat fallback, hysteresis and COP regression tests (#5767)", False),
         ("predheat_optional_energy_history", test_predheat_optional_energy_history, "Predheat without optional energy history tests", False),
+        ("predheat_temperature_units", test_predheat_temperature_units, "Predheat converts °F entities to °C and publishes in the internal sensor unit (#5153)", False),
         ("predheat_volume_temp", test_predheat_volume_temp, "Predheat volume temperature initialisation tests", False),
+        ("temperature_units", test_temperature_unit_conversion, "Shared unit conversion handles temperatures, other units unchanged (#5153)", False),
+        ("predheat_volume_temp_persistence", test_predheat_volume_temp_persistence, "Predheat persisted volume temperature range tests", False),
+        ("predheat_heat_to_temp_off", test_predheat_heat_to_temp_off_marker, "Predheat heat_to_temp off-marker tests (#6078)", False),
         ("debug_enable_auto_scope", test_debug_enable_auto_scope, "debug_enable auto-disable-after-N-hours tests (#4438 review)", False),
         ("charge_hold", run_charge_hold_tests, "Charge freeze hold modelling tests", False),
         ("basic_rates", test_basic_rates, "Basic rates tests", False),
@@ -699,6 +721,7 @@ def main():
         ("active_flag", test_active_flag, "Active flag cleared on exception tests", False),
         ("time_loop_guard", test_time_loop_guard, "Run-loop guard reports a missing HA interface and sets fatal_error (#5135)", False),
         ("plan_execute_split", test_plan_execute_split, "plan_once/execute_once split and update_pred characterisation tests", False),
+        ("savings_bookkeeping", run_savings_bookkeeping_tests, "Daily savings totals, rollover and repeated-call tests", False),
         ("component_health_status", test_component_health_status, "Component errors fail the recorded run status tests", False),
         ("record_status_state_clamped", test_record_status_state_clamped, "Status sensor state is clamped at the 255 characters Home Assistant accepts", False),
         ("record_status_under_warning", test_record_status_under_warning, "A run's state is recorded after the warning it raised, in brackets", False),
@@ -727,6 +750,7 @@ def main():
         ("web_apps_edit", run_web_apps_edit_tests, "Apps.yaml editor add/delete tests (issue #4714)", False),
         ("web_apps_filter", run_web_apps_filter_tests, "Apps.yaml page filter box tests (issue #5210)", False),
         ("web_chart_currency", test_rates_chart_series_names_use_currency_symbol, "Rates chart series names follow currency_symbols tests", False),
+        ("currency_scale", run_currency_scale_tests, "apps.yaml currency_scale widens money setting ranges tests (#6155)", False),
         ("web_chart_pv_forecast", test_pv_chart_forecast_history_is_uncalibrated, "PV chart plots the uncalibrated forecast history tests", False),
         ("web_debug_history_routes", test_web_debug_history_routes, "Debug-history web routes tests (#4438 review items 4, 6, 21)", False),
         ("web_mcp", run_web_mcp_tests, "MCP get_log and apps.yaml redaction tests (issue #4768)", False),
@@ -735,7 +759,9 @@ def main():
         ("chat_tools", run_chat_tools_tests, "Chat agent docs search, source access and URL fetch guard tests", False),
         ("chat", run_chat_tests, "Chat agent component, snapshot and event buffer tests", False),
         ("web_chat", run_web_chat_tests, "Chat tab route, SSE framing and markdown escaping tests", False),
+        ("web_auth", run_web_auth_tests, "Web interface optional username/password login tests (issue #6103)", False),
         ("web_mcp_auth", run_web_mcp_auth_tests, "MCP OAuth registration, signing key, default secret and scope tests (issue #5847)", False),
+        ("jwt_hs256", run_jwt_hs256_tests, "Standard-library HS256 JWT signer: PyJWT-compatible tokens, rejections, and MCP not loading PyJWT", False),
         ("debug_history_client_js", test_debug_history_client_js, "Debug-history client-side JS structure tests (#4438 review item 22)", False),
         ("plan_staleness_js", test_plan_staleness_js, "Plan page stale-data warning JS: per-view data and refresh interval", False),
         ("plan_archive", test_plan_archive, "Plan archive: past plans and tariff comparisons saved, listed, expired and served", False),
@@ -971,6 +997,8 @@ def main():
         # Solis Cloud API unit tests
         ("solis", run_solis_tests, "Solis Cloud API tests (V1/V2 time window writes, change detection)", False),
         # External Temperature API tests
+        ("http_sync", run_http_sync_tests, "Synchronous aiohttp HTTP helper (replaces requests) and no-requests guard", False),
+        ("battery_temperature_fetch", test_battery_temperature_fetch, "Battery temperature history fetched for the prediction window only", False),
         ("temperature", test_temperature, "External Temperature API tests (initialization, zone.home fallback, timezone conversion, caching)", False),
         ("band_rate_text", test_band_rate_text, "Band rate text tests (flat rate, Cosy, Flux import/export)", False),
         ("rate_text_scan", test_rate_text_scan, "Rate text scan tests (multi-band min/max range grouping)", False),
