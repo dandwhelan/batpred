@@ -26,7 +26,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-import jwt as pyjwt
+import jwt_hs256
 
 from tests.test_infra import run_async
 from web_mcp import MCPServerWrapper, PredbatMCPServer
@@ -219,7 +219,7 @@ def _test_generate_access_token_claims(_my_predbat):
     server = make_mcp_server()
 
     token = server.generate_access_token("client-a", resource="http://predbat.local:8199", scopes=["mcp:read"])
-    payload = pyjwt.decode(token, server.jwt_secret, algorithms=["HS256"], audience="http://predbat.local:8199")
+    payload = jwt_hs256.decode(token, server.jwt_secret, audience="http://predbat.local:8199")
 
     if payload["sub"] != "client-a" or payload["client_id"] != "client-a":
         print("ERROR: the subject claims do not identify the client")
@@ -239,7 +239,7 @@ def _test_generate_access_token_claims(_my_predbat):
 
     # Omitting the scopes grants the full default set against the default audience
     token = server.generate_access_token("client-b")
-    payload = pyjwt.decode(token, server.jwt_secret, algorithms=["HS256"], audience="http://localhost:{}".format(MCP_PORT))
+    payload = jwt_hs256.decode(token, server.jwt_secret, audience="http://localhost:{}".format(MCP_PORT))
     if payload["scope"] != "mcp:read mcp:write mcp:control":
         print("ERROR: expected the default scopes, got {}".format(payload["scope"]))
         return 1
@@ -328,7 +328,7 @@ def _test_verify_access_token_rejects_wrong_type(_my_predbat):
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(days=1),
     }
-    token = pyjwt.encode(payload, server.jwt_secret, algorithm="HS256")
+    token = jwt_hs256.encode(payload, server.jwt_secret)
 
     if server.verify_access_token(token, expected_audience="http://predbat.local:8199") is not None:
         print("ERROR: a refresh token was accepted as an access token")

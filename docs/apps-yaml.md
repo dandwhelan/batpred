@@ -479,7 +479,6 @@ There is a single login with no different levels of access.
 - The `/api/login` request, used to set a session cookie when Predbat is behind a reverse proxy, is also not protected. It does not change any setting.
 - Pages added by plugins are only protected for changes (POST), not for viewing.
 
-
 ### plan_archive_days
 
 Predbat keeps a copy of the plan it made every half hour, and of every tariff comparison run, so you can look back at them later:
