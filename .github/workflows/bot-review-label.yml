@@ -26,6 +26,7 @@ jobs:
     # springfall2008/batpred, so in a fork this step can only fail with "'BOT_REVIEW' not found"
     if: ${{ !github.event.pull_request.draft && github.repository == 'springfall2008/batpred' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Add BOT_REVIEW unless it has been applied before
         run: |
