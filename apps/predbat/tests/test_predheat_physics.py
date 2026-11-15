@@ -91,6 +91,10 @@ class MockPredHeatBase:
             return [value]
         return value
 
+    def get_state_wrapper(self, entity_id=None, default=None, attribute=None, refresh=False, required_unit=None, raw=False):
+        """Return the default: no entity reports a unit here, so PredHeat keeps working in °C."""
+        return default
+
     def set_state_wrapper(self, entity_id, state, attributes={}, required_unit=None):
         """Capture a published entity so tests can assert on state and attributes."""
         self.states[entity_id] = {"state": state, "attributes": attributes}
@@ -396,9 +400,9 @@ def _test_get_historical_weighting(_my_predbat):
     print("Test: get_historical weighted average across previous days")
     ph, _base = make_predheat()
 
-    # Empty data short circuits to 0 before any weighting happens
-    if ph.get_historical({}, 0, default=20.0) != 0:
-        print("ERROR: empty data should return 0")
+    # Empty data short circuits to the caller's default before any weighting happens (#5767)
+    if ph.get_historical({}, 0, default=20.0) != 20.0:
+        print("ERROR: empty data should return the default")
         return 1
 
     # With minute_data_age of 0 no day qualifies, so the caller supplied default is used

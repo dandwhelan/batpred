@@ -3749,7 +3749,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
         polled = copy.deepcopy(inv.rest_data)
         polled["raw"]["invertor"]["discharge_target_soc_1"] = "4"
         dummy_rest.queue_rest_data(polled)
-        if not _rest_client(inv, dummy_rest).set_discharge_target(4):
+        if not run_async(_rest_client(inv, dummy_rest).set_discharge_target(4)):
             print("ERROR: {}: a string register reading the target back must count as a successful write".format(test_name))
             failed = True
         if inv.base.rest_discharge_target_unwritable.get(inv.id) is not None:
@@ -3758,7 +3758,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
 
         # A register that never reads the value back is reported on the first cycle
         setup_rest_case("0")
-        if _rest_client(inv, dummy_rest).set_discharge_target(4):
+        if run_async(_rest_client(inv, dummy_rest).set_discharge_target(4)):
             print("ERROR: {}: a write that never reads back must not be reported as successful".format(test_name))
             failed = True
         if not wrote_target(dummy_rest.get_commands()):
@@ -3770,7 +3770,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
 
         # ... and then left alone, rather than re-written and re-flagged every cycle
         inv.base.had_errors = False
-        _rest_client(inv, dummy_rest).set_discharge_target(4)
+        run_async(_rest_client(inv, dummy_rest).set_discharge_target(4))
         if wrote_target(dummy_rest.get_commands()):
             print("ERROR: {}: the same unwritable target must not be re-written every cycle".format(test_name))
             failed = True
@@ -3780,7 +3780,7 @@ def test_discharge_target_unreadable_register(test_name, ha, inv, dummy_rest):
 
         # A different target is a different question, so it is tried again
         inv.base.had_errors = False
-        _rest_client(inv, dummy_rest).set_discharge_target(10)
+        run_async(_rest_client(inv, dummy_rest).set_discharge_target(10))
         if not wrote_target(dummy_rest.get_commands()):
             print("ERROR: {}: a changed export target must be attempted again".format(test_name))
             failed = True
