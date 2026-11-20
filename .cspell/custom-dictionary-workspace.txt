@@ -39,6 +39,8 @@ armv
 ASHP
 asn
 asname
+aspectmode
+aspectratio
 astimezone
 asyncio
 atfork
@@ -54,6 +56,7 @@ axisbelow
 axvline
 axvspan
 Backfeed
+backgroundcolor
 backprop
 Backpropagate
 backpropagation
@@ -104,6 +107,8 @@ chg
 Chrg
 citem
 cloudfront
+cmax
+cmin
 cmpl
 cobat
 codepoint
@@ -112,6 +117,8 @@ Codespaces
 COEFF
 collaps
 collapsable
+colorbar
+colorscale
 compareform
 compresslevel
 configform
@@ -158,6 +165,7 @@ deadbanding
 deadbeefdeadbeef
 dedup
 dedupe
+deepseek
 dend
 denorm
 derate
@@ -189,6 +197,8 @@ dstart
 dtu
 dtype
 dwindow
+Dykstra
+Dykstra's
 eauth
 echargingpile
 ECONNRESET
@@ -307,6 +317,7 @@ GOELEC
 goldens
 gridcharge
 gridcode
+gridcolor
 gridconsumption
 gridconsumptionpower
 gridlines
@@ -318,6 +329,7 @@ guoxia
 guoxiatech
 GWMQTT
 HACS
+hacsfiles
 hadashboard
 hahistory
 hainterface
@@ -343,9 +355,11 @@ hhmm
 holdout
 homeassistant
 houseb
+hovertemplate
 htmlcov
 hultenvp
 husforbrukning
+hvac
 hypervolt
 iboost
 idag
@@ -552,6 +566,7 @@ pac
 packettypes
 paho
 parseable
+pava
 pbat
 pbgw
 pcharging
@@ -678,6 +693,7 @@ SFMB
 sg05lp1
 sharex
 SIGABRT
+showlegend
 SIGALRM
 sigcloud
 sigen
@@ -685,6 +701,7 @@ sigencloud
 sigenergy
 sigenstor
 SIGSEGV
+sizeof
 skynet
 Slee
 slugified
@@ -758,6 +775,9 @@ testname
 thirdparty
 threadpool
 threadpoolctl
+tickfont
+ticktext
+tickvals
 timea
 timeb
 timec
@@ -797,6 +817,7 @@ tzset
 ULP
 unasserted
 uncalibrated
+uncancellable
 uncompilable
 unconfigured
 underivable
@@ -832,6 +853,7 @@ Vallery
 varh
 venv
 Victron
+Viridis
 visibilitychange
 vlabel
 vvwwxxabcdefyyzzuu
@@ -863,6 +885,7 @@ xrtkq
 xtest
 xticks
 xxabcdefyy
+yanchor
 yaxis
 yaxistooltip
 yday
@@ -874,7 +897,9 @@ yuanzhi
 yyyymmdd
 zappi
 zappis
+zaxis
 zcat
+zeroline
 zigbee
 zoneinfo
 zoomin

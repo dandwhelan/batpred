@@ -77,6 +77,10 @@ class ActiveTestInverter:
         self.current_charge_limit = 0
         self.charge_rate_now = 1000
         self.discharge_rate_now = 1000
+        self.charge_rate_is_zero = False
+        self.discharge_rate_is_zero = False
+        self.balance_ceiling_charge = None
+        self.balance_ceiling_discharge = None
         self.battery_rate_min = 0
         self.inverter_limit = 1000
         self.export_limit = 1000
@@ -107,7 +111,8 @@ class ActiveTestInverter:
     def update_status(self, minutes_now, quiet=False):
         pass
 
-    def find_charge_curve(self, discharge=False):
+    def find_rate_grid_samples(self, discharge=False, days=None):
+        """No rate grid history (the grids gather evidence every cycle, auto mode or not)."""
         return None
 
     def get_current_charge_rate(self):
@@ -189,6 +194,7 @@ def run_execute_test(
     export_limits_best=None,
     car_slot=None,
     car_charging_now=False,
+    car_cancelled_for_export=None,
     soc_kw=0,
     soc_max=10,
     soc_max_array=None,
@@ -282,6 +288,7 @@ def run_execute_test(
     my_predbat.set_read_only_axle = set_read_only_axle
     my_predbat.car_charging_slots = [car_slot]
     my_predbat.car_charging_now = [car_charging_now]
+    my_predbat.car_cancelled_for_export = car_cancelled_for_export or {}
     my_predbat.num_cars = 1
     my_predbat.inverter_hybrid = inverter_hybrid
     my_predbat.set_charge_low_power = set_charge_low_power
@@ -1356,8 +1363,9 @@ def test_balance_release_is_also_silent(my_predbat):
             print("ERROR: the hold was not applied, so the release cannot be tested")
             failed = True
 
-        # Cycle two: the fleet is no longer fighting itself, so the hold is released
-        force_fleet(my_predbat, {0: 1000.0, 1: 1000.0}, grid=0.0)
+        # Cycle two: the fleet turns to soaking up PV surplus, so the latched cross-charge hold ends
+        # (it is kept for as long as the fleet still discharges - see test_cross_charge_hold_is_latched)
+        force_fleet(my_predbat, {0: -1000.0, 1: 0.0}, grid=1500.0)
         my_predbat.execute_plan()
         if my_predbat.inverters[1].charge_rate == 0:
             print("ERROR: the hold was not released, so the release cannot be tested")
@@ -1787,7 +1795,18 @@ def test_control_monitor_uses_written_rate(my_predbat):
     return failed
 
 
-EXPECTED_RATE_SETTINGS = ("battery_charge_power_curve", "battery_discharge_power_curve", "battery_temperature_charge_curve", "battery_temperature_discharge_curve", "inverter_hybrid")
+EXPECTED_RATE_SETTINGS = (
+    "battery_charge_power_curve",
+    "battery_discharge_power_curve",
+    "battery_temperature_charge_curve",
+    "battery_temperature_discharge_curve",
+    "inverter_hybrid",
+    "soc_max",
+    "battery_rate_max_charge",
+    "battery_rate_max_discharge",
+    "battery_charge_rate_grid",
+    "battery_discharge_rate_grid",
+)
 
 
 def expected_rate_inverter(my_predbat, soc_kw=5.0, soc_max=10.0):
@@ -1821,6 +1840,11 @@ def test_expected_battery_rates(my_predbat):
         my_predbat.battery_temperature_charge_curve = {}
         my_predbat.battery_temperature_discharge_curve = {}
         my_predbat.inverter_hybrid = True
+        # The rate grids are built for the fleet: here one battery the size of the test inverter
+        my_predbat.soc_max = 10.0
+        my_predbat.battery_rate_max_charge = 1000 / MINUTE_WATT
+        my_predbat.battery_rate_max_discharge = 1000 / MINUTE_WATT
+        my_predbat.apply_rate_grids()
 
         failed |= check("no limits", expected_rate_inverter(my_predbat), (1000, 1000))
 
@@ -1832,18 +1856,23 @@ def test_expected_battery_rates(my_predbat):
         # Taper near full: the curve allows 40% of max at this SoC
         my_predbat.battery_charge_power_curve = {percent: 0.4 for percent in range(101)}
         my_predbat.battery_discharge_power_curve = {percent: 0.5 for percent in range(101)}
+        my_predbat.apply_rate_grids()
         failed |= check("charge/discharge curve", expected_rate_inverter(my_predbat, soc_kw=9.5), (400, 500))
         my_predbat.battery_charge_power_curve = {}
         my_predbat.battery_discharge_power_curve = {}
+        my_predbat.apply_rate_grids()
 
         # Cold battery: 0C allows 0.05C on a 10kWh battery = 500W charge, 0.03C = 300W discharge
         my_predbat.battery_temperature_charge_curve = {0: 0.05}
         my_predbat.battery_temperature_discharge_curve = {0: 0.03}
+        my_predbat.apply_rate_grids()
         inverter = expected_rate_inverter(my_predbat)
         inverter.battery_temperature = 0
         failed |= check("temperature cap", inverter, (500, 300))
         my_predbat.battery_temperature_charge_curve = {}
         my_predbat.battery_temperature_discharge_curve = {}
+
+        my_predbat.apply_rate_grids()
 
         # Hybrid with 3kW of PV on a 3.6kW AC limit: only 600W of AC headroom left for the battery
         inverter = expected_rate_inverter(my_predbat)
@@ -1896,11 +1925,16 @@ def test_control_monitor_tapered_charge_not_failing(my_predbat):
         return my_predbat.control_monitor.total
 
     try:
+        my_predbat.soc_max = 10.0
+        my_predbat.battery_rate_max_charge = 1000 / MINUTE_WATT
+        my_predbat.battery_rate_max_discharge = 1000 / MINUTE_WATT
         my_predbat.battery_charge_power_curve = {}
+        my_predbat.apply_rate_grids()
         if run_slot() != 1:
             print("ERROR: setup - 150W against a flat-curve 1000W should fail, so this test proves nothing")
             failed = True
         my_predbat.battery_charge_power_curve = {percent: 0.4 for percent in range(101)}
+        my_predbat.apply_rate_grids()
         total = run_slot()
         if total != 0:
             print("ERROR: charging at the tapered rate was judged a failure, total {}".format(total))
@@ -4543,6 +4577,56 @@ def run_execute_tests(my_predbat):
         assert_status="Demand",
         assert_pause_discharge=False,
         car_slot=charge_window_best_no_slot,
+        assert_immediate_soc_target=100,
+        car_charging_from_battery=False,
+    )
+    if failed:
+        return failed
+
+    # A slot cancelled for an export is a car that will not charge, so it does not hold the battery; a car
+    # really drawing power (car_charging_now) still does, and so does a slot that is not the cancelled one
+    failed |= run_execute_test(
+        my_predbat,
+        "car_slot_cancelled_no_hold",
+        set_charge_window=True,
+        set_export_window=True,
+        soc_kw=100,
+        assert_status="Demand",
+        assert_pause_discharge=False,
+        car_slot=charge_window_best_slot,
+        car_cancelled_for_export={0: [(charge_window_best_slot[0]["start"], charge_window_best_slot[0]["end"])]},
+        car_charging_from_battery=False,
+    )
+    if failed:
+        return failed
+
+    failed |= run_execute_test(
+        my_predbat,
+        "car_slot_other_cancelled_holds",
+        set_charge_window=True,
+        set_export_window=True,
+        soc_kw=100,
+        assert_status="Hold for car",
+        assert_pause_discharge=True,
+        car_slot=charge_window_best_slot,
+        car_cancelled_for_export={0: [(charge_window_best_slot[0]["end"], charge_window_best_slot[0]["end"] + 30)]},
+        assert_immediate_soc_target=100,
+        car_charging_from_battery=False,
+    )
+    if failed:
+        return failed
+
+    failed |= run_execute_test(
+        my_predbat,
+        "car_now_hold_slot_cancelled",
+        set_charge_window=True,
+        set_export_window=True,
+        soc_kw=100,
+        assert_status="Hold for car",
+        assert_pause_discharge=True,
+        car_slot=charge_window_best_slot,
+        car_charging_now=True,
+        car_cancelled_for_export={0: [(charge_window_best_slot[0]["start"], charge_window_best_slot[0]["end"])]},
         assert_immediate_soc_target=100,
         car_charging_from_battery=False,
     )
