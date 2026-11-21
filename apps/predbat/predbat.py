@@ -36,7 +36,7 @@ import hass as hass
 import pytz
 import asyncio
 
-THIS_VERSION = "v717.0.0"
+THIS_VERSION = "v718.0.0"
 THIS_VERSION_DISPLAY = THIS_VERSION
 
 # Restart Predbat if a component stays unhealthy for this long
@@ -301,6 +301,16 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
             self.log("Error: get_history_wrapper - No HA interface available")
             return None
 
+        read_began = time.perf_counter()
+        try:
+            return self.get_history_uncounted(entity_id, days=days, required=required, tracked=tracked)
+        finally:
+            # Counted towards the per-cycle timing line; outside a cycle these are simply reset by the next one
+            self.cycle_history_seconds = getattr(self, "cycle_history_seconds", 0.0) + time.perf_counter() - read_began
+            self.cycle_history_reads = getattr(self, "cycle_history_reads", 0) + 1
+
+    def get_history_uncounted(self, entity_id, days=30, required=True, tracked=True):
+        """get_history_wrapper without the timing, from the ha_history cache when that component runs"""
         # If history cache is enabled then use it
         ha_history = None
         if self.components:
@@ -619,6 +629,16 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # does not cover octopus_intelligent_slot: Octopus goes on wiring its dispatch sensor there
         # as the record of completed dispatches, and Ohme adds octopus_intelligent_planned_slot (#5413).
         self.car_slot_owner = None
+        # Cars a charger component is force-holding off: car_n -> end of the hold (UTC, aware). Empty when none
+        self.car_force_hold_until = {}
+        # Cars whose slots Predbat planned this cycle (plan_car_charging), so an export may cancel them
+        self.car_planned_by_predbat = set()
+        # Cars a charger component can force-hold off: car_n -> the component's log name
+        self.car_force_holdable = {}
+        # (car_n, index) of the car slots an export may cancel this cycle, see calculate_plan()
+        self.car_cancel_keys = frozenset()
+        # car_n -> (start, end) of the car slots the plan cancels for an export, set by publish_car_plan()
+        self.car_cancelled_for_export = {}
         self.octopus_intelligent_charging = False
         self.octopus_intelligent_ignore_unplugged = False
         self.octopus_intelligent_consider_full = False
@@ -672,6 +692,15 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.balance_inverters_crosscharge = True
         self.balance_inverters_threshold_charge = 1.0
         self.balance_inverters_threshold_discharge = 1.0
+        # Balancing's own record for sensor.<prefix>_balance_inverters: what it held last pass, which learned
+        # ceilings existed, its last decisions, and [epoch, time, action, inverter, direction, detail] events
+        self.balance_held_previous = {}
+        self.balance_ceilings_previous = []
+        self.balance_last_decisions = None
+        self.balance_events = []
+        # Hour start (epoch) -> [holds, releases, cross-chargers caught, ceilings learned]; restored from the sensor once
+        self.balance_counts = {}
+        self.balance_restored = False
         self.load_inday_adjustment = 1.0
         self.holiday_load_scaling = 0.7
         self.set_read_only = True
@@ -684,12 +713,25 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.load_scaling_dynamic = {}
         self.battery_charge_power_curve = {}
         self.battery_charge_power_curve_default = {}
-        self.battery_charge_power_curve_auto = False
         self.battery_discharge_power_curve = {}
         self.battery_discharge_power_curve_default = {}
-        self.battery_discharge_power_curve_auto = False
-        self.computed_charge_curve = False
-        self.computed_discharge_curve = False
+        self.battery_rate_grid_auto = True  # battery_rate_grid_auto: learn the charge/discharge rate grids from history
+        self.battery_charge_rate_grid = None  # engine grid (battery_rate_grid.py) the plan reads the charge ceiling from
+        self.battery_discharge_rate_grid = None  # ... and the discharge ceiling
+        self.battery_rate_grid_manual = {}  # "charge"/"discharge" -> the grid built from the manual curves (fallback and prior)
+        self.battery_rate_grid_learned = {}  # "charge"/"discharge" -> the learned grid, or None
+        self.battery_rate_grid_samples = {}  # "charge"/"discharge" -> {day: [[soc %, temperature or None, rate], ...]}, kept in storage
+        self.battery_rate_grid_source = {}  # "charge"/"discharge" -> learned, manual or default
+        self.battery_rate_grid_updated = {}  # "charge"/"discharge" -> when the learned grid last changed (TIME_FORMAT string), kept in storage
+        self.battery_rate_grid_last_scan = {}  # "charge"/"discharge" -> time of the last history scan
+        self.battery_rate_grid_loaded = {}  # "charge"/"discharge" -> True once the stored samples have been read
+        self.battery_rate_grid_fit_key = {}  # "charge"/"discharge" -> the manual curves and battery size the learned grid was fitted with
+        self.battery_rate_grid_load_failures = {}  # "charge"/"discharge" -> times of cycles whose store reads all came back empty
+        self.battery_rate_grid_pending_save = {}  # "charge"/"discharge" -> True while a save waits for the store to read back
+        self.battery_rate_grid_last_success = {}  # "charge"/"discharge" -> time of the last scan whose history read succeeded
+        self.battery_rate_grid_last_save = {}  # "charge"/"discharge" -> time of the last successful save of the evidence
+        self.battery_rate_grid_history_days = 28  # battery_rate_grid_history_days: days a scan reads until one has succeeded
+        self.battery_rate_grid_scan_days = 2  # battery_rate_grid_scan_days: days a daily scan reads
         self.isCharging = False
         self.isCharging_Target = 0
         self.isExporting = False
@@ -780,6 +822,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.battery_temperature_discharge_curve = {}
         self.battery_temperature_history = {}
         self.battery_temperature_prediction = {}
+        self.battery_temperature_stuck_warned = None  # history sensor already warned as stuck at 0, so it is reported once
         self.alerts = []
         self.alert_active_keep = {}
         self.manual_soc_keep = {}
@@ -1548,11 +1591,14 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
 
         self.expose_config("active", True)
         self.fetch_config_options()
+        fetch_began = time.perf_counter()
         try:
             sensor_force_replan = self.fetch_sensor_data()
         except LoadSourceMissing:
             # Already logged and recorded; often a component that has not set load_today yet, so try again next cycle (#5092)
             return None
+        finally:
+            self.cycle_fetch_seconds = time.perf_counter() - fetch_began
 
         # Check if any sensor changes require a replan
         if sensor_force_replan:
@@ -1655,54 +1701,83 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         returns executed=False and does not run bookkeeping. Existing timer callers ignore it.
         """
 
+        # Always timed, for the per-cycle timing line; a caller's own dict also receives the totals
+        stage_timings = {} if timings is None else timings
+
         def timed(stage, call, *args, **kwargs):
             """Accumulate a stage's elapsed time, including an early return or exception."""
-            if timings is None:
-                return call(*args, **kwargs)
             began = time.perf_counter()
             try:
                 return call(*args, **kwargs)
             finally:
-                timings[stage] = timings.get(stage, 0.0) + time.perf_counter() - began
+                stage_timings[stage] = stage_timings.get(stage, 0.0) + time.perf_counter() - began
 
-        plan = timed("plan_s", self.plan_once, scheduled=scheduled, plan_at=plan_at)
-        if plan is None:
-            return None
-        recompute = plan["recomputed"]
+        self.cycle_fetch_seconds = None
+        self.cycle_history_seconds = 0.0
+        self.cycle_history_reads = 0
+        cycle_began = time.perf_counter()
+        try:
+            plan = timed("plan_s", self.plan_once, scheduled=scheduled, plan_at=plan_at)
+            if plan is None:
+                return None
+            recompute = plan["recomputed"]
 
-        # Execute the plan, re-read the inverter first if we had to calculate (as time passes during calculations)
-        executed = timed("execute_s", self.execute_once, refetch_inverter=recompute)
-        if executed is None:
-            return {"recomputed": recompute, "executed": False}
-        status, status_extra = executed
+            # Execute the plan, re-read the inverter first if we had to calculate (as time passes during calculations)
+            executed = timed("execute_s", self.execute_once, refetch_inverter=recompute)
+            if executed is None:
+                return {"recomputed": recompute, "executed": False}
+            status, status_extra = executed
 
-        # If the plan was not updated, and the time has expired lets update it now
-        if not recompute:
-            plan_age = self.now_utc - self.plan_last_updated
-            plan_age_minutes = plan_age.total_seconds() / 60.0
+            # If the plan was not updated, and the time has expired lets update it now
+            if not recompute:
+                plan_age = self.now_utc - self.plan_last_updated
+                plan_age_minutes = plan_age.total_seconds() / 60.0
 
-            if (plan_age_minutes + RUN_EVERY) > self.calculate_plan_every:
-                recompute = True
-                self.log("Will recompute the plan as it is now {} minutes old and will exceed the max age of {} minutes before the next run".format(dp1(plan_age_minutes), self.calculate_plan_every))
-                plan_random_delay = self.get_arg("plan_random_delay", 0)
-                if plan_random_delay > 0:
-                    delay = random.uniform(0, plan_random_delay)
-                    self.log("Adding a random delay of {:.1f} seconds before recalculating the plan....".format(delay))
-                    time.sleep(delay)
-                # Calculate an updated plan, fetch the inverter data again and execute the plan
-                timed("plan_s", self.calculate_plan, recompute=True)
-                if self.plan_valid:
-                    timed("plan_s", self.save_plan_if_changed)
-                executed = timed("execute_s", self.execute_once, refetch_inverter=True)
-                if executed is None:
-                    return {"recomputed": recompute, "executed": False}
-                status, status_extra = executed
-            else:
-                self.log("Will not recompute the plan, it is {} minutes old and max age is {} minutes".format(dp1(plan_age_minutes), self.calculate_plan_every))
+                if (plan_age_minutes + RUN_EVERY) > self.calculate_plan_every:
+                    recompute = True
+                    self.log("Will recompute the plan as it is now {} minutes old and will exceed the max age of {} minutes before the next run".format(dp1(plan_age_minutes), self.calculate_plan_every))
+                    plan_random_delay = self.get_arg("plan_random_delay", 0)
+                    if plan_random_delay > 0:
+                        delay = random.uniform(0, plan_random_delay)
+                        self.log("Adding a random delay of {:.1f} seconds before recalculating the plan....".format(delay))
+                        time.sleep(delay)
+                    # Calculate an updated plan, fetch the inverter data again and execute the plan
+                    timed("plan_s", self.calculate_plan, recompute=True)
+                    if self.plan_valid:
+                        timed("plan_s", self.save_plan_if_changed)
+                    executed = timed("execute_s", self.execute_once, refetch_inverter=True)
+                    if executed is None:
+                        return {"recomputed": recompute, "executed": False}
+                    status, status_extra = executed
+                else:
+                    self.log("Will not recompute the plan, it is {} minutes old and max age is {} minutes".format(dp1(plan_age_minutes), self.calculate_plan_every))
 
-        bookkeeping = scheduled if scheduled_bookkeeping is None else scheduled_bookkeeping
-        timed("execute_s", self._post_run_bookkeeping, status, status_extra, bookkeeping, recompute)
-        return {"recomputed": recompute, "executed": True}
+            bookkeeping = scheduled if scheduled_bookkeeping is None else scheduled_bookkeeping
+            timed("execute_s", self._post_run_bookkeeping, status, status_extra, bookkeeping, recompute)
+            return {"recomputed": recompute, "executed": True}
+        finally:
+            self.log_cycle_timing(time.perf_counter() - cycle_began, stage_timings)
+
+    def log_cycle_timing(self, total_seconds, stage_timings):
+        """
+        Log one line with where an update_pred() cycle spent its time.
+
+        fetch is fetch_sensor_data(), and history the reads of Home Assistant history inside the whole
+        cycle (from the ha_history cache when that component runs, otherwise from Home Assistant). fetch less
+        history is roughly the CPU spent turning history into per-minute series. plan excludes the fetch.
+        """
+        fetch = self.cycle_fetch_seconds
+        plan = stage_timings.get("plan_s", 0.0) - (fetch or 0.0)
+        self.log(
+            "Info: Cycle timing: total {:.2f}s - fetch {}, history reads {:.2f}s over {} calls, plan {:.2f}s, execute {:.2f}s".format(
+                total_seconds,
+                "{:.2f}s".format(fetch) if fetch is not None else "skipped",
+                self.cycle_history_seconds,
+                self.cycle_history_reads,
+                max(plan, 0.0),
+                stage_timings.get("execute_s", 0.0),
+            )
+        )
 
     def update_savings_totals(self, scheduled):
         """Publish savings totals, advancing the daily ledger only when scheduled and eligible.

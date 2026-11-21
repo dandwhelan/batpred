@@ -27,8 +27,12 @@ from marginal import MARGINAL_EXTRA_KWH_LEVELS, MARGINAL_EXTRA_KWH_LEVEL_NAMES, 
 from web import WebInterface
 
 # The tabs offered on the /charts page, plus the two shown only when ML load forecasting is on
-CHART_NAMES = ["Battery", "Power", "Cost", "Rates", "InDay", "PV", "PV7", "PVAccuracy", "Savings", "BatteryDegradation", "MarginalCosts"]
+CHART_NAMES = ["Battery", "Power", "Cost", "Rates", "InDay", "PV", "PV7", "Savings", "BatteryDegradation", "MarginalCosts"]
 ML_CHART_NAMES = ["LoadML", "LoadMLPower"]
+# Tabs that hand off to a page of their own before any series is assembled, so they are only checked for a branch
+STANDALONE_CHART_NAMES = ["Curves", "PVCalibration"]
+# Old chart names still accepted so saved links open the page that replaced them; they have no tab of their own
+LEGACY_CHART_NAMES = ["PVAccuracy"]
 
 # Every entity get_chart reads results from. The Battery chart's soc_kw_best is the one that gates
 # the whole function, but the rest have to carry data too or a branch can silently render nothing.
@@ -291,15 +295,18 @@ def test_chart_names_match_the_tabs_offered(my_predbat):
     source = open("../apps/predbat/web.py").read()
     tabs = set(re.findall(r"\./charts\?chart=(\w+)", source))
     branches = set(re.findall(r'chart == "(\w+)"', source))
+    # A page reached under more than one name is matched with chart in ("New", "Old")
+    for names in re.findall(r"chart in \(([^)]*)\):", source):
+        branches |= set(re.findall(r'"(\w+)"', names))
 
     missing_branch = sorted(tabs - branches)
     failed |= _check("charts: every tab has a branch", missing_branch, [])
 
-    unreachable = sorted(branches - tabs)
+    unreachable = sorted(branches - tabs - set(LEGACY_CHART_NAMES))
     failed |= _check("charts: every branch has a tab", unreachable, [])
 
     # And the list this test sweeps is the same set, so a new chart cannot be added untested
-    failed |= _check("charts: this test sweeps every tab", sorted(tabs), sorted(set(CHART_NAMES + ML_CHART_NAMES)))
+    failed |= _check("charts: this test sweeps every tab", sorted(tabs), sorted(set(CHART_NAMES + ML_CHART_NAMES + STANDALONE_CHART_NAMES)))
     return failed
 
 
