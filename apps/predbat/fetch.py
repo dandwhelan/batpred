@@ -458,11 +458,19 @@ class Fetch:
         """
         raw = 0.0
         subtract_energy = 0.0
+        # Run once per history bucket of every forecast, so the flags are read once per window and the raw
+        # read is get_from_incrementing() inlined: wrap a negative index into the day, then max(delta, 0)
+        subtract_car = self.car_charging_hold and self.car_charging_energy
+        subtract_iboost = self.iboost_energy_subtract and self.iboost_energy_today
+        get = data.get
         for idx in indices:
-            raw += self.get_from_incrementing(data, idx)
-            if self.car_charging_hold and self.car_charging_energy:
+            while idx < 0:
+                idx += 24 * 60
+            delta = get(idx, 0) - get(idx + 1, 0)
+            raw += 0 if 0 > delta else delta
+            if subtract_car:
                 subtract_energy += self.get_from_incrementing(self.car_charging_energy, idx)
-            if self.iboost_energy_subtract and self.iboost_energy_today:
+            if subtract_iboost:
                 subtract_energy += self.get_from_incrementing(self.iboost_energy_today, idx)
         load = max(0.0, raw - subtract_energy)
         if self.car_charging_hold and (not self.car_charging_energy) and (load >= (self.car_charging_threshold * step)):

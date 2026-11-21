@@ -19,6 +19,7 @@ and historical data extraction from incrementing energy counters.
 import math
 import re
 import array
+import itertools
 import ctypes
 import os
 from datetime import datetime, timedelta, timezone, time
@@ -241,7 +242,7 @@ class MinuteArray:
 
     def __init__(self, data, size):
         """Initialise from an existing dense dict, pre-allocated to size entries."""
-        self._data = array.array("d", (data.get(i, 0.0) for i in range(size)))
+        self._data = array.array("d", map(data.get, range(size), itertools.repeat(0.0, size)))
 
     def get(self, key, default=0.0):
         """Return the value at key, or default if key is out of range."""
@@ -1547,6 +1548,10 @@ def minute_data(
     # Bounds on the data we store
     minute_min = -days * 24 * 60
     minute_max = days * 24 * 60
+    # The same bounds as integers for range(): days can be fractional, and for a whole minute m,
+    # minute_min <= m <= minute_max holds exactly when range_min <= m < range_end
+    range_min = math.ceil(minute_min)
+    range_end = math.floor(minute_max) + 1
 
     # Check history is valid, if not empty return
     if not history:
@@ -1557,7 +1562,9 @@ def minute_data(
     # cost ~150k deepcopy calls on a plan cycle for the two calculate_yesterday calls alone, neither
     # of which asks for the filter. can_modify_history stays the caller's explicit opt-out on top.
     if clean_increment and backwards and not can_modify_history:
-        history = copy.deepcopy(history)  # Copy to avoid modifying original history
+        # Copy to avoid modifying the original history. The filter only ever replaces item[state_key], so a
+        # copy of each item is enough - a deepcopy of every item's attributes cost more than the filter itself
+        history = [item.copy() if isinstance(item, dict) else copy.deepcopy(item) for item in history]
 
     # Glitch filter, cleans glitches in the data and removes bad values, only for incrementing data
     if clean_increment and backwards:
@@ -1723,10 +1730,8 @@ def minute_data(
                         # then smooth out the drop.
                         if debug:
                             print(f"Found drop at minute {minute}, where {state} < {last_state} (near midnight = {near_midnight}). Padding to {minutes_to}")
-                        while minute < minutes_to:
-                            if minute >= minute_min and minute <= minute_max:
-                                mdata[minute] = state
-                            minute += 1
+                        for minute in range(max(minute, range_min), min(minutes_to, range_end)):
+                            mdata[minute] = state
                     else:
                         # Otherwise linearly interpolate between the two points, ignoring small dips in the data
                         if clean_increment and state < last_state:
@@ -1742,15 +1747,14 @@ def minute_data(
                                 print(f"    Increment larger than max {max_increment}, setting diff to 0.")
                             diff = 0
 
-                        index = 0
-                        while minute < minutes_to:
-                            if minute >= minute_min and minute <= minute_max:
-                                if backwards:
-                                    mdata[minute] = state - diff * index
-                                else:
-                                    mdata[minute] = last_state + diff * index
-                            minute += 1
-                            index += 1
+                        # index counts from the first minute of the span, including minutes clipped off by minute_min
+                        first_minute = minute
+                        if backwards:
+                            for minute in range(max(first_minute, range_min), min(minutes_to, range_end)):
+                                mdata[minute] = state - diff * (minute - first_minute)
+                        else:
+                            for minute in range(max(first_minute, range_min), min(minutes_to, range_end)):
+                                mdata[minute] = last_state + diff * (minute - first_minute)
                 else:
                     if backwards:
                         # In backwards (oldest-first) mode, this item's `state` became active AT `minutes`.
@@ -1758,20 +1762,15 @@ def minute_data(
                         # (minutes+1 to minutes_to inclusive) with `last_state` (the previous value).
                         if minutes >= minute_min and minutes <= minute_max:
                             mdata[minutes] = state
-                        minute = minutes + 1
-                        while minute <= minutes_to:
-                            if minute >= minute_min and minute <= minute_max:
-                                mdata[minute] = last_state
-                                if adjusted:
-                                    adata[minute] = True
-                            minute += 1
+                        for minute in range(max(minutes + 1, range_min), min(minutes_to + 1, range_end)):
+                            mdata[minute] = last_state
+                            if adjusted:
+                                adata[minute] = True
                     else:
-                        while minute < minutes_to:
-                            if minute >= minute_min and minute <= minute_max:
-                                mdata[minute] = state
-                                if adjusted:
-                                    adata[minute] = True
-                            minute += 1
+                        for minute in range(max(minute, range_min), min(minutes_to, range_end)):
+                            mdata[minute] = state
+                            if adjusted:
+                                adata[minute] = True
         else:
             if spreading:
                 for minute in range(minutes, minutes + spreading):
@@ -1812,44 +1811,36 @@ def minute_data(
                         if minute >= minute_min and minute <= minute_max:
                             mdata[minute] = dp4(last_sample_value + step * (last_sample_minute - minute))
 
+        # The loops below only visit 0 .. window_minutes - 1, which always lies inside minute_min .. minute_max,
+        # so they write without the bounds check the history loop above needs
+        window_minutes = 60 * 24 * days
+        window = range(window_minutes)
+
         # Fill from last sample until now
-        for minute in range(60 * 24 * days):
-            if backwards:
-                rindex = minute
-            else:
-                rindex = 60 * 24 * days - minute - 1
-
+        for rindex in window if backwards else reversed(window):
             if rindex not in mdata:
-                if rindex >= minute_min and rindex <= minute_max:
-                    mdata[rindex] = newest_state
+                mdata[rindex] = newest_state
             else:
                 break
 
-        # Find the first value
-        state = 0
-        first_index = None
-        for minute in range(60 * 24 * days):
-            if backwards:
-                rindex = 60 * 24 * days - minute - 1
-            else:
-                rindex = minute
-            if rindex in mdata:
-                state = mdata[rindex]
-                first_index = rindex
-                break
+        # Find the first value: the oldest stored minute inside the window (backwards) or the earliest (forwards).
+        # Taken from the keys rather than by scanning the window, which walked every minute of a window longer than
+        # the history behind it
+        in_window = filter(window.__contains__, mdata)
+        first_index = max(in_window, default=None) if backwards else min(in_window, default=None)
+        state = mdata[first_index] if first_index is not None else 0
 
-        # Fill gaps in the middle
-        for minute in range(60 * 24 * days):
-            if backwards:
-                rindex = 60 * 24 * days - minute - 1
-                if not pad and (first_index is None or rindex > first_index):
-                    # Older than the oldest record: not padded, the history does not reach that far
-                    continue
-            else:
-                rindex = minute
-            state = mdata.get(rindex, state)
-            if rindex >= minute_min and rindex <= minute_max:
-                mdata[rindex] = state
+        # Fill gaps in the middle, oldest first for backwards data
+        if backwards:
+            # Unless padding, minutes older than the oldest record are left out: the history does not reach that far
+            top = window_minutes - 1 if pad else (first_index if first_index is not None else -1)
+            fill_order = range(top, -1, -1)
+        else:
+            fill_order = window
+        get_state = mdata.get
+        for rindex in fill_order:
+            state = get_state(rindex, state)
+            mdata[rindex] = state
 
     # Reverse data with smoothing
     if clean_increment:
@@ -1867,9 +1858,10 @@ def minute_data(
     if adjust_key:
         io_adjusted = adata
 
-    # Rounding
-    for minute in mdata.keys():
-        mdata[minute] = dp4(mdata[minute])
+    # Rounding - round() inline as dp4() does, since this runs once per minute of every history series.
+    # Updated in place: on CPython that beats building a new dict, and only values change, never keys
+    for minute, value in mdata.items():
+        mdata[minute] = round(value, 4)
 
     return mdata, io_adjusted
 
@@ -1886,20 +1878,20 @@ def clean_incrementing_reverse(data, max_increment=0):
 
     increment = 0
     last = data[length - 1]
+    get = data.get
+    check_spikes = max_increment > 0
 
-    for index in range(length):
-        rindex = length - index - 1
-        nxt = data.get(rindex, last)
+    for rindex in range(length - 1, -1, -1):
+        nxt = get(rindex, last)
         if nxt >= last:
-            if (max_increment > 0) and ((nxt - last) > max_increment):
-                # Smooth out big spikes
-                pass
-            else:
+            # Big spikes are smoothed out by not counting them
+            if not (check_spikes and (nxt - last) > max_increment):
                 increment += nxt - last
             last = nxt
-        elif nxt < last:
-            if nxt <= 0 or ((last - nxt) >= (1.0)):
-                last = nxt
+        elif nxt < last and (nxt <= 0 or (last - nxt) >= 1.0):
+            # A drop is only followed when it is a reset to zero or at least 1 - smaller dips are noise.
+            # nxt < last is not implied by the branch above: neither holds when either value is NaN
+            last = nxt
         new_data[rindex] = increment
 
     return new_data

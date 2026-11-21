@@ -249,6 +249,7 @@ from tests.test_docs_solax_mode8 import test_docs_solax_mode8
 from tests.test_plan_card_soc_symbols import test_plan_card_soc_symbols
 from tests.test_minute_data_state import test_minute_data_state
 from tests.test_minute_data_copy import run_minute_data_copy_tests
+from tests.test_minute_data_fast_paths import run_minute_data_fast_paths_tests
 from tests.test_format_time_ago import test_format_time_ago
 from tests.test_str2time import test_str2time
 from tests.test_override_time import test_get_override_time_from_string
@@ -695,6 +696,7 @@ def main():
         ("history_attribute", test_history_attribute, "History attribute tests", False),
         ("previous_value_provider", test_previous_value_provider, "Previous value provider hook tests", False),
         ("minute_data_state", test_minute_data_state, "Minute data state tests", False),
+        ("minute_data_fast_paths", run_minute_data_fast_paths_tests, "History helper fast paths match the loops they replaced", False),
         ("minute_data_copy", run_minute_data_copy_tests, "Minute data history copying tests", False),
         ("format_time_ago", test_format_time_ago, "Format time ago tests", False),
         ("str2time", test_str2time, "Time string parsing tests", False),
