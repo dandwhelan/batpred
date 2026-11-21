@@ -758,6 +758,50 @@ def test_car_manual_soc_and_holiday_countdown(my_predbat):
     return failed
 
 
+def test_every_cycle_logs_its_timing(my_predbat):
+    """
+    Each cycle logs one "Cycle timing" line, including a cycle abandoned early, with the history reads it made counted.
+
+    The line is how a live install shows where a cycle goes (fetch, history reads, plan, execute), so it must appear
+    on every exit path and count reads made through get_history_wrapper inside the fetch.
+    """
+    print("*** Running test: every cycle logs its timing")
+    failed = 0
+    _reset_for_update_pred(my_predbat)
+    my_predbat.plan_valid = False
+    stages = Stages(my_predbat)
+    lines = []
+    original_fetch = stages.fetch_sensor_data
+
+    def fetch_with_history(*args, **kwargs):
+        """The recorded fetch, plus two history reads as the real one makes"""
+        my_predbat.get_history_wrapper("sensor.timing_probe", days=1, required=False)
+        my_predbat.get_history_wrapper("sensor.timing_probe", days=1, required=False)
+        return original_fetch(*args, **kwargs)
+
+    stages.fetch_sensor_data = fetch_with_history
+    with patch.object(my_predbat, "log", lambda message, *args, **kwargs: lines.append(message)):
+        _drive(my_predbat, stages)
+    timing = [line for line in lines if line.startswith("Info: Cycle timing:")]
+    failed |= _check("timing: one line per cycle", len(timing), 1)
+    if timing:
+        failed |= _check_true("timing: history reads counted ({})".format(timing[0]), "over 2 calls" in timing[0])
+        failed |= _check_true("timing: fetch measured ({})".format(timing[0]), "fetch skipped" not in timing[0])
+
+    # A cycle that stops in template mode never reaches the fetch, and still reports
+    lines.clear()
+    _reset_for_update_pred(my_predbat)
+    my_predbat.args["template"] = True
+    with patch.object(my_predbat, "log", lambda message, *args, **kwargs: lines.append(message)):
+        _drive(my_predbat, Stages(my_predbat))
+    my_predbat.args.pop("template", None)
+    timing = [line for line in lines if line.startswith("Info: Cycle timing:")]
+    failed |= _check("timing: logged when abandoned", len(timing), 1)
+    if timing:
+        failed |= _check_true("timing: abandoned cycle skipped the fetch ({})".format(timing[0]), "fetch skipped" in timing[0] and "over 0 calls" in timing[0])
+    return failed
+
+
 def run_update_pred_tests(my_predbat):
     """Run every update_pred and lifecycle test, returning non-zero if any failed."""
     print("**** Running update_pred tests ****")
@@ -795,6 +839,7 @@ def run_update_pred_tests(my_predbat):
             test_car_manual_soc_and_holiday_countdown,
             test_component_watchdog_restarts_after_sustained_failure,
             test_watchdog_history_ignores_old_and_corrupt_entries,
+            test_every_cycle_logs_its_timing,
         ):
             failed |= test(my_predbat)
     finally:

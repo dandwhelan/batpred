@@ -301,6 +301,16 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
             self.log("Error: get_history_wrapper - No HA interface available")
             return None
 
+        read_began = time.perf_counter()
+        try:
+            return self.get_history_uncounted(entity_id, days=days, required=required, tracked=tracked)
+        finally:
+            # Counted towards the per-cycle timing line; outside a cycle these are simply reset by the next one
+            self.cycle_history_seconds = getattr(self, "cycle_history_seconds", 0.0) + time.perf_counter() - read_began
+            self.cycle_history_reads = getattr(self, "cycle_history_reads", 0) + 1
+
+    def get_history_uncounted(self, entity_id, days=30, required=True, tracked=True):
+        """get_history_wrapper without the timing, from the ha_history cache when that component runs"""
         # If history cache is enabled then use it
         ha_history = None
         if self.components:
@@ -1581,11 +1591,14 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
 
         self.expose_config("active", True)
         self.fetch_config_options()
+        fetch_began = time.perf_counter()
         try:
             sensor_force_replan = self.fetch_sensor_data()
         except LoadSourceMissing:
             # Already logged and recorded; often a component that has not set load_today yet, so try again next cycle (#5092)
             return None
+        finally:
+            self.cycle_fetch_seconds = time.perf_counter() - fetch_began
 
         # Check if any sensor changes require a replan
         if sensor_force_replan:
@@ -1688,54 +1701,83 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         returns executed=False and does not run bookkeeping. Existing timer callers ignore it.
         """
 
+        # Always timed, for the per-cycle timing line; a caller's own dict also receives the totals
+        stage_timings = {} if timings is None else timings
+
         def timed(stage, call, *args, **kwargs):
             """Accumulate a stage's elapsed time, including an early return or exception."""
-            if timings is None:
-                return call(*args, **kwargs)
             began = time.perf_counter()
             try:
                 return call(*args, **kwargs)
             finally:
-                timings[stage] = timings.get(stage, 0.0) + time.perf_counter() - began
+                stage_timings[stage] = stage_timings.get(stage, 0.0) + time.perf_counter() - began
 
-        plan = timed("plan_s", self.plan_once, scheduled=scheduled, plan_at=plan_at)
-        if plan is None:
-            return None
-        recompute = plan["recomputed"]
+        self.cycle_fetch_seconds = None
+        self.cycle_history_seconds = 0.0
+        self.cycle_history_reads = 0
+        cycle_began = time.perf_counter()
+        try:
+            plan = timed("plan_s", self.plan_once, scheduled=scheduled, plan_at=plan_at)
+            if plan is None:
+                return None
+            recompute = plan["recomputed"]
 
-        # Execute the plan, re-read the inverter first if we had to calculate (as time passes during calculations)
-        executed = timed("execute_s", self.execute_once, refetch_inverter=recompute)
-        if executed is None:
-            return {"recomputed": recompute, "executed": False}
-        status, status_extra = executed
+            # Execute the plan, re-read the inverter first if we had to calculate (as time passes during calculations)
+            executed = timed("execute_s", self.execute_once, refetch_inverter=recompute)
+            if executed is None:
+                return {"recomputed": recompute, "executed": False}
+            status, status_extra = executed
 
-        # If the plan was not updated, and the time has expired lets update it now
-        if not recompute:
-            plan_age = self.now_utc - self.plan_last_updated
-            plan_age_minutes = plan_age.total_seconds() / 60.0
+            # If the plan was not updated, and the time has expired lets update it now
+            if not recompute:
+                plan_age = self.now_utc - self.plan_last_updated
+                plan_age_minutes = plan_age.total_seconds() / 60.0
 
-            if (plan_age_minutes + RUN_EVERY) > self.calculate_plan_every:
-                recompute = True
-                self.log("Will recompute the plan as it is now {} minutes old and will exceed the max age of {} minutes before the next run".format(dp1(plan_age_minutes), self.calculate_plan_every))
-                plan_random_delay = self.get_arg("plan_random_delay", 0)
-                if plan_random_delay > 0:
-                    delay = random.uniform(0, plan_random_delay)
-                    self.log("Adding a random delay of {:.1f} seconds before recalculating the plan....".format(delay))
-                    time.sleep(delay)
-                # Calculate an updated plan, fetch the inverter data again and execute the plan
-                timed("plan_s", self.calculate_plan, recompute=True)
-                if self.plan_valid:
-                    timed("plan_s", self.save_plan_if_changed)
-                executed = timed("execute_s", self.execute_once, refetch_inverter=True)
-                if executed is None:
-                    return {"recomputed": recompute, "executed": False}
-                status, status_extra = executed
-            else:
-                self.log("Will not recompute the plan, it is {} minutes old and max age is {} minutes".format(dp1(plan_age_minutes), self.calculate_plan_every))
+                if (plan_age_minutes + RUN_EVERY) > self.calculate_plan_every:
+                    recompute = True
+                    self.log("Will recompute the plan as it is now {} minutes old and will exceed the max age of {} minutes before the next run".format(dp1(plan_age_minutes), self.calculate_plan_every))
+                    plan_random_delay = self.get_arg("plan_random_delay", 0)
+                    if plan_random_delay > 0:
+                        delay = random.uniform(0, plan_random_delay)
+                        self.log("Adding a random delay of {:.1f} seconds before recalculating the plan....".format(delay))
+                        time.sleep(delay)
+                    # Calculate an updated plan, fetch the inverter data again and execute the plan
+                    timed("plan_s", self.calculate_plan, recompute=True)
+                    if self.plan_valid:
+                        timed("plan_s", self.save_plan_if_changed)
+                    executed = timed("execute_s", self.execute_once, refetch_inverter=True)
+                    if executed is None:
+                        return {"recomputed": recompute, "executed": False}
+                    status, status_extra = executed
+                else:
+                    self.log("Will not recompute the plan, it is {} minutes old and max age is {} minutes".format(dp1(plan_age_minutes), self.calculate_plan_every))
 
-        bookkeeping = scheduled if scheduled_bookkeeping is None else scheduled_bookkeeping
-        timed("execute_s", self._post_run_bookkeeping, status, status_extra, bookkeeping, recompute)
-        return {"recomputed": recompute, "executed": True}
+            bookkeeping = scheduled if scheduled_bookkeeping is None else scheduled_bookkeeping
+            timed("execute_s", self._post_run_bookkeeping, status, status_extra, bookkeeping, recompute)
+            return {"recomputed": recompute, "executed": True}
+        finally:
+            self.log_cycle_timing(time.perf_counter() - cycle_began, stage_timings)
+
+    def log_cycle_timing(self, total_seconds, stage_timings):
+        """
+        Log one line with where an update_pred() cycle spent its time.
+
+        fetch is fetch_sensor_data(), and history the reads of Home Assistant history inside the whole
+        cycle (from the ha_history cache when that component runs, otherwise from Home Assistant). fetch less
+        history is roughly the CPU spent turning history into per-minute series. plan excludes the fetch.
+        """
+        fetch = self.cycle_fetch_seconds
+        plan = stage_timings.get("plan_s", 0.0) - (fetch or 0.0)
+        self.log(
+            "Info: Cycle timing: total {:.2f}s - fetch {}, history reads {:.2f}s over {} calls, plan {:.2f}s, execute {:.2f}s".format(
+                total_seconds,
+                "{:.2f}s".format(fetch) if fetch is not None else "skipped",
+                self.cycle_history_seconds,
+                self.cycle_history_reads,
+                max(plan, 0.0),
+                stage_timings.get("execute_s", 0.0),
+            )
+        )
 
     def update_savings_totals(self, scheduled):
         """Publish savings totals, advancing the daily ledger only when scheduled and eligible.
