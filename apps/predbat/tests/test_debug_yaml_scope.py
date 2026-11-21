@@ -690,6 +690,51 @@ def test_c_emitter_matches_the_python_dump(my_predbat=None):
     return 1 if failed else 0
 
 
+def test_fast_scalar_loading_matches_pyyaml(my_predbat=None):
+    """
+    DEBUG_YAML_LOADER short-cuts plain decimal ints and floats and plain strings; every scalar must still load exactly as PyYAML loads it.
+
+    YAML 1.1 has traps right next to the short-cut forms: 010 is octal, 09 is a string, 1e5 is a string while
+    1.0e+5 is a float, 1_000 and 1:20 are ints, .inf and .nan are floats, and a quoted number is a string.
+    Each is loaded with the debug loader and with its plain base loader and compared by value and type.
+
+    Mutation check: widening PLAIN_YAML_INT to allow a leading zero, or PLAIN_YAML_FLOAT to allow an unsigned
+    exponent, fails this.
+    """
+    print("**** Testing the debug yaml loader's scalar short-cuts against PyYAML ****")
+    scalars = [
+        "0", "-0", "+0", "7", "-12", "+12", "010", "09", "0o17", "0x1F", "0b101", "1_000", "1:20", "-1:20",
+        "1.5", "-1.5", "+1.5", "1.", "0.0", "-0.0", "007.5", "1.5e+3", "1.5E-3", "1e5", "1.0e5", "1.0e+5", ".5", "1_0.5", "1:20.5",
+        ".inf", "-.inf", ".nan", "true", "False", "yes", "off", "null", "~", "", "2024-01-01", "2024-01-01 10:00:00",
+        "12abc", "1.2.3", "1 2", "'12'", '"1.5"', "!!str 12", "!!float 3", "!!int '7'",
+    ]
+    lines = ["v{}: {}".format(index, text) for index, text in enumerate(scalars)]
+    lines += ["anchor: &shared 42", "alias: *shared", "listed: [1, -2.5, '3', 010, x]"]
+    text = "\n".join(lines) + "\n"
+
+    base = userinterface.DEBUG_YAML_LOADER_BASE
+    expected = yaml.load(text, Loader=base)
+    loaded = yaml.load(text, Loader=DEBUG_YAML_LOADER)
+
+    failed = False
+    for key in expected:
+        want, got = expected[key], loaded.get(key)
+        if isinstance(want, float) and want != want:
+            matches = isinstance(got, float) and got != got
+        else:
+            matches = type(want) is type(got) and want == got
+        if not matches:
+            print("ERROR: {} loaded as {!r} ({}), PyYAML gives {!r} ({})".format(key, got, type(got).__name__, want, type(want).__name__))
+            failed = True
+    if list(loaded) != list(expected):
+        print("ERROR: key order differs")
+        failed = True
+
+    if not failed:
+        print("PASS: {} scalars load as PyYAML loads them".format(len(expected)))
+    return 1 if failed else 0
+
+
 def run_debug_yaml_scope_tests(my_predbat):
     """Run every create_debug_yaml() scope test, returning a non-zero count on failure."""
     failed = 0
@@ -705,4 +750,5 @@ def run_debug_yaml_scope_tests(my_predbat):
     failed += test_numpy_values_dump_as_plain_values(my_predbat)
     failed += test_old_dump_with_numpy_values_loads(my_predbat)
     failed += test_c_emitter_matches_the_python_dump(my_predbat)
+    failed += test_fast_scalar_loading_matches_pyyaml(my_predbat)
     return failed

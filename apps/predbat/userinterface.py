@@ -42,15 +42,64 @@ from const import (
 from config import APPS_SCHEMA, CONFIG_API_OVERRIDE, CURRENCY_UNITS
 from predbat import THIS_VERSION, THIS_VERSION_DISPLAY
 
-
 # A debug dump is several megabytes of deeply nested YAML and PyYAML's pure-Python parser spends
 # most of a replay's wall-clock on it - about 6s for a 5MB dump. CLoader pairs libyaml's C parser
 # with the very same (unsafe) Constructor that yaml.unsafe_load uses, so the Python-object tags
 # these dumps carry still load, roughly 6x faster. PyYAML is not always built with libyaml, so
 # fall back to the pure-Python loader when the C one is absent. The one difference from
 # yaml.unsafe_load is the RepeatLogGate constructor added below.
-class DebugYamlLoader(getattr(yaml, "CLoader", yaml.UnsafeLoader)):
+#
+# A dump is mostly plain numbers - over 600k scalars - and even with libyaml parsing, PyYAML resolves
+# each scalar's type against its regex table and builds it through the generic construct_object in
+# Python, which was about a third of a replay's load time. The loader short-cuts exactly the forms
+# below and hands anything else to PyYAML, so every value loads as before.
+YAML_INT_TAG = "tag:yaml.org,2002:int"
+YAML_FLOAT_TAG = "tag:yaml.org,2002:float"
+YAML_STR_TAG = "tag:yaml.org,2002:str"
+# Subsets of YAML 1.1's int and float patterns that int() and float() parse to the same value. A leading
+# zero is left to PyYAML (YAML 1.1 reads 010 as octal, and 09 as a string), as is a float exponent
+# without a sign, which YAML 1.1 does not treat as a float at all.
+PLAIN_YAML_INT = re.compile(r"[-+]?(?:0|[1-9][0-9]*)\Z").match
+PLAIN_YAML_FLOAT = re.compile(r"[-+]?[0-9]+\.[0-9]*(?:[eE][-+][0-9]+)?\Z").match
+
+
+DEBUG_YAML_LOADER_BASE = getattr(yaml, "CLoader", yaml.UnsafeLoader)
+
+
+class DebugYamlLoader(DEBUG_YAML_LOADER_BASE):
     """The loader read_debug_yaml() replays a debug dump with; see construct_empty_log_gate()."""
+
+    # The base methods, bound once: these run per scalar, where a super() lookup is measurable
+    base_resolve = DEBUG_YAML_LOADER_BASE.resolve
+    base_construct_object = DEBUG_YAML_LOADER_BASE.construct_object
+
+    def resolve(self, kind, value, implicit):
+        """Tag a plain decimal int or float scalar directly, and leave every other node to PyYAML's resolver"""
+        if kind is yaml.ScalarNode and implicit[0] and value:
+            if PLAIN_YAML_INT(value):
+                return YAML_INT_TAG
+            if PLAIN_YAML_FLOAT(value):
+                return YAML_FLOAT_TAG
+        return self.base_resolve(kind, value, implicit)
+
+    def construct_object(self, node, deep=False):
+        """
+        Build a plain str, int or float scalar directly, and anything else through PyYAML's construct_object.
+
+        These values are immutable, so skipping PyYAML's alias bookkeeping cannot be observed: an aliased
+        scalar loads as an equal value either way.
+        """
+        if node.__class__ is yaml.ScalarNode:
+            tag = node.tag
+            if tag == YAML_STR_TAG:
+                return node.value
+            if tag == YAML_INT_TAG:
+                if PLAIN_YAML_INT(node.value):
+                    return int(node.value)
+            elif tag == YAML_FLOAT_TAG:
+                if PLAIN_YAML_FLOAT(node.value):
+                    return float(node.value)
+        return self.base_construct_object(node, deep)
 
 
 def construct_empty_log_gate(loader, node):
