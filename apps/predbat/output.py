@@ -1617,6 +1617,7 @@ class Output:
 
             state = "&#128663;" if holding_for_car else soc_sym
             state_color = "#FFFFFF"
+            time_color = "#FFFFFF"
             if minute in self.manual_demand_times:
                 state += " &#8526;"
                 raw_state_override = "Manual demand"
@@ -1720,6 +1721,14 @@ class Output:
                         state = "Chrg&nearr;"
                         state_color = "#3AEE85"
                         raw_state = "Chrg"
+                        # Purple when the charge falls in an Octopus Intelligent dispatch slot
+                        # A gap of up to an hour between two dispatches is bridged, so the charge block reads as one
+                        iog_slots = [slot for car_slots in self.car_charging_slots for slot in car_slots if slot.get("octopus") and not slot.get("tariff_rate")]
+                        iog_before = any(slot["end"] <= minute_start and slot["end"] >= minute_start - 60 for slot in iog_slots)
+                        iog_after = any(slot["start"] >= minute_end and slot["start"] <= minute_end + 60 for slot in iog_slots)
+                        if any(slot["start"] < minute_end and slot["end"] > minute_start for slot in iog_slots) or (iog_before and iog_after):
+                            state_color = "#B48CF2"
+                            time_color = "#B48CF2"
                         rate_kw = self.get_charge_rate_kw(charge_window_n, minute_start, minute_relative_start, pv_forecast_minute_step)
                         reason_parts.append({"code": "charge_low_rate", "params": {"target_percent": limit_percent, "rate": rate_text_import, "rate_kw": "{:.2f}".format(rate_kw)}})
 
@@ -2019,7 +2028,7 @@ class Output:
 
             # Table row
             html += '<tr style="color:black">'
-            html += "<td id=time bgcolor=#FFFFFF>" + rate_start.strftime("%a %H:%M") + "</td>"
+            html += "<td id=time bgcolor=" + time_color + ">" + rate_start.strftime("%a %H:%M") + "</td>"
             if rate_split:
                 house_title = escape_html("House rate: {:.2f}{}/kWh".format(rate_value_import, self.currency_symbols[1]), quote=True)
                 car_title = escape_html("Car rate: {:.2f}{}/kWh (differs from house rate)".format(car_rate, self.currency_symbols[1]), quote=True)
@@ -2105,12 +2114,14 @@ class Output:
                 state_text2 = text_match.group(1) if text_match else ""
                 json_row["state_text"] = state_text1
                 json_row["state_color"] = state_color
+                json_row["time_color"] = time_color
                 json_row["state2_text"] = state_text2
                 json_row["state2_color"] = state2_color
             else:
                 # Single state cell
                 json_row["state_text"] = state
                 json_row["state_color"] = state_color
+                json_row["time_color"] = time_color
                 json_row["state2_text"] = None
                 json_row["state2_color"] = None
 

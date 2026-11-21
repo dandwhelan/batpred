@@ -7665,9 +7665,9 @@ def get_plan_renderer_js():
                 // Time cell with dropdown (if editable)
                 const timeDisplay = formatTimeDisplay(row.time);
                 if (editable) {
-                    html += renderTimeCell(row.time, timeDisplay, overrides, row.slot_minute);
+                    html += renderTimeCell(row.time, timeDisplay, overrides, row.slot_minute, row.time_color);
                 } else {
-                    html += `<td id=time bgcolor=#FFFFFF>${timeDisplay}</td>`;
+                    html += `<td id=time bgcolor=${row.time_color || '#FFFFFF'}>${timeDisplay}</td>`;
                 }
 
                 // Import rate - formatted bold if in charge window, italic with symbol if estimated.
@@ -7961,7 +7961,7 @@ def get_plan_renderer_js():
     }
 
     // Render time cell (simple, with subtle override-based highlighting; main state highlighting is in the state column)
-    function renderTimeCell(timeStr, timeDisplay, overrides, slotMinute) {
+    function renderTimeCell(timeStr, timeDisplay, overrides, slotMinute, timeColor) {
         const dropdownId = `dropdown_${dropdownCounter++}`;
         const minutesFromMidnight = slotMinute !== undefined ? slotMinute : getMinutesFromTimeString(timeStr);
 
@@ -7973,7 +7973,7 @@ def get_plan_renderer_js():
         );
 
         // Determine highlight color based on override type
-        let bgColor = '#FFFFFF';
+        let bgColor = timeColor || '#FFFFFF';
         let overrideClass = '';
 
         if (overrides.manual_charge_times.includes(minutesFromMidnight)) {
