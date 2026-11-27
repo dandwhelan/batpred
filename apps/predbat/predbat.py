@@ -691,6 +691,11 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.predbat_branch_warned = set()
         self.octopus_surplus = set()
         self.octopus_slots_planned = {}
+        # Completed Intelligent dispatches seen per car, and those still pricing the import of a car no sensor is wired to
+        # (see octopus_completed_kept_slots() in fetch.py)
+        self.octopus_completed_seen = {}
+        self.octopus_completed_kept = []
+        self.octopus_completed_kept_logged = 0
         self.octopus_slots_held = {}
         self.octopus_slots_held_until = {}
         self.octopus_slots_held_charged = {}

@@ -350,6 +350,7 @@ from tests.test_annual_tariff import test_annual_tariff
 from tests.test_octopus_domain import test_octopus_domain
 from tests.test_packed_rates import test_packed_rates
 from tests.test_rate_add_io_slots import run_rate_add_io_slots_tests
+from tests.test_octopus_completed_kept import run_octopus_completed_kept_tests
 from tests.test_iog_car_need_gate import run_iog_car_need_gate_tests
 from tests.test_iog_charge_skew import run_iog_charge_skew_tests
 from tests.test_iog_bird_in_hand import run_iog_bird_in_hand_tests
@@ -866,6 +867,7 @@ def main():
         ("octopus_slot_validation", run_octopus_slot_validation_tests, "apps.yaml validation accepts the blank car slot placeholders the Octopus wiring adds", False),
         ("car_max_rate", run_car_max_rate_tests, "car_charging_max_rate caps each car's charge rate, per car, held through sensor drop-outs, and against the Octopus raise", False),
         ("rate_add_io_slots", run_rate_add_io_slots_tests, "Rate add IO slots tests", False),
+        ("octopus_completed_kept", run_octopus_completed_kept_tests, "Completed Intelligent dispatches keep pricing their import once no dispatch sensor is wired", False),
         ("iog_car_need_gate", run_iog_car_need_gate_tests, "IOG car-need gate: no cheap rate for dispatch minutes no car needs", False),
         ("iog_charge_skew", run_iog_charge_skew_tests, "IOG earlier-charge skew characterisation tests", False),
         ("iog_bird_in_hand", run_iog_bird_in_hand_tests, "IOG bird-in-hand credit for a confirmed dispatch run", False),

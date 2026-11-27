@@ -1621,6 +1621,7 @@ class Fetch:
         self.low_rates_tariff = []
         self.high_export_rates = []
         self.octopus_slots = [[] for _ in range(self.num_cars)]
+        self.octopus_completed_kept = [[] for _ in range(self.num_cars)]
         self.cost_today_sofar = 0
         self.carbon_today_sofar = 0
         self.import_today = {}
@@ -1908,7 +1909,8 @@ class Fetch:
             # A packed copy: import_rates goes on to have the dispatch slots and sessions added to it
             self.rate_import_no_io = PackedRates.pack_copy(import_rates)
             for car_n in range(self.num_cars):
-                import_rates = self.rate_add_io_slots(car_n, import_rates, self.octopus_slots[car_n])
+                # Plus the completed dispatches still to be priced for a car no sensor is wired to (octopus_completed_kept_slots())
+                import_rates = self.rate_add_io_slots(car_n, import_rates, self.octopus_slots[car_n] + self.octopus_completed_kept[car_n])
             # Snapshot the tariff as it stands AFTER the IOG/SmartFlex dispatch overlay but BEFORE any
             # saving/free/Axle session distorts it (the overrides below are applied to it too).
             # rate_import_base is built further up
@@ -2204,6 +2206,49 @@ class Fetch:
             self.car_charging_soc_stale[car_n] = True
         self.log("Warn: Car {} SoC sensor last updated {} minutes ago (limit car_charging_soc_max_age {}) while plugged in - ignoring the reading of {}% and assuming a charge is needed".format(car_n, age, max_age, soc_percent))
         return 0.0
+
+    def octopus_completed_remember(self, car_n, completed):
+        """
+        Remember car_n's completed Intelligent dispatches, keyed by start, so they can go on pricing the import they covered
+        once its dispatch sensor is no longer wired (see octopus_completed_kept_slots()).
+        """
+        seen = self.octopus_completed_seen.setdefault(car_n, {})
+        for dispatch in completed:
+            if isinstance(dispatch, dict) and dispatch.get("start") and dispatch.get("end"):
+                seen[dispatch["start"]] = dict(dispatch)
+
+    def octopus_completed_kept_slots(self, wired_cars, save=True):
+        """
+        The remembered completed dispatches each car's import is still priced with, when no car's dispatch sensor is wired.
+
+        Suspending the only Intelligent device unwires its dispatch sensor (the Octopus component's automatic_config()), so
+        the car is planned as an ordinary one from then on. The dispatches it had already completed were still billed
+        off-peak, but today's cost is worked out again every cycle from the import rates, so without them a whole daytime
+        dispatch was re-billed at the peak rate for the rest of the day (23.7 kWh at 39p rather than 7.9p).
+
+        They only price the import: they are kept out of octopus_slots, so the car plan and which cars count as on
+        Intelligent are as before. Kept only while no car is wired, so no dispatch can be counted twice against the
+        account's cap, and only back to the start of yesterday, which covers today's cost and the cap period it starts in.
+        """
+        cutoff = self.midnight_utc - timedelta(days=1)
+        kept = [[] for _ in range(self.num_cars)]
+        held = 0
+        for car_n, seen in self.octopus_completed_seen.items():
+            for start in list(seen):
+                try:
+                    end = str2time(seen[start]["end"])
+                except (ValueError, TypeError):
+                    end = None
+                if end is None or end <= cutoff:
+                    del seen[start]
+            if not wired_cars and car_n < self.num_cars and seen:
+                kept[car_n] = sorted(seen.values(), key=lambda dispatch: dispatch["start"])
+                held += len(seen)
+        if save and held != self.octopus_completed_kept_logged:
+            self.octopus_completed_kept_logged = held
+            if held:
+                self.log("Octopus Intelligent: no dispatch sensor is wired, so the {} completed dispatches since {} still price the import they covered".format(held, cutoff.strftime(TIME_FORMAT)))
+        return kept
 
     def octopus_smart_control_off(self, car_n, save=True):
         """
@@ -2678,12 +2723,15 @@ class Fetch:
             # keeps this cycle's, as the record is the same whatever the tariff
             self.octopus_cap_idle = None
 
+        # The cars whose dispatch sensor is wired this cycle, for octopus_completed_kept_slots()
+        wired_cars = []
         if entity_id_list:
             # Process each car's intelligent slot configuration
             for car_n in range(min(len(entity_id_list), self.num_cars)):
                 entity_id = entity_id_list[car_n]
                 if not entity_id:
                     continue
+                wired_cars.append(car_n)
 
                 completed = []
                 planned = []
@@ -2749,6 +2797,7 @@ class Fetch:
                 # Completed and planned slots - merge from all cars
                 if completed:
                     self.octopus_slots[car_n] += completed
+                    self.octopus_completed_remember(car_n, completed)
                 planned_kept = self.smart_control_off_slots(planned, bool(planned_entity_id)) if smart_control_off else planned
                 planned_used = []
                 if planned_kept and (not self.octopus_intelligent_ignore_unplugged or self.car_charging_planned[car_n] or self.car_charging_now[car_n]):
@@ -2895,6 +2944,7 @@ class Fetch:
         else:
             # Disable octopus charging if we don't have the slot sensor
             self.octopus_intelligent_charging = False
+        self.octopus_completed_kept = self.octopus_completed_kept_slots(wired_cars, save=save)
 
         # Model-facing car charge limit (#4967). With octopus_intelligent_consider_full off (the
         # default) the prediction must trust the Octopus dispatch plan rather than modelling the car
