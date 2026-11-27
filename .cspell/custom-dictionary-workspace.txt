@@ -649,8 +649,8 @@ pypi
 pyproject
 pytest
 pythonhashseed
-pythonunbuffered
 PYTHONPATH
+pythonunbuffered
 pytz
 Quattro
 Qwen
@@ -838,11 +838,11 @@ tzdata
 tzfile
 tzpath
 tzset
-ULP
 udfff
 ufeff
 ufffe
 uffff
+ULP
 unasserted
 uncalibrated
 uncancellable

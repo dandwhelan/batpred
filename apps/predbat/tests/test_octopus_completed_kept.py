@@ -16,7 +16,7 @@ def run_octopus_completed_kept_tests(my_predbat):
     """
     Completed Intelligent dispatches go on pricing the import they covered once no dispatch sensor is wired.
 
-    Suspending the only Intelligent device unwires its dispatch sensor, and today's cost is rebuilt every cycle from the
+    Suspending the only Intelligent device clears its dispatch sensor from the car slots, and today's cost is rebuilt every cycle from the
     import rates, so the dispatches it had completed dropped out and a whole daytime dispatch was re-billed at the peak
     rate (23.7 kWh at 39p rather than 7.9p).
 

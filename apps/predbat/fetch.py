@@ -2221,7 +2221,7 @@ class Fetch:
         """
         The remembered completed dispatches each car's import is still priced with, when no car's dispatch sensor is wired.
 
-        Suspending the only Intelligent device unwires its dispatch sensor (the Octopus component's automatic_config()), so
+        Suspending the only Intelligent device clears its dispatch sensor from the car slots (the Octopus component's automatic_config()), so
         the car is planned as an ordinary one from then on. The dispatches it had already completed were still billed
         off-peak, but today's cost is worked out again every cycle from the import rates, so without them a whole daytime
         dispatch was re-billed at the peak rate for the rest of the day (23.7 kWh at 39p rather than 7.9p).
