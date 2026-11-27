@@ -84,6 +84,9 @@ class DatabaseEngine:
         self.db_cursor = self.db.cursor()
         # The cache maps entity names to row indexes in the open connection, so it
         # must not survive a reconnect
+        # SQLite keeps up to 2 MiB of pages per connection by default; the history reads here are
+        # indexed and small, so cap it at 256 KiB (a negative cache_size is in KiB)
+        self.db_cursor.execute("PRAGMA cache_size=-256")
         self.entity_id_cache = {}
 
     def _cleanup_db_retry(self):

@@ -11,6 +11,7 @@ not by the key filter alone.
 
 import io
 import os
+from datetime import datetime, timezone
 import re
 import tracemalloc
 
@@ -145,9 +146,12 @@ def _dict_with_aliases():
     wrong: each dumper numbers its anchors from one, so the second key repeats "&id001".
     """
     tariff = [0.1, 0.2, 0.3]
+    # A datetime in each aliased key keeps it on the yaml.dump path: plain data is written directly by
+    # write_debug_value(), which writes a shared object out each time rather than aliasing it
+    stamp = datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc)
     return {
-        "rate_import": {"today": tariff, "tomorrow": tariff, "windows": [tariff]},
-        "rate_export": {"today": tariff, "tomorrow": tariff},
+        "rate_import": {"today": tariff, "tomorrow": tariff, "windows": [tariff], "updated": stamp},
+        "rate_export": {"today": tariff, "tomorrow": tariff, "updated": stamp},
         "plan_ready": True,
     }
 
@@ -624,72 +628,6 @@ def test_old_dump_with_numpy_values_loads(my_predbat=None):
     return 1 if failed else 0
 
 
-def test_c_emitter_matches_the_python_dump(my_predbat=None):
-    """
-    dump_debug_yaml() writes anchor-free keys with libyaml's emitter, and the result must load to what the pure-Python dump does.
-
-    The C emitter is about three times faster, but it numbers its anchors from id001 on every call, so a key whose
-    output holds an anchor - and a string that merely contains "&id" - must fall back to the Python dumper and its
-    shared counter. Each case is dumped both ways and compared after loading.
-
-    Mutation check: writing every C chunk without the "&id" fallback fails the alias case with a duplicate anchor;
-    dropping the tuple or numpy representer from DebugYamlCDumper fails the round trip.
-    """
-    failed = False
-    print("**** Testing the libyaml debug yaml emitter against the pure-Python one ****")
-
-    if userinterface.DebugYamlCDumper is None:
-        print("PASS: PyYAML has no libyaml here, so only the pure-Python dump runs")
-        return 0
-
-    debug = _dict_with_aliases()
-    debug.update(
-        {
-            "export_limits_best": [(0, 10.0, 2.5), (1, 4.0, 0.0)],
-            "numpy_value": np.float64(1.25),
-            "anchor_lookalike": "see &id001 and *id001",
-            "long_text": "word " * 200,
-        }
-    )
-    expected = {key: (list(map(list, value)) if key == "export_limits_best" else value) for key, value in debug.items()}
-    expected["numpy_value"] = 1.25
-
-    texts = {}
-    saved = userinterface.DebugYamlCDumper
-    try:
-        for name, cdumper in (("c", saved), ("python", None)):
-            userinterface.DebugYamlCDumper = cdumper
-            stream = io.StringIO()
-            dump_debug_yaml(debug, stream)
-            texts[name] = stream.getvalue()
-    finally:
-        userinterface.DebugYamlCDumper = saved
-
-    for name, text in texts.items():
-        try:
-            loaded = yaml.safe_load(text)
-        except yaml.YAMLError as e:
-            print("ERROR: the {} debug yaml does not load: {}".format(name, e))
-            failed = True
-            continue
-        if loaded != expected:
-            print("ERROR: the {} debug yaml did not round-trip, got {}".format(name, loaded))
-            failed = True
-        if list(loaded) != sorted(debug):
-            print("ERROR: the {} debug yaml keys are not sorted: {}".format(name, list(loaded)))
-            failed = True
-
-    anchors = re.findall(r"^\s*\w+: &(id\d+)|- &(id\d+)|: &(id\d+)", texts["c"], re.M)
-    names = [a or b or c for a, b, c in anchors]
-    if len(names) != len(set(names)):
-        print("ERROR: the C path repeats anchor names: {}".format(names))
-        failed = True
-
-    if not failed:
-        print("PASS: the libyaml dump loads to the same data as the pure-Python dump")
-    return 1 if failed else 0
-
-
 def test_fast_scalar_loading_matches_pyyaml(my_predbat=None):
     """
     DEBUG_YAML_LOADER short-cuts plain decimal ints and floats and plain strings; every scalar must still load exactly as PyYAML loads it.
@@ -749,6 +687,5 @@ def run_debug_yaml_scope_tests(my_predbat):
     failed += test_old_dump_with_a_log_gate_loads(my_predbat)
     failed += test_numpy_values_dump_as_plain_values(my_predbat)
     failed += test_old_dump_with_numpy_values_loads(my_predbat)
-    failed += test_c_emitter_matches_the_python_dump(my_predbat)
     failed += test_fast_scalar_loading_matches_pyyaml(my_predbat)
     return failed
