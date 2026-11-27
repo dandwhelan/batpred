@@ -82,6 +82,14 @@ class DatabaseEngine:
         """
         self.db = sqlite3.connect(self.db_path)
         self.db_cursor = self.db.cursor()
+        # SQLite keeps up to 2 MiB of pages per connection by default; the history reads here are
+        # indexed and small, so cap it at 256 KiB (a negative cache_size is in KiB). It is only a
+        # memory saving, so a database that cannot take it - a damaged file reads "file is not a
+        # database" here - is left for _cleanup_db_retry() to check and quarantine, as before
+        try:
+            self.db_cursor.execute("PRAGMA cache_size=-256")
+        except sqlite3.DatabaseError as error:
+            self.log("Warn: db_engine: Unable to cap the SQLite page cache: {}".format(error))
         # The cache maps entity names to row indexes in the open connection, so it
         # must not survive a reconnect
         self.entity_id_cache = {}
