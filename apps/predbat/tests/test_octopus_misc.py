@@ -31,6 +31,7 @@ async def test_octopus_misc(my_predbat):
     failed += test_octopus_automatic_config_num_cars(my_predbat)
     failed += test_octopus_automatic_config_slot_order(my_predbat)
     failed += test_octopus_automatic_config_clears_removed_devices(my_predbat)
+    failed += test_octopus_automatic_config_keeps_suspended_device(my_predbat)
     failed += await test_octopus_automatic_config_rewire(my_predbat)
     failed += test_octopus_automatic_config_respects_slot_claim(my_predbat)
     failed += await test_octopus_run(my_predbat)
@@ -2382,6 +2383,98 @@ def test_octopus_automatic_config_clears_removed_devices(my_predbat):
         return 1
     else:
         print("\n**** ✅ Octopus automatic_config device removal tests PASSED ****")
+        return 0
+
+
+def test_octopus_automatic_config_keeps_suspended_device(my_predbat):
+    """
+    Test that a wired device that is suspended keeps its dispatch sensor wired, as the record of its completed dispatches.
+
+    Suspending the lone Intelligent device (SMART_CONTROL_OFF) used to clear the car slot wiring. The
+    dispatches it had already completed that day then dropped out of the import rates, and cost_today
+    re-priced a whole daytime dispatch at the peak rate - 23.7 kWh at 39p rather than 7.9p.
+
+    Tests:
+    - Test 1: Suspending the wired device keeps the slot wiring
+    - Test 2: run()'s change check settles - the held wiring is stable while the device stays suspended
+    - Test 3: Un-suspending it wires it normally again
+    - Test 4: A suspended device leaving the account clears the wiring
+    - Test 5: A device suspended before it was ever wired is still not wired
+    """
+    print("\n**** Running Octopus automatic_config suspended device tests ****")
+    failed = False
+
+    original_args = dict(my_predbat.args)
+
+    print("\n*** Test 1: Suspending the wired device keeps the slot wiring ***")
+    api = OctopusAPI(my_predbat, key="test-api-key", account_id="test-account", automatic=False)
+    api.intelligent_devices = {"device-aaa1": {"suspended": False}}
+    api.automatic_config(["import"])
+    wired = my_predbat.args.get("octopus_intelligent_slot")
+    if not wired:
+        print("ERROR: Expected the device to be wired before it is suspended")
+        failed = True
+
+    api.intelligent_devices["device-aaa1"]["suspended"] = True
+    api.automatic_config(["import"])
+    if my_predbat.args.get("octopus_intelligent_slot") != wired:
+        print(f"ERROR: Expected the wiring {wired} to be kept for the suspended device, got {my_predbat.args.get('octopus_intelligent_slot')}")
+        failed = True
+    else:
+        print("PASS: Suspended device keeps its dispatch sensor wired")
+
+    print("\n*** Test 2: The held wiring is stable while the device stays suspended ***")
+    if api.get_active_intelligent_device_ids() != api.intelligent_config_devices:
+        print(f"ERROR: Active device set {api.get_active_intelligent_device_ids()} differs from the recorded {api.intelligent_config_devices}, run() would re-wire every cycle")
+        failed = True
+    elif api.suspended_wired_devices(api.intelligent_devices) != api.intelligent_wired_devices:
+        print(f"ERROR: Held devices {api.intelligent_wired_devices} differ from {api.suspended_wired_devices(api.intelligent_devices)}, run() would re-wire every cycle")
+        failed = True
+    else:
+        print("PASS: Nothing for run() to re-wire while the device stays suspended")
+
+    print("\n*** Test 3: Un-suspending it wires it normally again ***")
+    api.intelligent_devices["device-aaa1"]["suspended"] = False
+    api.automatic_config(["import"])
+    if my_predbat.args.get("octopus_intelligent_slot") != wired or api.intelligent_wired_devices != ["device-aaa1"]:
+        print(f"ERROR: Expected {wired} wired to device-aaa1 again, got {my_predbat.args.get('octopus_intelligent_slot')} / {api.intelligent_wired_devices}")
+        failed = True
+    else:
+        print("PASS: Un-suspended device is wired again")
+
+    print("\n*** Test 4: A suspended device leaving the account clears the wiring ***")
+    api.intelligent_devices["device-aaa1"]["suspended"] = True
+    api.automatic_config(["import"])
+    api.intelligent_devices = {}
+    if api.suspended_wired_devices(api.intelligent_devices) == api.intelligent_wired_devices:
+        print("ERROR: run() would not notice the held device leaving the account")
+        failed = True
+    api.automatic_config(["import"])
+    if my_predbat.args.get("octopus_intelligent_slot") or api.intelligent_wired_devices:
+        print(f"ERROR: Expected the wiring cleared, got {my_predbat.args.get('octopus_intelligent_slot')} / {api.intelligent_wired_devices}")
+        failed = True
+    else:
+        print("PASS: Wiring cleared once the suspended device is gone")
+
+    print("\n*** Test 5: A device suspended before it was ever wired is still not wired ***")
+    my_predbat.args.pop("octopus_intelligent_slot", None)
+    api5 = OctopusAPI(my_predbat, key="test-api-key", account_id="test-account", automatic=False)
+    api5.intelligent_devices = {"device-old": {"suspended": True}}
+    api5.automatic_config(["import"])
+    if my_predbat.args.get("octopus_intelligent_slot"):
+        print(f"ERROR: Expected a never-wired suspended device to stay unwired, got {my_predbat.args.get('octopus_intelligent_slot')}")
+        failed = True
+    else:
+        print("PASS: Never-wired suspended device is not wired")
+
+    my_predbat.args.clear()
+    my_predbat.args.update(original_args)
+
+    if failed:
+        print("\n**** ❌ Octopus automatic_config suspended device tests FAILED ****")
+        return 1
+    else:
+        print("\n**** ✅ Octopus automatic_config suspended device tests PASSED ****")
         return 0
 
 

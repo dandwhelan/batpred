@@ -811,6 +811,9 @@ class OctopusAPI(ComponentBase):
         # The slot entities automatic_config() last wired the car slots to, so it only ever clears wiring
         # that is still its own - None until it has wired any
         self.intelligent_config_slots = None
+        # The devices the car slot wiring above points at. Unlike intelligent_config_devices this keeps a
+        # device that has since been suspended while the wiring is held for it (see suspended_wired_devices())
+        self.intelligent_wired_devices = []
         # The car slot a lone Intelligent device's dispatches were last wired to (see intelligent_dispatch_car())
         self.intelligent_config_car = None
         # Per device: did the last dispatch poll fail, so the planned dispatches are the last known ones
@@ -1005,6 +1008,11 @@ class OctopusAPI(ComponentBase):
                 # favour of another. Left alone, the car slots keep watching the old device's
                 # dispatch sensor and Predbat never sees the live IOG window (issue #4648).
                 self.log("OctopusAPI: Live intelligent devices changed from {} to {}, reconfiguring car slots".format(self.intelligent_config_devices, active_devices))
+                self.automatic_config(self.tariffs)
+                self.refresh_discovery()
+            elif sensor_due and not active_devices and self.intelligent_wired_devices and self.suspended_wired_devices(self.intelligent_devices) != self.intelligent_wired_devices:
+                # The wiring was being held for a suspended device and that device has now left the account
+                self.log("OctopusAPI: Suspended intelligent devices {} are no longer on the account, reconfiguring car slots".format(self.intelligent_wired_devices))
                 self.automatic_config(self.tariffs)
                 self.refresh_discovery()
             elif len(active_devices) == 1 and getattr(self.base, "car_slot_owner", None) in (None, "octopus") and self.intelligent_dispatch_car() != self.intelligent_config_car:
@@ -1545,6 +1553,19 @@ class OctopusAPI(ComponentBase):
             return False
         return self.is_intelligent_go_tariff(self.tariffs.get("import", {}).get("tariffCode"))
 
+    def suspended_wired_devices(self, devices):
+        """
+        The devices the car slots are wired to that are still on the account, but suspended.
+
+        Suspending a device (smart charging paused in the app, or by Octopus, with currentState
+        SMART_CONTROL_OFF) does not undo the dispatches it has already completed today. Those are
+        billed at the off-peak rate, and the dispatch sensor is where Predbat reads them from to
+        price the import it has already counted. So the wiring is kept for such a device rather
+        than cleared: clearing it re-priced a whole daytime dispatch at the peak rate in cost_today.
+        Its planned dispatches are already dropped while smart control is off (planned_dispatches_for_state()).
+        """
+        return sorted(device_id for device_id in self.intelligent_wired_devices if devices.get(device_id, {}).get("suspended"))
+
     def get_active_intelligent_device_ids(self):
         """
         Return the sorted list of live intelligent device IDs that are not suspended.
@@ -1919,12 +1940,20 @@ class OctopusAPI(ComponentBase):
         # completed slots from while supplying the planned ones itself (#5413).
         slot_owner = getattr(self.base, "car_slot_owner", None)
         other_owner = bool(slot_owner and slot_owner != "octopus")
-        if devices or self.intelligent_config_devices:
+        active_devices = {device_id: device for device_id, device in devices.items() if not device.get("suspended")}
+        current_slots = self.get_arg("octopus_intelligent_slot", default=None, indirect=False)
+        # Every device the slots were wired to is suspended but still on the account: keep the wiring, as long
+        # as it is still what was put there from here (see suspended_wired_devices())
+        retained_devices = []
+        if not active_devices and self.intelligent_config_slots and current_slots == self.intelligent_config_slots:
+            retained_devices = self.suspended_wired_devices(devices)
+        if retained_devices:
+            self.log("OctopusAPI: Intelligent devices {} are suspended, keeping the car slot wiring so the dispatches they completed stay priced off-peak".format(retained_devices))
+        elif devices or self.intelligent_config_devices or self.intelligent_wired_devices:
             # Suspended devices (e.g. an old/decommissioned charger still linked to the Octopus
             # account) aren't actively charging, so exclude them from the entity lists and from
             # the num_cars count below - otherwise a stale suspended device can silently push
             # num_cars past what Predbat actually supports (see fetch_config_options' clamp).
-            active_devices = {device_id: device for device_id, device in devices.items() if not device.get("suspended")}
             slot_list = []
             ready_list = []
             limit_list = []
@@ -1952,9 +1981,9 @@ class OctopusAPI(ComponentBase):
             # was put there from here. The slots are not claimed while nothing owns them, so another
             # component may have wired them to something of its own since: the Ohme component does,
             # to the charger's own schedule, when the device it was following is suspended
-            current_slots = self.get_arg("octopus_intelligent_slot", default=None, indirect=False)
             if not active_devices and (not self.intelligent_config_slots or current_slots != self.intelligent_config_slots):
                 self.log("OctopusAPI: No active intelligent devices, and the car slot wiring is not from here - leaving it alone")
+                self.intelligent_wired_devices = []
             else:
                 self.set_arg("octopus_intelligent_slot", slot_list)
                 if other_owner:
@@ -1963,6 +1992,7 @@ class OctopusAPI(ComponentBase):
                     self.set_arg("octopus_ready_time", ready_list)
                     self.set_arg("octopus_charge_limit", limit_list)
                 self.intelligent_config_slots = slot_list
+                self.intelligent_wired_devices = sorted(active_devices)
                 # Increase number of cars if we have more active devices than the current limit to ensure all devices can be configured
                 num_cars = self.get_arg("num_cars", 0)
                 if num_cars < len(slot_list):
