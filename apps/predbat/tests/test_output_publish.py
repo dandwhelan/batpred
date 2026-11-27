@@ -72,7 +72,9 @@ class OutputFixture:
             "dashboard_values",
             "car_charging_slots",
             "low_rates",
+            "low_rates_tariff",
             "high_export_rates",
+            "high_export_rates_tariff",
             "forecast_minutes",
         ):
             self.saved[name] = getattr(base, name, None)
@@ -93,6 +95,7 @@ class OutputFixture:
         base.low_rates = []
         base.low_rates_tariff = []
         base.high_export_rates = []
+        base.high_export_rates_tariff = []
         base.dashboard_values = {}
         return base
 
@@ -329,13 +332,16 @@ def _test_publish_rates_import_none(my_predbat):
 
 
 def _test_publish_rates_export(my_predbat):
-    """The best export window is published as start/end/cost entities."""
+    """The tariff's best export windows are published as start/end/cost entities."""
     print("Test: publish_rates_export publishes the high export windows")
     with OutputFixture(my_predbat) as base:
-        base.high_export_rates = [
+        # The tariff's own windows are what is published (upstream #6332). In automatic mode the optimiser's
+        # high_export_rates offers every export rate, the cheapest included, so it is set apart here to show it is not read
+        base.high_export_rates_tariff = [
             {"start": MINUTES_NOW + 60, "end": MINUTES_NOW + 120, "average": 30.0},
             {"start": MINUTES_NOW + 300, "end": MINUTES_NOW + 360, "average": 22.0},
         ]
+        base.high_export_rates = base.high_export_rates_tariff + [{"start": MINUTES_NOW + 600, "end": MINUTES_NOW + 660, "average": 5.0}]
         base.publish_rates_export()
 
         for entity in ("predbat.high_rate_export_start", "predbat.high_rate_export_end", "predbat.high_rate_export_cost"):

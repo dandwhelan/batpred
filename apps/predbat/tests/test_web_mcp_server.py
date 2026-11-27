@@ -377,13 +377,27 @@ def _test_canonical_server_uri(_my_predbat):
 
 
 def _test_authorize_get_requires_parameters(_my_predbat):
-    """A GET authorize request missing OAuth parameters redirects with an error."""
+    """
+    A GET authorize request missing OAuth parameters is refused.
+
+    With no client_id the error is shown on Predbat's own page rather than redirected to, as an unchecked
+    redirect_uri would make the endpoint an open redirect (upstream #6292). With a client_id, a missing
+    response_type still goes back to the client as invalid_request.
+    """
     print("Test: the authorize endpoint rejects a request with missing parameters")
     server = make_mcp_server()
 
     request = MockRequest(method="GET", query={"redirect_uri": "https://client/callback", "state": "xyz"})
     response = run_async(server.oauth_authorize(request))
+    if response.status != 400:
+        print("ERROR: expected an error page with no client_id, got {}".format(response.status))
+        return 1
+    if getattr(response, "location", None):
+        print("ERROR: expected no redirect with no client_id, got {}".format(response.location))
+        return 1
 
+    request = MockRequest(method="GET", query={"client_id": "client-a", "redirect_uri": "https://client/callback", "state": "xyz"})
+    response = run_async(server.oauth_authorize(request))
     if response.status != 302:
         print("ERROR: expected a redirect, got {}".format(response.status))
         return 1
@@ -524,9 +538,16 @@ def _test_authorize_post_missing_parameters(_my_predbat):
     print("Test: the authorize endpoint rejects a POST with missing parameters")
     server = make_mcp_server()
 
+    # No redirect_uri at all: an error page, never a redirect (upstream #6292)
     request = MockRequest(method="POST", post_data={"secret": MCP_SECRET})
     response = run_async(server.oauth_authorize(request))
+    if response.status != 400:
+        print("ERROR: expected an error page with no redirect_uri, got {}".format(response.status))
+        return 1
 
+    # A usable redirect_uri but no response_type: the login page again, with the missing parameter message
+    request = MockRequest(method="POST", post_data={"secret": MCP_SECRET, "client_id": "client-a", "redirect_uri": "https://client/callback"})
+    response = run_async(server.oauth_authorize(request))
     if response.status != 200:
         print("ERROR: expected the login page, got {}".format(response.status))
         return 1
