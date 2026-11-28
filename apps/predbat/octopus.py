@@ -2265,6 +2265,14 @@ class OctopusAPI(ComponentBase):
                 else:
                     self.log("OctopusAPI: No active intelligent devices remain, cleared the car slot wiring")
 
+        # The dispatch sensors of suspended devices, whose completed dispatches fetch goes on pricing the import with
+        # while no car is wired - from the first cycle after a restart too, when there is no wiring to have seen them
+        # by (see octopus_completed_kept_slots() in fetch.py). Set whatever the slot wiring did, as it is only read
+        # then, and a sensor no car is wired to cannot be counted twice
+        suspended_slots = [self.get_entity_name("binary_sensor", "intelligent_dispatch", index=self.device_id_to_index_suffix(device_id)) for device_id in sorted(devices) if devices[device_id].get("suspended")]
+        if suspended_slots or self.get_arg("octopus_intelligent_completed_slot", default=None, indirect=False):
+            self.set_arg("octopus_intelligent_completed_slot", suspended_slots)
+
         # Record the device set this wiring was built for so run() can spot it changing later
         self.intelligent_config_devices = self.get_active_intelligent_device_ids()
         # And who held the car slots, so run() can wire them once another component lets go of them

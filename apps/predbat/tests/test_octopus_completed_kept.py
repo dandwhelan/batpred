@@ -10,6 +10,7 @@
 
 from datetime import timedelta
 from const import TIME_FORMAT
+from octopus import OctopusAPI
 
 
 def run_octopus_completed_kept_tests(my_predbat):
@@ -25,11 +26,15 @@ def run_octopus_completed_kept_tests(my_predbat):
     - Test 2: With no car wired, the remembered dispatches since yesterday are kept for their car
     - Test 3: The kept dispatches price their minutes at the low rate, and leave other minutes alone
     - Test 4: Nothing remembered keeps nothing, and the kept list has an entry per car
+    - Test 5: After a restart with the device already suspended, its sensor in octopus_intelligent_completed_slot supplies them
+    - Test 6: The Octopus component lists suspended devices' dispatch sensors in octopus_intelligent_completed_slot, and clears it
     """
     print("**** Running Octopus completed-dispatch keep tests ****")
     failed = False
     saved = {name: getattr(my_predbat, name) for name in ("octopus_completed_seen", "octopus_completed_kept", "octopus_completed_kept_logged", "octopus_slots", "io_adjusted", "rate_min_base", "forecast_minutes")}
     saved_args = {key: my_predbat.args[key] for key in ("octopus_slot_low_rate", "octopus_slot_max") if key in my_predbat.args}
+    # automatic_config() in Test 6 rewires the Octopus args, so all of them are put back afterwards
+    saved_all_args = dict(my_predbat.args)
     midnight = my_predbat.midnight_utc
 
     def dispatch(start_minutes, end_minutes, kwh):
@@ -80,7 +85,40 @@ def run_octopus_completed_kept_tests(my_predbat):
         if kept != [[] for _ in range(my_predbat.num_cars)]:
             print("ERROR: Expected an empty kept list per car, got {}".format(kept))
             failed = True
+
+        print("*** Test 5: a suspended device's own sensor supplies them after a restart ***")
+        sensor = "binary_sensor.predbat_octopus_test_intelligent_dispatch_b0b09"
+        my_predbat.ha_interface.dummy_items[sensor] = {"state": "off", "completed_dispatches": [today, old], "planned_dispatches": [dispatch(23 * 60 + 30, 24 * 60, 7.0)]}
+        my_predbat.args["octopus_intelligent_completed_slot"] = [sensor]
+        my_predbat.octopus_completed_seen = {}
+        my_predbat.octopus_completed_read_unwired()
+        kept = my_predbat.octopus_completed_kept_slots([])
+        if kept[0] != [today]:
+            print("ERROR: Expected only today's completed dispatch from the suspended device's sensor, got {}".format(kept))
+            failed = True
+        kept = my_predbat.octopus_completed_kept_slots([0])
+        if any(kept):
+            print("ERROR: Expected nothing kept once a car is wired again, got {}".format(kept))
+            failed = True
+
+        print("*** Test 6: the Octopus component lists and clears the suspended devices' sensors ***")
+        api = OctopusAPI(my_predbat, key="test-api-key", account_id="test-account", automatic=False)
+        api.intelligent_devices = {"device-live1": {"suspended": False}, "device-held2": {"suspended": True}}
+        api.automatic_config(["import"])
+        listed = my_predbat.args.get("octopus_intelligent_completed_slot")
+        held_sensor = api.get_entity_name("binary_sensor", "intelligent_dispatch", index=api.device_id_to_index_suffix("device-held2"))
+        if listed != [held_sensor]:
+            print("ERROR: Expected only the suspended device's sensor {} listed, got {}".format(held_sensor, listed))
+            failed = True
+        api.intelligent_devices["device-held2"]["suspended"] = False
+        api.automatic_config(["import"])
+        if my_predbat.args.get("octopus_intelligent_completed_slot") != []:
+            print("ERROR: Expected the list cleared once no device is suspended, got {}".format(my_predbat.args.get("octopus_intelligent_completed_slot")))
+            failed = True
     finally:
+        my_predbat.ha_interface.dummy_items.pop("binary_sensor.predbat_octopus_test_intelligent_dispatch_b0b09", None)
+        my_predbat.args.clear()
+        my_predbat.args.update(saved_all_args)
         for name, value in saved.items():
             setattr(my_predbat, name, value)
         for key in ("octopus_slot_low_rate", "octopus_slot_max"):
