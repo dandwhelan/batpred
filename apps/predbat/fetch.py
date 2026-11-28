@@ -2217,6 +2217,28 @@ class Fetch:
             if isinstance(dispatch, dict) and dispatch.get("start") and dispatch.get("end"):
                 seen[dispatch["start"]] = dict(dispatch)
 
+    def octopus_completed_read_unwired(self):
+        """
+        Remember the completed dispatches on the sensors in octopus_intelligent_completed_slot, for a cycle with no car wired.
+
+        Those are the dispatch sensors of suspended devices, which the Octopus component lists. Predbat starting with
+        the device already suspended never wires it, so without this the day's completed dispatches were never seen and
+        were priced at the peak rate until midnight. Only the completed list is read: nothing on these sensors plans
+        the car or adds a dispatch still to come. They are put down to car 0, as the import they price is the house's.
+        """
+        config = self.get_arg("octopus_intelligent_completed_slot", default=None, indirect=False)
+        if not config:
+            return
+        for entity_id in config if isinstance(config, list) else [config]:
+            if not entity_id or not isinstance(entity_id, str):
+                continue
+            try:
+                completed = self.get_state_wrapper(entity_id=entity_id, attribute="completed_dispatches") or self.get_state_wrapper(entity_id=entity_id, attribute="completedDispatches")
+            except (ValueError, TypeError):
+                completed = None
+            if isinstance(completed, list):
+                self.octopus_completed_remember(0, completed)
+
     def octopus_completed_kept_slots(self, wired_cars, save=True):
         """
         The remembered completed dispatches each car's import is still priced with, when no car's dispatch sensor is wired.
@@ -2229,6 +2251,7 @@ class Fetch:
         They only price the import: they are kept out of octopus_slots, so the car plan and which cars count as on
         Intelligent are as before. Kept only while no car is wired, so no dispatch can be counted twice against the
         account's cap, and only back to the start of yesterday, which covers today's cost and the cap period it starts in.
+        After a restart with the device already suspended they come from its own sensor (octopus_completed_read_unwired()).
         """
         cutoff = self.midnight_utc - timedelta(days=1)
         kept = [[] for _ in range(self.num_cars)]
@@ -2944,6 +2967,8 @@ class Fetch:
         else:
             # Disable octopus charging if we don't have the slot sensor
             self.octopus_intelligent_charging = False
+        if not wired_cars:
+            self.octopus_completed_read_unwired()
         self.octopus_completed_kept = self.octopus_completed_kept_slots(wired_cars, save=save)
 
         # Model-facing car charge limit (#4967). With octopus_intelligent_consider_full off (the
